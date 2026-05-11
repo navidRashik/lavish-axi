@@ -23,7 +23,7 @@
 <h3 align="center">For when a rich editor is not rich enough.</h3>
 
 <p align="center">
-  <video src="lavish-editor-marketing/renders/lavish-editor-marketing.mp4" controls muted playsinline></video>
+  <img alt="Lavish Editor demo" src="lavish-editor-marketing/renders/lavish-editor-marketing.gif" width="960" />
 </p>
 
 HTML is the new markdown. Lavish is the new editor for your HTML artifacts.
