@@ -4,7 +4,7 @@
   "description": "HTML is the new markdown. Lavish is the new editor for your HTML artifacts.",
   "type": "module",
   "bin": {
-    "lavish-axi": "./dist/cli.mjs"
+    "lavish-axi": "dist/cli.mjs"
   },
   "files": [
     "dist",
@@ -53,12 +53,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/kunchenguid/lavish.git"
+    "url": "git+https://github.com/kunchenguid/lavish-axi.git"
   },
   "bugs": {
-    "url": "https://github.com/kunchenguid/lavish/issues"
+    "url": "https://github.com/kunchenguid/lavish-axi/issues"
   },
-  "homepage": "https://github.com/kunchenguid/lavish#readme",
+  "homepage": "https://github.com/kunchenguid/lavish-axi#readme",
   "publishConfig": {
     "access": "public"
   }
