@@ -2,7 +2,7 @@
 
 > _For when a rich editor is not rich enough._
 
-This is the brand & design system for **Lavish** — an in-browser agentic editor that opens agent-generated HTML artifacts in a local browser, lets a human pinpoint elements, annotate them, and ship that feedback back to the agent.
+This is the brand & design system for **Lavish** — an in-browser agentic editor that opens agent-generated HTML artifacts in a local browser, lets a human pinpoint elements or selected text, annotate them, and ship that feedback back to the agent.
 
 The product feels like a quiet reading room with a brass lamp: dark ink walls, a single warm gold accent, generous type set in a literary serif beside a clean technical sans. Elegant. Minimal. Futuristic. _Lavish._
 
@@ -23,10 +23,10 @@ No Figma file or slide deck was provided. Slide templates were therefore **not**
 
 Lavish is one product wearing two hats:
 
-| Surface                | Audience                                                                  | What it looks like                                                                                                                                                                                       |
-| ---------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **CLI** (`lavish-axi`) | Coding agents (Claude Code, Cursor, etc.) and the developers driving them | A long-polling, AXI-shaped command surface. Output is TOON-serialized. Not visually designed — it's _agent-ergonomic._                                                                                   |
-| **Editor chrome**      | Humans reviewing an agent's HTML artifact                                 | A two-pane browser app: the artifact in an iframe on the left, a conversation panel on the right, a session bar across the top. Click any element in the artifact, queue a prompt, send it to the agent. |
+| Surface                | Audience                                                                  | What it looks like                                                                                                                                                                                                      |
+| ---------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CLI** (`lavish-axi`) | Coding agents (Claude Code, Cursor, etc.) and the developers driving them | A long-polling, AXI-shaped command surface. Output is TOON-serialized. Not visually designed — it's _agent-ergonomic._                                                                                                  |
+| **Editor chrome**      | Humans reviewing an agent's HTML artifact                                 | A two-pane browser app: the artifact in an iframe on the left, a conversation panel on the right, a session bar across the top. Click any element or select text in the artifact, queue a prompt, send it to the agent. |
 
 The brand surface this design system serves is **the Editor chrome.** Marketing, docs, decks and screenshots should all feel like they came from the same hand that drew the chrome.
 
@@ -105,7 +105,7 @@ If new copy doesn't sit comfortably next to those lines, rewrite it.
 
 - **Ink** — the canvas. `#0f1115` for the artifact frame surround and composer input. `#11141a` for side panels. `#171a21` for the top bar. Never pure black: the warm cream type would feel clinical against it.
 - **Cream** — the type. `#f7f3ea`. A paper-warm off-white that reads at low contrast as candlelit, at high contrast as legible. All primary type sits on ink in cream.
-- **Brass** — the single accent. `#f4c95d`. Used for the primary CTA, the annotation outline (2px solid, 2px offset), the brand mark moment, and absolutely nothing else. Its ink-on-brass pair is `#17130a` — a deep almost-black that keeps the gold from feeling like a neon button.
+- **Brass** — the single accent. `#f4c95d`. Used for the primary CTA, the annotation outline (2px solid, 2px offset), selected-text range highlights (`rgba(244,201,93,.28)` with a `rgba(244,201,93,.45)` stroke), the brand mark moment, and absolutely nothing else. Its ink-on-brass pair is `#17130a` — a deep almost-black that keeps the gold from feeling like a neon button.
 - **Sage** — the _agent_ signal. `#172419` background, `#315f3a` border, `#8fe39e` for the working spinner. Used only on agent chat bubbles and the working indicator.
 - **Amber** — the _user_ signal. `#25230f` background, `#5d4d1b` border. Used only on user chat bubbles and queued-prompt pills.
 - **Rust** — the danger signal. `#f06464`. Reserved for _End Session_ and destructive confirmations.
@@ -185,7 +185,7 @@ A "card" in Lavish is a slab of `#11141a` or `#1c212b` with a 1px border (`#3037
 - The top bar is fixed at 56px, full-width, sticky.
 - The side conversation panel is a fixed 360px wide on the right.
 - The artifact takes the remainder.
-- The annotation card is positioned relative to the clicked element via `getBoundingClientRect()` and clamped 12px from any viewport edge.
+- The annotation card is positioned relative to the clicked element or selected text range via `getBoundingClientRect()` and clamped 12px from any viewport edge.
 - The chat input lives at the bottom of the side panel; pills (queued prompts) sit _above_ the textarea, never inside it.
 
 ---
@@ -194,7 +194,7 @@ A "card" in Lavish is a slab of `#11141a` or `#1c212b` with a 1px border (`#3037
 
 **Lavish ships almost no icons.** Read that twice.
 
-The product chrome you've seen has exactly **one** glyph: the spinner. Buttons are _labeled_, not iconified — "Send to Agent," "End Session," "Annotation: On." The annotation card opens with `<h2>Annotate &lt;div&gt;</h2>` — the _tag name_ is the icon. This is intentional and on-brand: in a literary product, words are the iconography.
+The product chrome you've seen has exactly **one** glyph: the spinner. Buttons are _labeled_, not iconified — "Send to Agent," "End Session," "Annotation: On." The annotation card opens with `<h2>Annotate &lt;div&gt;</h2>` for elements or `Annotate text` for selected text — the _target name_ is the icon. This is intentional and on-brand: in a literary product, words are the iconography.
 
 When iconography is genuinely needed (marketing, an empty state, a settings menu in a future surface), follow these rules:
 
