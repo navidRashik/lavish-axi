@@ -522,6 +522,134 @@
         font-size: 15px;
       }
 
+      .architecture-diagram {
+        display: grid;
+        gap: 16px;
+        margin-top: 22px;
+      }
+
+      .diagram-flow {
+        display: grid;
+        grid-template-columns: 1fr 34px 1fr 34px 1fr;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .diagram-node {
+        min-height: 74px;
+        border: 1px solid #d7c9ad;
+        border-radius: 13px;
+        background: #fff7e8;
+        padding: 13px;
+      }
+
+      .diagram-node strong {
+        display: block;
+        color: #2b251b;
+        font-size: 16px;
+      }
+
+      .diagram-node span {
+        display: block;
+        margin-top: 5px;
+        color: #625847;
+        font-family: var(--font-mono);
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .diagram-node.warn {
+        border-color: #b98b37;
+        background: #fff0bf;
+      }
+
+      .diagram-node.updated {
+        border-color: var(--brass-500);
+        background: #2b251b;
+      }
+
+      .diagram-node.updated strong,
+      .diagram-node.updated span {
+        color: var(--cream-50);
+      }
+
+      .diagram-arrow {
+        color: #9b8444;
+        font-family: var(--font-mono);
+        font-size: 24px;
+        text-align: center;
+      }
+
+      .design-note {
+        border-left: 3px solid var(--brass-500);
+        padding-left: 12px;
+        color: #514a3e;
+        font-size: 14px;
+        line-height: 1.4;
+      }
+
+      .plan-after {
+        position: absolute;
+        inset: 78px 24px 20px;
+        opacity: 0;
+      }
+
+      .decision-list {
+        display: grid;
+        gap: 12px;
+        margin-top: 24px;
+      }
+
+      .decision-item {
+        border: 1px solid #d7c9ad;
+        border-radius: 12px;
+        background: #fff7e8;
+        padding: 12px 14px;
+        color: #514a3e;
+        font-size: 15px;
+        line-height: 1.4;
+      }
+
+      .decision-item strong {
+        display: block;
+        color: #2b251b;
+        font-size: 13px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .change-token {
+        position: relative;
+        display: inline-block;
+        min-width: 154px;
+        color: #2b251b;
+        font-family: var(--font-mono);
+        font-weight: 700;
+      }
+
+      .after-token {
+        position: absolute;
+        left: 0;
+        top: 0;
+        opacity: 0;
+        color: var(--brass-500);
+      }
+
+      .failure-list {
+        display: grid;
+        gap: 9px;
+        margin-top: 12px;
+      }
+
+      .failure-item {
+        border-left: 3px solid var(--brass-500);
+        padding-left: 10px;
+        color: #514a3e;
+        font-size: 14px;
+        line-height: 1.35;
+        opacity: 0;
+      }
+
       .bar-chart {
         display: grid;
         gap: 13px;
@@ -669,6 +797,30 @@
         border-color: var(--ink-900);
       }
 
+      .dark-report .diagram-node,
+      .dark-report .decision-item {
+        background: var(--ink-600);
+        border-color: var(--steel-600);
+      }
+
+      .dark-report .diagram-node strong,
+      .dark-report .decision-item strong,
+      .dark-report .change-token {
+        color: var(--cream-100);
+      }
+
+      .dark-report .diagram-node span,
+      .dark-report .design-note,
+      .dark-report .decision-item,
+      .dark-report .failure-item {
+        color: var(--steel-200);
+      }
+
+      .dark-report .diagram-node.warn {
+        background: var(--ink-600);
+        border-color: var(--brass-500);
+      }
+
       .outline-target,
       .outline-target-2 {
         position: absolute;
@@ -745,7 +897,7 @@
       .working {
         position: absolute;
         left: 16px;
-        top: 268px;
+        top: 340px;
         width: 292px;
         align-self: flex-start;
         display: flex;
@@ -1018,15 +1170,11 @@
               <div class="terminal-conversation">
                 <div class="terminal-turn user">
                   <span class="terminal-speaker">Kun</span>
-                  The main issue is that screenshots lose the exact element people are talking about.
+                  We need the agent to think through the approach before writing code.
                 </div>
                 <div class="terminal-turn">
                   <span class="terminal-speaker">Agent</span>
-                  Agreed. The pattern is precise review, local browser context, and a short feedback loop.
-                </div>
-                <div class="terminal-turn user">
-                  <span class="terminal-speaker">Kun</span>
-                  Right. We need a visual that makes that loop obvious.
+                  I can turn the discussion into a reviewable browser artifact with a diagram and concrete decisions.
                 </div>
               </div>
               <div class="prompt-line">
@@ -1034,17 +1182,17 @@
                 <span id="typed-prompt" class="prompt-text"></span>
               </div>
               <div class="agent-log">
-                <div id="log-1" class="command">Thinking through the research notes...</div>
-                <div id="log-2">Creating <span class="file">/var/folders/tmp/infographic.html</span></div>
-                <div id="log-3" class="command">$ lavish-axi /var/folders/tmp/infographic.html</div>
+                <div id="log-1" class="command">Drafting the technical approach...</div>
+                <div id="log-2">Creating <span class="file">/var/folders/tmp/design-plan.html</span></div>
+                <div id="log-3" class="command">$ lavish-axi /var/folders/tmp/design-plan.html</div>
                 <div id="log-4" class="green">Opened in Lavish Editor.</div>
               </div>
             </div>
           </div>
         </div>
         <div class="caption-block">
-          <h1>Ask the agent for something visual.</h1>
-          <p>Then let the artifact open where it can actually be reviewed.</p>
+          <h1>Ask the agent for an artifact.</h1>
+          <p>Then review and collaborate on it in the browser.</p>
         </div>
       </section>
 
@@ -1060,7 +1208,7 @@
                 <div class="brand"><span class="lavish">Lavish</span><span class="editor-word">Editor</span></div>
                 <div class="divider"></div>
                 <div class="file-wrap">
-                  <div class="file-input">/var/folders/tmp/infographic.html</div>
+                  <div class="file-input">/var/folders/tmp/design-plan.html</div>
                   <button class="copy-button">Copy Path</button>
                 </div>
                 <button class="button secondary">Annotation: On</button>
@@ -1071,88 +1219,80 @@
                   <div class="report-page">
                     <div class="report-header">
                       <div>
-                        <div class="eyebrow" style="color: #756a58">Mock user research report</div>
-                        <h2>What teams need from artifact review</h2>
+                        <div class="eyebrow" style="color: #756a58">Technical plan</div>
+                        <h2>Element-specific feedback without screenshots</h2>
                         <p>
-                          Thirty interviews across design, engineering, and product teams. The work is clear. The
-                          handoff is not.
+                          Proposed approach for sending precise browser annotations from a reviewed HTML artifact back
+                          to the coding agent.
                         </p>
                       </div>
                       <div class="report-date">
-                        <span>Q2 study</span><span>42 participants</span><span>Remote sessions</span>
-                      </div>
-                    </div>
-                    <div class="metrics">
-                      <div class="metric">
-                        <div class="label">Review cycles</div>
-                        <div class="value">3.8x</div>
-                      </div>
-                      <div class="metric">
-                        <div class="label">Screenshot comments</div>
-                        <div class="value">71%</div>
-                      </div>
-                      <div class="metric">
-                        <div class="label">Lost context</div>
-                        <div class="value">54%</div>
+                        <span>Design review</span><span>Local-first</span><span>Agent feedback loop</span>
                       </div>
                     </div>
                     <div class="charts">
                       <div class="chart-card target">
                         <div class="outline-target"></div>
-                        <div class="chart-title">Preferred feedback format</div>
-                        <div class="chart-subtitle">Share of participants</div>
-                        <div class="bar-chart chart-before">
-                          <div class="bar-row">
-                            <span>Point</span>
-                            <div class="bar-track"><div class="bar-fill" style="width: 64%"></div></div>
-                            <span>46%</span>
+                        <div class="chart-title">Architecture diagram</div>
+                        <div class="chart-subtitle">Initial technical approach</div>
+                        <div class="architecture-diagram chart-before">
+                          <div class="diagram-flow">
+                            <div class="diagram-node">
+                              <strong>Browser review</strong>
+                              <span>click element + write prompt</span>
+                            </div>
+                            <div class="diagram-arrow">-&gt;</div>
+                            <div class="diagram-node warn">
+                              <strong>Long-poll API</strong>
+                              <span>poll waits for feedback</span>
+                            </div>
+                            <div class="diagram-arrow">-&gt;</div>
+                            <div class="diagram-node">
+                              <strong>Agent patch</strong>
+                              <span>apply targeted edits</span>
+                            </div>
                           </div>
-                          <div class="bar-row">
-                            <span>Sketch</span>
-                            <div class="bar-track"><div class="bar-fill" style="width: 38%"></div></div>
-                            <span>27%</span>
-                          </div>
-                          <div class="bar-row">
-                            <span>Text</span>
-                            <div class="bar-track"><div class="bar-fill" style="width: 26%"></div></div>
-                            <span>18%</span>
-                          </div>
-                          <div class="bar-row">
-                            <span>Other</span>
-                            <div class="bar-track"><div class="bar-fill" style="width: 13%"></div></div>
-                            <span>9%</span>
+                          <div class="design-note">
+                            The diagram explains how annotations move from artifact UI to agent action.
                           </div>
                         </div>
-                        <div class="pie-chart chart-after">
-                          <div class="pie"></div>
-                          <div class="legend">
-                            <div><span style="background: #2b251b"></span>Point - 46%</div>
-                            <div><span style="background: #9b8444"></span>Sketch - 27%</div>
-                            <div><span style="background: #d7bc73"></span>Text - 18%</div>
-                            <div><span style="background: #e8d9b5"></span>Other - 9%</div>
+                        <div class="architecture-diagram plan-after chart-after">
+                          <div class="diagram-flow">
+                            <div class="diagram-node">
+                              <strong>SDK in iframe</strong>
+                              <span>selector + snapshot</span>
+                            </div>
+                            <div class="diagram-arrow">-&gt;</div>
+                            <div class="diagram-node updated">
+                              <strong>WebSocket channel</strong>
+                              <span>push feedback to agent</span>
+                            </div>
+                            <div class="diagram-arrow">-&gt;</div>
+                            <div class="diagram-node">
+                              <strong>Agent patch</strong>
+                              <span>apply targeted edits</span>
+                            </div>
                           </div>
+                          <div class="design-note">The browser keeps a live channel open for collaborative review.</div>
                         </div>
                       </div>
                       <div class="chart-card target-second">
                         <div class="outline-target-2"></div>
-                        <div class="chart-title">Confidence after review</div>
-                        <div class="chart-subtitle">Median score by round</div>
-                        <div class="line-chart">
-                          <div class="line-column-wrap">
-                            <div class="line-number">2.1</div>
-                            <div class="line-column" style="height: 38px"></div>
+                        <div class="chart-title">State and recovery</div>
+                        <div class="chart-subtitle">Persistence and failure-mode coverage</div>
+                        <div class="decision-list">
+                          <div class="decision-item">
+                            <strong>Session store</strong>
+                            Use
+                            <span class="change-token"
+                              ><span class="before-token">local file store</span
+                              ><span class="after-token">SQLite</span></span
+                            >
+                            for the review queue.
                           </div>
-                          <div class="line-column-wrap">
-                            <div class="line-number">3.4</div>
-                            <div class="line-column" style="height: 64px"></div>
-                          </div>
-                          <div class="line-column-wrap">
-                            <div class="line-number">4.2</div>
-                            <div class="line-column" style="height: 90px"></div>
-                          </div>
-                          <div class="line-column-wrap">
-                            <div class="line-number">4.8</div>
-                            <div class="line-column" style="height: 112px"></div>
+                          <div class="failure-list">
+                            <div class="failure-item">Server restart: poll resumes from persisted session state.</div>
+                            <div class="failure-item">Missing session: agent is told to reopen the same HTML file.</div>
                           </div>
                         </div>
                       </div>
@@ -1180,26 +1320,26 @@
                   <div class="chat-log">
                     <div class="bubble agent">
                       <small>Agent</small>
-                      <div>I opened the infographic. Click any element and tell me what should change.</div>
+                      <div>I opened the technical plan. Click any element and tell me what should change.</div>
                     </div>
                     <div class="bubble user user-bubble">
                       <small>You</small>
-                      <div>On preferred feedback format: use pie chart</div>
-                      <div>On confidence after review: show numbers</div>
-                      <div>also change to dark mode</div>
+                      <div>On architecture diagram: use WebSocket instead of long-poll</div>
+                      <div>On state section: use SQLite instead of local file store</div>
+                      <div>surface failure modes and recovery paths</div>
                     </div>
                     <div class="bubble working"><span class="spinner"></span><span>Working...</span></div>
                     <div class="bubble agent done-bubble" style="opacity: 0">
                       <small>Agent</small>
                       <div>
-                        Done. I switched to dark mode, changed the first chart to a pie chart, and added numbers to the
-                        second.
+                        Done. I switched the plan to WebSocket, changed storage to SQLite, and surfaced failure modes
+                        across the plan.
                       </div>
                     </div>
                   </div>
                   <div class="composer">
                     <div class="pills">
-                      <span class="pill pill-one">use pie chart</span><span class="pill pill-two">show numbers</span>
+                      <span class="pill pill-one">use WebSocket</span><span class="pill pill-two">use SQLite</span>
                     </div>
                     <div class="textarea">
                       <span class="placeholder">Write a message for the agent...</span>
@@ -1238,7 +1378,7 @@
                 <div class="brand"><span class="lavish">Lavish</span><span class="editor-word">Editor</span></div>
                 <div class="divider"></div>
                 <div class="file-wrap">
-                  <div class="file-input">/var/folders/tmp/infographic.html</div>
+                  <div class="file-input">/var/folders/tmp/design-plan.html</div>
                   <button class="copy-button">Copy Path</button>
                 </div>
                 <button class="button secondary">Annotation: On</button>
@@ -1246,67 +1386,62 @@
               </div>
               <div class="workbench">
                 <div class="artifact-frame">
-                  <div class="report-page dark-report">
+                  <div class="report-page">
                     <div class="report-header">
                       <div>
-                        <div class="eyebrow" style="color: #756a58">Updated artifact</div>
-                        <h2>Specific feedback, applied in place</h2>
-                        <p>
-                          The chart changes inside the artifact. The conversation stays attached to the exact element.
-                        </p>
+                        <div class="eyebrow" style="color: #756a58">Updated technical plan</div>
+                        <h2>Precise corrections, plan-level guidance</h2>
+                        <p>The corrected diagram and persistence choice stay attached to the design review context.</p>
                       </div>
                       <div class="report-date">
-                        <span>Q2 study</span><span>42 participants</span><span>Remote sessions</span>
-                      </div>
-                    </div>
-                    <div class="metrics">
-                      <div class="metric">
-                        <div class="label">Targets</div>
-                        <div class="value">2</div>
-                      </div>
-                      <div class="metric">
-                        <div class="label">Prompts</div>
-                        <div class="value">3</div>
-                      </div>
-                      <div class="metric">
-                        <div class="label">Context loss</div>
-                        <div class="value">0</div>
+                        <span>Design review</span><span>Local-first</span><span>Agent feedback loop</span>
                       </div>
                     </div>
                     <div class="charts">
                       <div class="chart-card target">
                         <div class="outline-target" style="opacity: 1"></div>
-                        <div class="chart-title">Preferred feedback format</div>
-                        <div class="chart-subtitle">Changed to a pie chart</div>
-                        <div class="pie-chart" style="opacity: 1">
-                          <div class="pie"></div>
-                          <div class="legend">
-                            <div><span style="background: #2b251b"></span>Point - 46%</div>
-                            <div><span style="background: #9b8444"></span>Sketch - 27%</div>
-                            <div><span style="background: #d7bc73"></span>Text - 18%</div>
-                            <div><span style="background: #e8d9b5"></span>Other - 9%</div>
+                        <div class="chart-title">Architecture diagram</div>
+                        <div class="chart-subtitle">Corrected to match the CLI contract</div>
+                        <div class="architecture-diagram">
+                          <div class="diagram-flow">
+                            <div class="diagram-node">
+                              <strong>SDK in iframe</strong>
+                              <span>selector + DOM snapshot</span>
+                            </div>
+                            <div class="diagram-arrow">-&gt;</div>
+                            <div class="diagram-node updated">
+                              <strong>WebSocket channel</strong>
+                              <span>push feedback to agent</span>
+                            </div>
+                            <div class="diagram-arrow">-&gt;</div>
+                            <div class="diagram-node">
+                              <strong>Agent patch</strong>
+                              <span>edits the HTML artifact</span>
+                            </div>
+                          </div>
+                          <div class="design-note">
+                            The diagram explains the technical approach with a live collaboration channel.
                           </div>
                         </div>
                       </div>
                       <div class="chart-card">
-                        <div class="chart-title">Confidence after review</div>
-                        <div class="chart-subtitle">Numbers shown by round</div>
-                        <div class="line-chart">
-                          <div class="line-column-wrap">
-                            <div class="line-number">2.1</div>
-                            <div class="line-column" style="height: 38px"></div>
+                        <div class="chart-title">State and recovery</div>
+                        <div class="chart-subtitle">SQLite plus explicit failure modes</div>
+                        <div class="decision-list">
+                          <div class="decision-item">
+                            <strong>Session store</strong>
+                            Use <span class="change-token">SQLite</span> for queued prompts and session status.
                           </div>
-                          <div class="line-column-wrap">
-                            <div class="line-number">3.4</div>
-                            <div class="line-column" style="height: 64px"></div>
-                          </div>
-                          <div class="line-column-wrap">
-                            <div class="line-number">4.2</div>
-                            <div class="line-column" style="height: 90px"></div>
-                          </div>
-                          <div class="line-column-wrap">
-                            <div class="line-number">4.8</div>
-                            <div class="line-column" style="height: 112px"></div>
+                          <div class="failure-list">
+                            <div class="failure-item" style="opacity: 1">
+                              Server restart: poll resumes from persisted state.
+                            </div>
+                            <div class="failure-item" style="opacity: 1">
+                              Missing session: reopen the same HTML path.
+                            </div>
+                            <div class="failure-item" style="opacity: 1">
+                              Bad asset path: reject traversal outside the artifact directory.
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -1318,15 +1453,15 @@
                   <div class="chat-log">
                     <div class="bubble user" style="opacity: 1">
                       <small>You</small>
-                      <div>On preferred feedback format: use pie chart</div>
-                      <div>On confidence after review: show numbers</div>
-                      <div>also change to dark mode</div>
+                      <div>On architecture diagram: use WebSocket instead of long-poll</div>
+                      <div>On state section: use SQLite instead of local file store</div>
+                      <div>surface failure modes and recovery paths</div>
                     </div>
                     <div class="bubble agent" style="opacity: 1">
                       <small>Agent</small>
                       <div>
-                        Done. I switched to dark mode, changed the first chart to a pie chart, and added numbers to the
-                        second.
+                        Done. I switched the plan to WebSocket, changed storage to SQLite, and surfaced failure modes
+                        across the plan.
                       </div>
                     </div>
                   </div>
@@ -1341,8 +1476,8 @@
           </div>
           <div class="zoom-copy">
             <div class="eyebrow">The part that matters</div>
-            <h2>Point at the artifact. Talk to the agent.</h2>
-            <p>Lavish keeps feedback visual, precise, and inside the browser.</p>
+            <h2>Review the plan where the decisions live.</h2>
+            <p>Surgical annotations correct exact assumptions. Chat feedback changes the whole artifact.</p>
           </div>
         </div>
       </section>
@@ -1370,10 +1505,10 @@
         }
       }
 
-      splitText("#typed-prompt", "create an infographic for what we discussed");
-      splitText("#annotation-text", "use pie chart");
-      splitText("#annotation-text-2", "show numbers");
-      splitText("#chat-text", "also change to dark mode");
+      splitText("#typed-prompt", "write a technical plan");
+      splitText("#annotation-text", "use websocket instead of long-poll");
+      splitText("#annotation-text-2", "use sqlite instead of local file store");
+      splitText("#chat-text", "surface failure modes and recovery paths");
 
       function focusPull(fromScene, toScene, at) {
         tl.set(toScene, { opacity: 0, filter: "blur(18px)", zIndex: 5 }, at);
@@ -1412,11 +1547,10 @@
         9.52,
       );
       tl.from("#scene-editor .report-header", { y: 28, opacity: 0, duration: 0.58, ease: "expo.out" }, 9.72);
-      tl.from("#scene-editor .metric", { y: 18, opacity: 0, duration: 0.44, stagger: 0.08, ease: "power2.out" }, 10.0);
       tl.from(
         "#scene-editor .chart-card",
         { y: 28, opacity: 0, duration: 0.56, stagger: 0.1, ease: "power3.out" },
-        10.3,
+        10.0,
       );
       tl.from("#scene-editor .chat-panel", { x: 34, opacity: 0, duration: 0.52, ease: "power2.out" }, 10.42);
       tl.from(
@@ -1482,36 +1616,14 @@
       tl.to(".spinner", { rotation: 360, duration: 0.8, repeat: 3, ease: "none" }, 24.2);
       tl.to(".editor-window-1", { scale: 1, x: 0, y: 0, duration: 0.78, ease: "power2.inOut" }, 24.1);
       tl.to("#pointer-1", { opacity: 0, duration: 0.28, ease: "sine.out" }, 24.16);
-      tl.to("#scene-editor .artifact-frame", { backgroundColor: "#0f1115", duration: 0.5, ease: "sine.inOut" }, 24.72);
-      tl.to(
-        "#scene-editor .report-page",
-        { backgroundColor: "#11141a", borderColor: "#303745", color: "#f7f3ea", duration: 0.5, ease: "sine.inOut" },
-        24.72,
-      );
-      tl.to("#scene-editor .report-header", { borderColor: "#303745", duration: 0.5, ease: "sine.inOut" }, 24.72);
-      tl.to(
-        "#scene-editor .metric, #scene-editor .chart-card",
-        { backgroundColor: "#171a21", borderColor: "#303745", duration: 0.5, ease: "sine.inOut" },
-        24.74,
-      );
-      tl.to(
-        "#scene-editor .report-header p, #scene-editor .report-date, #scene-editor .chart-subtitle, #scene-editor .legend, #scene-editor .metric .label",
-        { color: "#b9c0cf", duration: 0.5, ease: "sine.inOut" },
-        24.74,
-      );
-      tl.to(
-        "#scene-editor .chart-title, #scene-editor .metric .value, #scene-editor .line-number",
-        { color: "#f7f3ea", duration: 0.5, ease: "sine.inOut" },
-        24.74,
-      );
-      tl.to("#scene-editor .line-chart", { borderColor: "#3c4557", duration: 0.5, ease: "sine.inOut" }, 24.74);
-      tl.to("#scene-editor .line-column", { backgroundColor: "#f4c95d", duration: 0.44, ease: "sine.inOut" }, 24.86);
       tl.to(".chart-before", { opacity: 0, duration: 0.28, ease: "sine.out" }, 24.9);
       tl.to(".chart-after", { opacity: 1, duration: 0.42, ease: "power1.out" }, 25.04);
-      tl.from("#scene-editor .pie", { scale: 0.86, rotation: -12, duration: 0.46, ease: "power3.out" }, 25.04);
+      tl.from("#scene-editor .diagram-node.updated", { scale: 0.92, duration: 0.46, ease: "power3.out" }, 25.04);
+      tl.to("#scene-editor .before-token", { opacity: 0, duration: 0.24, ease: "sine.out" }, 25.12);
+      tl.to("#scene-editor .after-token", { opacity: 1, duration: 0.3, ease: "power2.out" }, 25.22);
       tl.to(
-        "#scene-editor .line-number",
-        { opacity: 1, y: -2, duration: 0.34, stagger: 0.06, ease: "power2.out" },
+        "#scene-editor .failure-item",
+        { opacity: 1, y: -2, duration: 0.34, stagger: 0.08, ease: "power2.out" },
         25.2,
       );
       tl.to(".working", { opacity: 0, y: 4, duration: 0.24, ease: "sine.out" }, 26.2);
