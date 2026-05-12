@@ -95,7 +95,8 @@ npm link
 ```
 
 - **File-path identity** - Sessions are keyed by the canonical HTML file path, so agents do not need opaque IDs.
-- **Sandboxed artifact** - The artifact runs in an iframe while Lavish injects a small SDK for annotations and snapshots, plus Tailwind CSS v4 and DaisyUI v5 design assets unless the HTML includes `<meta name="lavish-design" content="off">`.
+- **Sandboxed artifact** - The artifact runs in an iframe while Lavish injects a small SDK for annotations, snapshots, and feedback controls, plus Tailwind CSS v4 and DaisyUI v5 design assets unless the HTML includes `<meta name="lavish-design" content="off">`.
+- **Feedback controls** - Mark buttons, choices, and other interactive elements with `data-lavish-action` so Lavish does not annotate them, then call `window.lavish.queuePrompt()` or `window.lavish.sendQueuedPrompts()` from the control handler.
 - **Precise targets** - Text annotations include selected text plus range anchors, so agents are not limited to whole-element selectors.
 - **Local-first state** - Session state stays under `.lavish-axi/` in the workspace.
 
@@ -110,7 +111,7 @@ npm link
 | `lavish-axi playbook [id]`    | List focused artifact guidance or show one playbook.         |
 | `lavish-axi design`           | Show the injected Tailwind CSS and DaisyUI design reference. |
 
-Known playbook IDs: `diagram`, `table`, `comparison`, `plan`, `diff`, `interactive`, `slides`.
+Known playbook IDs: `diagram`, `table`, `comparison`, `plan`, `diff`, `input`, `slides`.
 
 ### Flags
 
