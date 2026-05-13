@@ -35,6 +35,7 @@ export async function serve({ port, stateFile, version = "" }) {
   const events = new EventEmitter();
   const watchers = new Map();
   const activePolls = new Map();
+  const deliveredFeedback = new Set();
   const sseClients = new Set();
 
   app.use(express.json({ limit: "2mb" }));
@@ -59,7 +60,11 @@ export async function serve({ port, stateFile, version = "" }) {
       const file = await canonicalFile(req.body.file);
       const key = sessionKey(file);
       const url = `http://localhost:${port}/session/${key}`;
+      const existing = await store.findByKey(key);
       const session = await store.upsertSession(file, url);
+      if (existing?.status === "ended") {
+        clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
+      }
       watchSession(session, watchers, events);
       res.json({ key, file, url, status: "opened" });
     } catch (error) {
@@ -75,32 +80,38 @@ export async function serve({ port, stateFile, version = "" }) {
         req.query.timeoutMs === undefined ? null : Math.max(0, Math.min(Number(req.query.timeoutMs || 0), 2147483647));
       const immediate = await store.takeFeedback(key);
       if (immediate.status !== "waiting") {
+        if (immediate.status === "feedback") markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
         res.json(immediate);
         return;
       }
-      setPollActive(key, activePolls, events, true);
-      const timer =
-        timeoutMs === null
-          ? null
-          : setTimeout(async () => {
-              cleanup();
-              res.json(await store.takeFeedback(key));
-            }, timeoutMs);
-      const onFeedback = async (changedKey) => {
-        if (changedKey !== key || res.headersSent) {
-          return;
-        }
-        cleanup();
-        res.json(await store.takeFeedback(key));
-      };
+      setPollActive(key, activePolls, deliveredFeedback, events, true);
+      const timer = timeoutMs === null ? null : setTimeout(() => respond().catch(next), timeoutMs);
       let cleaned = false;
+      let responding = false;
       const cleanup = () => {
         if (cleaned) return;
         cleaned = true;
         if (timer) clearTimeout(timer);
         events.off("feedback", onFeedback);
         events.off("ended", onFeedback);
-        setPollActive(key, activePolls, events, false);
+        setPollActive(key, activePolls, deliveredFeedback, events, false);
+      };
+      const respond = async () => {
+        if (responding || res.headersSent) return;
+        responding = true;
+        try {
+          const result = await store.takeFeedback(key);
+          if (result.status === "feedback") markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
+          res.json(result);
+        } finally {
+          cleanup();
+        }
+      };
+      const onFeedback = (changedKey) => {
+        if (changedKey !== key || res.headersSent) {
+          return;
+        }
+        respond().catch(next);
       };
       events.on("feedback", onFeedback);
       events.on("ended", onFeedback);
@@ -127,6 +138,7 @@ export async function serve({ port, stateFile, version = "" }) {
   app.post("/api/:key/end", async (req, res, next) => {
     try {
       await store.endSession(req.params.key);
+      clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, events);
       events.emit("ended", req.params.key);
       res.json({ status: "ended" });
     } catch (error) {
@@ -154,6 +166,7 @@ export async function serve({ port, stateFile, version = "" }) {
       const file = await canonicalFile(req.body.file);
       const key = sessionKey(file);
       await store.endSession(key);
+      clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
       events.emit("ended", key);
       res.json({ status: "ended" });
     } catch (error) {
@@ -234,21 +247,23 @@ export async function serve({ port, stateFile, version = "" }) {
           res.write(`event: agent-reply\ndata: ${JSON.stringify({ text })}\n\n`);
         }
       };
-      const sendWorking = (key, working) => {
+      const sendPresence = (key, state) => {
         if (key === req.params.key) {
-          res.write(`event: agent-working\ndata: ${JSON.stringify({ working })}\n\n`);
+          res.write(`event: agent-presence\ndata: ${JSON.stringify({ state })}\n\n`);
         }
       };
       res.write(`event: chat-sync\ndata: ${JSON.stringify({ chat: session?.chat || [] })}\n\n`);
-      res.write(`event: agent-working\ndata: ${JSON.stringify({ working: !activePolls.has(req.params.key) })}\n\n`);
+      res.write(
+        `event: agent-presence\ndata: ${JSON.stringify({ state: computePresence(req.params.key, activePolls, deliveredFeedback) })}\n\n`,
+      );
       events.on("reload", sendReload);
       events.on("agent-reply", sendAgentReply);
-      events.on("agent-working", sendWorking);
+      events.on("agent-presence", sendPresence);
       req.on("close", () => {
         sseClients.delete(res);
         events.off("reload", sendReload);
         events.off("agent-reply", sendAgentReply);
-        events.off("agent-working", sendWorking);
+        events.off("agent-presence", sendPresence);
       });
     } catch (error) {
       next(error);
@@ -369,7 +384,8 @@ function watchSession(session, watchers, events) {
   watchers.set(session.key, watcher);
 }
 
-function setPollActive(key, activePolls, events, active) {
+function setPollActive(key, activePolls, deliveredFeedback, events, active) {
+  const previousPresence = computePresence(key, activePolls, deliveredFeedback);
   const count = activePolls.get(key) || 0;
   const nextCount = active ? count + 1 : Math.max(0, count - 1);
   if (nextCount === count) return;
@@ -377,9 +393,34 @@ function setPollActive(key, activePolls, events, active) {
     activePolls.delete(key);
   } else {
     activePolls.set(key, nextCount);
+    deliveredFeedback.delete(key);
   }
-  if (count > 0 === nextCount > 0) return;
-  events.emit("agent-working", key, nextCount === 0);
+  const nextPresence = computePresence(key, activePolls, deliveredFeedback);
+  if (nextPresence !== previousPresence) events.emit("agent-presence", key, nextPresence);
+}
+
+function markFeedbackDelivered(key, activePolls, deliveredFeedback, events) {
+  const previousPresence = computePresence(key, activePolls, deliveredFeedback);
+  deliveredFeedback.add(key);
+  const nextPresence = computePresence(key, activePolls, deliveredFeedback);
+  if (nextPresence !== previousPresence) {
+    events.emit("agent-presence", key, nextPresence);
+  }
+}
+
+function clearFeedbackDelivery(key, activePolls, deliveredFeedback, events) {
+  const previousPresence = computePresence(key, activePolls, deliveredFeedback);
+  deliveredFeedback.delete(key);
+  const nextPresence = computePresence(key, activePolls, deliveredFeedback);
+  if (nextPresence !== previousPresence) {
+    events.emit("agent-presence", key, nextPresence);
+  }
+}
+
+export function computePresence(key, activePolls, deliveredFeedback) {
+  if (activePolls.has(key)) return "listening";
+  if (deliveredFeedback.has(key)) return "working";
+  return "waiting";
 }
 
 export function createChromeHtml(session) {
@@ -395,7 +436,7 @@ export function createChromeHtml(session) {
 </head>
 <body class="lavish">
 <div class="bar"><div class="brand"><span class="brand-mark">Lavish</span><span class="brand-support">Editor</span></div><div class="divider" aria-hidden="true"></div><div class="file-wrap" title="${escapeHtml(session.file)}"><input class="file-input" id="filePath" readonly size="${fileInputSize}" value="${escapeHtml(session.file)}"><button class="copy-button" id="copyPath" type="button">Copy Path</button></div><button class="button secondary annotation-on" id="annotation">Annotation: On</button><button class="button danger" id="end">End Session</button></div>
-<div class="layout"><div class="frame"><iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-downloads" src="/artifact/${session.key}/index.html"></iframe></div><aside class="panel"><h2>Conversation</h2><div class="chat" id="chatLog"></div><div class="composer"><div class="annotation-pills" id="annotationPills"></div><textarea id="chatInput" placeholder="Write a message for the agent..."></textarea><div class="actions"><button class="button" id="send">Send to Agent</button></div></div></aside></div>
+<div class="layout"><div class="frame"><iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-downloads" src="/artifact/${session.key}/index.html"></iframe></div><aside class="panel"><h2>Conversation</h2><div class="chat" id="chatLog"></div><div class="composer"><div class="presence-banner" id="presenceBanner" hidden>Your agent is not listening. If this persists, ask your agent to poll for updates from Lavish.</div><div class="annotation-pills" id="annotationPills"></div><textarea id="chatInput" placeholder="Write a message for the agent..."></textarea><div class="actions"><button class="button" id="send">Send to Agent</button></div></div></aside></div>
 <script id="lavish-session" type="application/json">${sessionJson}</script>
 <script src="/chrome-client.js"></script>
 </body>
