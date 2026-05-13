@@ -37,6 +37,8 @@ test("home output teaches agents when and how to use Lavish Editor", () => {
 
   assert.equal(output.bin, "~/.local/bin/lavish-axi");
   assert.match(output.description, /Lavish Editor/);
+  assert.match(output.description, /complex response/);
+  assert.match(output.description, /consider using Lavish Editor/);
   assert.match(output.description, /First generate an interactive HTML artifact/);
   assert.deepEqual(output.sessions, []);
   assert.equal("use_cases" in output, false);
@@ -170,7 +172,7 @@ test("home directory collapse tolerates Windows mixed separators", () => {
   );
 });
 
-test("open output uses one next_step string for user URL and polling", () => {
+test("open output keeps the user URL in session data and next_step focused on polling", () => {
   const output = createOpenOutput({
     file: "/tmp/artifact.html",
     url: "http://localhost:4387/session/abc123",
@@ -181,7 +183,8 @@ test("open output uses one next_step string for user URL and polling", () => {
   assert.equal(output.session.url, "http://localhost:4387/session/abc123");
   assert.equal(output.session.status, "opened");
   assert.equal(typeof output.next_step, "string");
-  assert.match(output.next_step, /Tell the user to open http:\/\/localhost:4387\/session\/abc123/);
+  assert.doesNotMatch(output.next_step, /Tell the user/i);
+  assert.doesNotMatch(output.next_step, /http:\/\/localhost:4387\/session\/abc123/);
   assert.match(output.next_step, /lavish-axi poll \/tmp\/artifact\.html/);
   assert.match(output.next_step, /long-polls until/);
   assert.match(output.next_step, /do not set a short shell timeout/i);
