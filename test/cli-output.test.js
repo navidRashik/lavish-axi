@@ -162,7 +162,7 @@ test("playbook index output lists known playbooks with concise descriptions", ()
   );
   assert.equal(
     output.playbooks.find((playbook) => playbook.id === "plan")?.use_when,
-    "Explain a technical plan before implementation",
+    "Explain a product or technical plan before implementation",
   );
   assert.equal(
     output.playbooks.find((playbook) => playbook.id === "input")?.use_when,
@@ -185,6 +185,13 @@ test("playbook detail output returns focused Lavish-native guidance", () => {
   assert.ok(output.playbook.lavish_notes.some((item) => item.includes("window.lavish.queuePrompt")));
   assert.ok(output.playbook.pitfalls.some((item) => item.includes("unclear")));
   assert.ok(output.playbook.lavish_notes.some((item) => item.includes("Lavish")));
+});
+
+test("plan playbook detail output has polished guidance copy", () => {
+  const output = createPlaybookOutput(["plan"]);
+
+  assert.ok(output.playbook.structure.some((item) => item.includes("Then describe a proposed approach")));
+  assert.ok(output.playbook.structure.every((item) => !item.includes("Then describe the a proposed approach")));
 });
 
 test("unknown playbook ids produce an actionable validation error", () => {
