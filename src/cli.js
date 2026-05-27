@@ -14,7 +14,7 @@ import { serve } from "./server.js";
 import { canonicalFile, sessionKey, SessionStore } from "./session-store.js";
 import { initDefaultTelemetry } from "./telemetry.js";
 
-const COMMANDS = new Set(["open", "poll", "end", "server", "playbook", "design", "setup"]);
+const COMMANDS = new Set(["open", "poll", "end", "stop", "server", "playbook", "design", "setup"]);
 const DESCRIPTION =
   "Lavish Editor helps agents turn rich HTML artifacts into collaborative human review surfaces. Whenever you are about to give user a complex response that will be easier to understand via a rich / interactive page, consider using Lavish Editor. " +
   "First generate an interactive HTML artifact according to user request, then run `lavish-axi <html-file>` so the user can visually review it, annotate elements or selected text, queue prompts, and send feedback back through `lavish-axi poll`.";
@@ -51,6 +51,7 @@ export async function run(argv) {
         open: openCommand,
         poll: pollCommand,
         end: endCommand,
+        stop: stopCommand,
         playbook: playbookCommand,
         design: designCommand,
         setup: setupCommand,
@@ -123,6 +124,7 @@ export function createHomeOutput({ bin, sessions, includeSessions = true }) {
       "Lavish serves the html file through a local express.js server. If your html needs to reference other filesystem assets such as images, CSS, fonts, and local scripts, copy them into the same directory as the HTML file, then reference them with relative paths from that directory. Never prepend `/` to those asset paths - root paths won't work",
       "Run `lavish-axi poll <html-file>` to wait for user feedback",
       "Run `lavish-axi end <html-file>` to end a session",
+      "Run `lavish-axi stop` to shut down the background server (it also self-stops when idle or after the last session ends with nothing connected)",
       "Run `lavish-axi playbook <playbook_id>` for focused artifact guidance",
       DESIGN_SYSTEM_HINT,
       "Use lavish-axi when the user asks for a visual artifact, HTML explainer, interactive prototype, review surface, product or technical plan, comparison, report, or browser-based feedback loop",
@@ -234,6 +236,42 @@ async function endCommand(args) {
   return { session: { file: absolute, status: response.status || "ended" } };
 }
 
+// Explicitly shut down the running Lavish Editor server. Unlike `end` (which closes a single
+// session), this stops the background process so it stops dangling between sessions.
+export async function stopCommand(args) {
+  const port = Number(flagValue(args, "--port") || defaultPort());
+  const baseUrl = `http://${LOOPBACK_HOST}:${port}`;
+  return shutdownServerOnPort(port, { baseUrl, currentVersion: VERSION });
+}
+
+export async function shutdownServerOnPort(
+  port,
+  {
+    baseUrl = `http://${LOOPBACK_HOST}:${port}`,
+    currentVersion = VERSION,
+    fetchHealth: healthFetcher = fetchHealth,
+    requestShutdown: shutdownRequester = requestShutdown,
+    waitForPortFree: portFreeWaiter = waitForPortFree,
+    killProcessOnPort: portKiller = killProcessOnPort,
+    processMatchesLavish = processOnPortMatchesLavish,
+  } = {},
+) {
+  const health = await healthFetcher(baseUrl);
+  if (!health) {
+    return { server: { status: "not-running", port } };
+  }
+  if (!(await canControlServerOnPort(port, health, processMatchesLavish))) {
+    return { server: { status: "not-lavish", port } };
+  }
+  await shutdownRequester(baseUrl);
+  let freed = await portFreeWaiter(baseUrl, 3000);
+  if (!freed && shouldKillProcessOnPort(currentVersion, health)) {
+    portKiller(port);
+    freed = await portFreeWaiter(baseUrl, 3000);
+  }
+  return { server: { status: freed ? "stopped" : "stopping", port } };
+}
+
 async function playbookCommand(args) {
   return createPlaybookOutput(args);
 }
@@ -308,6 +346,11 @@ async function ensureServer({ forceRestart = false } = {}) {
     return baseUrl;
   }
   if (existing) {
+    if (!(await canControlServerOnPort(port, existing, processOnPortMatchesLavish))) {
+      throw new AxiError(`Port ${port} is occupied by a non-Lavish server`, "SERVER_ERROR", [
+        `Stop the process using port ${port}, or set LAVISH_AXI_PORT to another port`,
+      ]);
+    }
     // Stale server from an older release is squatting on the port. Ask it to shut down
     // gracefully so the upgraded client doesn't keep handing users an old chrome.
     await requestShutdown(baseUrl);
@@ -363,6 +406,13 @@ export function shouldKillProcessOnPort(currentVersion, healthBody) {
   return healthBody.version !== currentVersion;
 }
 
+async function canControlServerOnPort(port, healthBody, processMatchesLavish) {
+  if (!healthBody || typeof healthBody !== "object") return false;
+  if (healthBody.app === "lavish-axi") return true;
+  if (typeof healthBody.version === "string" && healthBody.version !== "") return false;
+  return processMatchesLavish(port);
+}
+
 async function fetchHealth(baseUrl) {
   try {
     const response = await fetch(`${baseUrl}/health`);
@@ -411,6 +461,24 @@ function killProcessOnPort(port) {
   } catch {
     // lsof missing or unsupported platform - the outer caller will surface SERVER_ERROR.
   }
+}
+
+function processOnPortMatchesLavish(port) {
+  try {
+    const pids = spawnSync("lsof", ["-t", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" });
+    if (pids.status !== 0) return false;
+    for (const line of pids.stdout.split("\n")) {
+      const pid = Number(line.trim());
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+      const command = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
+      if (command.status === 0 && /lavish-axi/.test(command.stdout)) {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 async function startServer(port) {
@@ -526,12 +594,13 @@ export function getCommandHelp(command) {
   return COMMAND_HELP[command] || null;
 }
 
-const TOP_LEVEL_HELP = `lavish-axi - Lavish Editor AXI\n\nUsage:\n  lavish-axi\n  lavish-axi <html-file>\n  lavish-axi poll <html-file> [--agent-reply "..."]\n  lavish-axi end <html-file>\n  lavish-axi playbook [playbook_id]\n  lavish-axi design\n  lavish-axi setup hooks\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls indefinitely by default until the user sends feedback or ends the session. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. do not set a short shell timeout; either run it without a timeout or use a very high threshold above 10 minutes.\n\n`;
+const TOP_LEVEL_HELP = `lavish-axi - Lavish Editor AXI\n\nUsage:\n  lavish-axi\n  lavish-axi <html-file>\n  lavish-axi poll <html-file> [--agent-reply "..."]\n  lavish-axi end <html-file>\n  lavish-axi stop\n  lavish-axi playbook [playbook_id]\n  lavish-axi design\n  lavish-axi setup hooks\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls indefinitely by default until the user sends feedback or ends the session. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. do not set a short shell timeout; either run it without a timeout or use a very high threshold above 10 minutes.\n\n`;
 
 const COMMAND_HELP = {
   open: `Usage: lavish-axi <html-file> [--no-open]\n\nOpen or resume a Lavish Editor review session for an HTML artifact. Use --no-open when you need to ensure the server/session exists without opening another browser window.\n`,
   poll: `Usage: lavish-axi poll <html-file> [--agent-reply "..."]\n\nThis command long-polls indefinitely for queued user prompts, then returns them to the agent. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. do not set a short shell timeout; either run it without a timeout or use a very high threshold above 10 minutes so the user has time to review and send feedback. Use --agent-reply after applying prior feedback to display your response in Lavish Editor before waiting again.\n`,
   end: `Usage: lavish-axi end <html-file>\n\nEnd a Lavish Editor session.\n`,
+  stop: `Usage: lavish-axi stop [--port <port>]\n\nShut down the background Lavish Editor server. The server also stops itself when no browser or poll has been connected for a while (LAVISH_AXI_IDLE_TIMEOUT_MS, default 30m) and immediately when the last session ends with nothing connected.\n`,
   playbook: `Usage: lavish-axi playbook [playbook_id]\n\nList focused artifact guidance playbooks, or show one playbook by ID. Known IDs: diagram, table, comparison, plan, diff, input, slides.\n\nExamples:\n  lavish-axi playbook\n  lavish-axi playbook diagram\n  lavish-axi playbook input\n`,
   design: `Usage: lavish-axi design\n\nShow a copy-pasteable CDN snippet for Tailwind CSS browser runtime v4 + DaisyUI v5 + themes, plus technical reference for DaisyUI components. Lavish artifacts stay portable HTML. Choose a design system in this priority order: (1) if the user asked for a specific look or named design system, follow that; (2) otherwise, if the current project already has a design system or style conventions, match those; (3) otherwise, prefer the Lavish-recommended Tailwind + DaisyUI CDN snippet over hand-writing styles unless explicitly instructed otherwise by the user.\n`,
   setup: `Usage: lavish-axi setup hooks\n\nInstall or repair agent SessionStart hooks for lavish-axi ambient context in Claude Code, Codex, and OpenCode. Restart your agent session afterward to receive the context.\n`,

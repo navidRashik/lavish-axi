@@ -22,13 +22,16 @@ import {
   normalizeArgv,
   resolveHookHomeDir,
   resolveServerEntry,
+  shutdownServerOnPort,
   shouldForceRestartForLocalBuild,
   shouldKillProcessOnPort,
   shouldOpenBrowser,
   shouldRestartServer,
+  stopCommand,
   telemetryCommandName,
   VERSION,
 } from "../src/cli.js";
+import { serve } from "../src/server.js";
 
 test("CLI version tracks package.json so release-please bumps reach the published binary", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
@@ -412,6 +415,53 @@ test("shouldKillProcessOnPort only kills Lavish servers with a mismatched versio
   assert.equal(shouldKillProcessOnPort("0.1.4", { ok: true, app: "lavish-axi", version: "0.1.4" }), false);
 });
 
+test("shutdownServerOnPort kills pre-handshake Lavish servers when shutdown does not free the port", async () => {
+  let shutdowns = 0;
+  let kills = 0;
+  const portFreeResults = [false, true];
+
+  const output = await shutdownServerOnPort(4387, {
+    baseUrl: "http://127.0.0.1:4387",
+    currentVersion: "0.1.4",
+    fetchHealth: async () => ({ ok: true }),
+    requestShutdown: async () => {
+      shutdowns += 1;
+    },
+    waitForPortFree: async () => portFreeResults.shift() ?? false,
+    killProcessOnPort: () => {
+      kills += 1;
+    },
+    processMatchesLavish: () => true,
+  });
+
+  assert.equal(shutdowns, 1);
+  assert.equal(kills, 1);
+  assert.deepEqual(output, { server: { status: "stopped", port: 4387 } });
+});
+
+test("shutdownServerOnPort ignores unidentified health responders", async () => {
+  let shutdowns = 0;
+  let kills = 0;
+
+  const output = await shutdownServerOnPort(4387, {
+    baseUrl: "http://127.0.0.1:4387",
+    currentVersion: "0.1.4",
+    fetchHealth: async () => ({ ok: true }),
+    requestShutdown: async () => {
+      shutdowns += 1;
+    },
+    waitForPortFree: async () => false,
+    killProcessOnPort: () => {
+      kills += 1;
+    },
+    processMatchesLavish: () => false,
+  });
+
+  assert.equal(shutdowns, 0);
+  assert.equal(kills, 0);
+  assert.deepEqual(output, { server: { status: "not-lavish", port: 4387 } });
+});
+
 test("open can resume a session without opening another browser window", () => {
   assert.equal(shouldOpenBrowser(["--no-open", "artifact.html"], {}), false);
   assert.equal(shouldOpenBrowser(["artifact.html", "--no-open"], {}), false);
@@ -510,5 +560,34 @@ test("fetchJson reports interrupted response body failures without retrying", as
     assert.equal(requests, 1);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("stop command shuts down the running server on the configured port", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-stop-test-`);
+  const server = await serve({ port: 0, stateFile: `${dir}/state.json`, version: "9.9.9-test" });
+  try {
+    const output = await stopCommand(["--port", String(server.port)]);
+    assert.deepEqual(output, { server: { status: "stopped", port: server.port } });
+    await server.done;
+    await assert.rejects(() => fetch(`http://127.0.0.1:${server.port}/health`), /fetch failed|ECONNREFUSED/);
+  } finally {
+    await server.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("stop command reports when no server is running", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-stop-test-`);
+  try {
+    // Bind then release a port so we know nothing is listening on it.
+    const probe = await serve({ port: 0, stateFile: `${dir}/state.json` });
+    const freePort = probe.port;
+    await probe.close();
+
+    const output = await stopCommand(["--port", String(freePort)]);
+    assert.deepEqual(output, { server: { status: "not-running", port: freePort } });
+  } finally {
+    await rm(dir, { force: true, recursive: true });
   }
 });
