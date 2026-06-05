@@ -9,13 +9,15 @@
   },
   "files": [
     "dist",
+    "skills/lavish-axi",
     "lavish-editor-marketing/renders/lavish-editor-marketing.gif",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
     "build": "node scripts/build.js",
-    "check": "npm run build && npm run lint && npm run format:check && npm run typecheck && npm test",
+    "build:skill": "node scripts/build-skill.js",
+    "check": "npm run build && npm run lint && npm run format:check && npm run typecheck && npm test && node scripts/build-skill.js --check",
     "start": "node dist/cli.mjs",
     "lint": "eslint bin src test scripts",
     "format": "prettier --write .",
