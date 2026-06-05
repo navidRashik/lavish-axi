@@ -51,6 +51,10 @@ Just tell your agent:
 Use `npx lavish-axi` to write a product or technical plan for what we discussed.
 ```
 
+That works with zero setup - Lavish is an AXI, so any capable agent can run the CLI directly.
+
+To make your agent reach for Lavish on its own (without you naming it every time), install the agent hooks as instructed below.
+
 ## Install
 
 **npm**
@@ -68,6 +72,23 @@ pnpm install --frozen-lockfile
 pnpm run build
 pnpm link
 ```
+
+## Set Up Agent Hooks (recommended)
+
+Lavish does not install agent hooks automatically, which means your agent would not know to use it in a fresh session.
+
+Run this once to opt in:
+
+```sh
+lavish-axi setup hooks
+```
+
+This installs a `SessionStart` hook for **Claude Code**, **Codex**, and **OpenCode** that feeds Lavish's ambient context (open sessions, visualization playbooks, and usage guidance) into your agent at the start of each session.
+With the hook installed, your agent learns to turn complex responses into rich, reviewable HTML artifacts proactively - no need to mention `lavish-axi` by name.
+
+**Restart your agent session after running this** so the new hook takes effect.
+
+Prefer not to install hooks? Lavish still works fully as a plain CLI - just tell your agent to `npx lavish-axi <file.html>` as shown in the Quick Start.
 
 ## How It Works
 
