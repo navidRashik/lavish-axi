@@ -40,30 +40,58 @@ Lavish Editor opens agent-generated HTML files in a local browser, lets you pinp
 Lavish Editor is an [AXI](https://axi.md), which means -
 
 - It's just a CLI any capable agent can run without setup.
-- No skills required. Agents learn to use AXIs by using them.
 - It's optimized for agent ergonomics. TOON output, long polling, and contextual disclosure making it highly token efficient.
+- The skill and hooks below only handle discovery; agents learn to use the AXI by using it.
 
 ## Quick Start
 
-Just tell your agent:
+Install the Lavish skill in the [Agent Skills](https://agentskills.io) format with [`npx skills`](https://github.com/vercel-labs/skills):
 
 ```sh
+npx skills add kunchenguid/lavish-axi --skill lavish
+```
+
+That is the entire setup - no npm install needed.
+The skill teaches your agent to run Lavish through `npx -y lavish-axi`, so the CLI comes along on demand.
+
+Then, in agents that expose skills as slash commands (Claude Code, for example), invoke it directly:
+
+```
+/lavish let's discuss our plan here
+```
+
+Or just ask for anything that is easier to grasp visually - a plan, comparison, diagram, table, diff, or report - and the agent loads the skill on its own when it recognizes the task.
+
+By default the skill lands in the current project's skills directory (`.claude/skills/`, for example); add `-g` to install it for all projects (`~/.claude/skills/`).
+
+## Other Ways to Use Lavish
+
+The skill is the recommended path, but it is not the only one.
+
+### Zero setup
+
+Lavish is an AXI, so any capable agent can run the CLI directly with nothing installed at all.
+Just tell your agent:
+
+```
 Use `npx lavish-axi` to write a product or technical plan for what we discussed.
 ```
 
-That works with zero setup - Lavish is an AXI, so any capable agent can run the CLI directly.
+### Session hook
 
-To make your agent reach for Lavish on its own (without you naming it every time), install the agent hooks as instructed below.
-
-## Install
-
-**npm**
+Want Lavish's ambient context - including your live open sessions - fed into every agent session instead of loading on demand?
+Install the CLI globally and opt into the hook:
 
 ```sh
 npm install -g lavish-axi
+lavish-axi setup hooks
 ```
 
-**From source**
+This installs a `SessionStart` hook for **Claude Code**, **Codex**, and **OpenCode** that surfaces open sessions, visualization playbooks, and usage guidance at the start of each session.
+Unlike the skill, the hook also shows your live open sessions, so a fresh agent session can resume an in-flight review.
+**Restart your agent session after running this** so the new hook takes effect.
+
+### From source
 
 ```sh
 git clone https://github.com/kunchenguid/lavish-axi.git
@@ -72,43 +100,6 @@ pnpm install --frozen-lockfile
 pnpm run build
 pnpm link
 ```
-
-## Teach Your Agent About Lavish (recommended)
-
-Lavish does not wire itself into your agent automatically, so in a fresh session your agent would not know to use it.
-There are two ways to fix that - **you only need one.**
-We recommend the hook.
-
-### Option A: Session hook (recommended)
-
-Run this once to opt in:
-
-```sh
-lavish-axi setup hooks
-```
-
-This installs a `SessionStart` hook for **Claude Code**, **Codex**, and **OpenCode** that feeds Lavish's ambient context (open sessions, visualization playbooks, and usage guidance) into your agent at the start of each session.
-With the hook installed, your agent learns to turn complex responses into rich, reviewable HTML artifacts proactively - no need to mention `lavish-axi` by name.
-
-**Restart your agent session after running this** so the new hook takes effect.
-
-### Option B: Install as a skill
-
-Prefer the [Agent Skills](https://agentskills.io) format, or use an agent that supports it?
-Install Lavish as a skill with [`npx skills`](https://github.com/vercel-labs/skills):
-
-```sh
-npx skills add kunchenguid/lavish-axi --skill lavish
-```
-
-This drops a `lavish` skill into your agent's skills directory (`.claude/skills/` for example; add `-g` for `~/.claude/skills/`).
-The skill carries the same guidance the hook delivers, but it loads on demand when the agent recognizes a task that calls for a visual artifact, rather than every session.
-In agents that expose skills as slash commands (Claude Code, for example), you can also invoke it explicitly with `/lavish <what the artifact should show>`.
-It does not surface your live open sessions - run `lavish-axi setup hooks` if you want that ambient context too.
-
-### No setup at all
-
-Lavish also works fully as a plain CLI - just tell your agent to `npx lavish-axi <file.html>` as shown in the Quick Start.
 
 ## How It Works
 
