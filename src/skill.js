@@ -21,8 +21,8 @@ function skillCommandText(text) {
 
 /**
  * Render the installable SKILL.md for the lavish skill. The body mirrors what
- * `lavish-axi` prints with no arguments (minus live session state), so the
- * skill and the SessionStart hook deliver the same guidance from one source.
+ * `lavish-axi` prints with no arguments (minus live session state), while the
+ * frontmatter adds discovery metadata for Agent Skills and Hermes Agent.
  *
  * @returns {string} full SKILL.md contents including YAML frontmatter
  */
@@ -33,6 +33,11 @@ export function createSkillMarkdown() {
 name: lavish
 description: ${SKILL_DESCRIPTION}
 argument-hint: <what the artifact should show>
+author: Kun Chen (kunchenguid)
+metadata:
+  hermes:
+    tags: [html, review, artifacts, visualization]
+    category: productivity
 ---
 
 # Lavish Editor
