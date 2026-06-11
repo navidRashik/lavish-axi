@@ -8,7 +8,7 @@ import express from "express";
 
 import { createArtifactSdk } from "./artifact-sdk.js";
 import { injectLavishSdk } from "./html-transform.js";
-import { LOOPBACK_HOST } from "./paths.js";
+import { bindHost, hostForUrl, linkHost } from "./paths.js";
 import { canonicalFile, SessionStore, sessionKey } from "./session-store.js";
 
 const chromeClientUrl = new URL("./chrome-client.js", import.meta.url);
@@ -55,6 +55,8 @@ export async function serve({
   log = null,
   pollHeartbeatMs = 15_000,
   idleTimeoutMs = resolveIdleTimeoutMs(),
+  host = bindHost(),
+  linkHost: linkHostName = linkHost(),
 }) {
   const app = express();
   const store = new SessionStore(stateFile);
@@ -89,7 +91,7 @@ export async function serve({
     try {
       const file = await canonicalFile(req.body.file);
       const key = sessionKey(file);
-      const url = `http://${LOOPBACK_HOST}:${publicPort}/session/${key}`;
+      const url = `http://${hostForUrl(linkHostName)}:${publicPort}/session/${key}`;
       const existing = await store.findByKey(key);
       const session = await store.upsertSession(file, url);
       if (existing?.status === "ended") {
@@ -367,8 +369,11 @@ export async function serve({
     res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
   });
 
-  const httpServer = await new Promise((resolve) => {
-    const s = app.listen(port, LOOPBACK_HOST, () => resolve(s));
+  const httpServer = await new Promise((resolve, reject) => {
+    const s = app.listen(port, host, () => {
+      if (s.address()) resolve(s);
+    });
+    s.once("error", reject);
   });
   publicPort = httpServer.address().port;
 
