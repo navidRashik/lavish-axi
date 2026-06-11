@@ -66,8 +66,12 @@
         background: var(--ink-900);
       }
 
-      .scene:not(#scene-terminal) {
+      .scene:not(#scene-terminal):not(#scene-cover) {
         opacity: 0;
+      }
+
+      #scene-cover {
+        z-index: 30;
       }
 
       .scene-content {
@@ -1061,6 +1065,15 @@
           <code>/lavish</code>
         </div>
       </section>
+
+      <!-- Static copy of the outro's final frame, shown only at frame 0 so X uses it as the thumbnail -->
+      <section id="scene-cover" class="scene">
+        <div class="scene-content outro">
+          <div class="outro-brand"><span class="lavish">Lavish</span><span class="editor-word">Editor</span></div>
+          <p>For when a rich editor is not rich enough.</p>
+          <code>/lavish</code>
+        </div>
+      </section>
     </div>
 
     <script>
@@ -1090,6 +1103,10 @@
 
       gsap.set("#pointer-1", { x: 1240, y: 820, opacity: 0 });
       gsap.set("#click-ring-1", { x: 0, y: 0, scale: 0.5 });
+
+      // Drop the thumbnail cover after ~3 frames at 30fps; a single-frame cover gets lost when the
+      // render is downsampled (12.5fps gif) or re-encoded by X, which uses frame 0 as the thumbnail
+      tl.set("#scene-cover", { opacity: 0 }, 0.1);
 
       tl.fromTo(
         ".terminal-shell",
@@ -1214,7 +1231,7 @@
 
       focusPull("#scene-editor", "#scene-outro", 29.7);
 
-      tl.from(".outro-brand", { y: 36, opacity: 0, duration: 0.74, ease: "power3.out" }, 30.08);
+      tl.from("#scene-outro .outro-brand", { y: 36, opacity: 0, duration: 0.74, ease: "power3.out" }, 30.08);
       tl.from("#scene-outro p", { y: 22, opacity: 0, duration: 0.48, ease: "sine.out" }, 30.48);
       tl.from("#scene-outro code", { y: 18, opacity: 0, scale: 0.98, duration: 0.44, ease: "power2.out" }, 30.72);
 
