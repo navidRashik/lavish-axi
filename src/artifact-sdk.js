@@ -103,7 +103,17 @@ export function deriveLavishQueueKey(element, options = {}) {
   return "";
 }
 
-export function createArtifactSdk(deriveQueueKey) {
+export function isNativeInteractiveControl(el) {
+  return !!(
+    el &&
+    el.closest &&
+    el.closest(
+      "button,input,select,textarea,option,optgroup,label,summary,[contenteditable]:not([contenteditable='false'])",
+    )
+  );
+}
+
+export function createArtifactSdk(deriveQueueKey, isNativeInteractive = isNativeInteractiveControl) {
   let annotationMode = true;
   let hovered = null;
   let selected = null;
@@ -218,14 +228,11 @@ export function createArtifactSdk(deriveQueueKey) {
   }
 
   // Native interactive controls (radios, checkboxes, inputs, selects, buttons,
-  // labels, editable regions) should toggle/focus/type natively instead of
-  // triggering annotation, just like elements marked with data-lavish-action.
+  // labels, disclosure summaries, editable regions) should toggle/focus/type
+  // natively instead of triggering annotation, just like elements marked with
+  // data-lavish-action.
   function isInteractiveControl(el) {
-    return !!(
-      el &&
-      el.closest &&
-      el.closest("button,input,select,textarea,option,optgroup,label,[contenteditable]:not([contenteditable='false'])")
-    );
+    return isNativeInteractive(el);
   }
 
   function highlightElement(el) {
