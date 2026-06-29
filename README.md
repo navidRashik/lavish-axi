@@ -88,7 +88,7 @@ npm install -g lavish-axi
 lavish-axi setup hooks
 ```
 
-This installs a `SessionStart` hook for **Claude Code**, **Codex**, and **OpenCode** that surfaces open sessions, visualization playbooks, and usage guidance at the start of each session.
+This installs a `SessionStart` hook for **Claude Code**, **Codex**, **OpenCode**, and **GitHub Copilot CLI** that surfaces open sessions, visualization playbooks, and usage guidance at the start of each session.
 Unlike the skill, the hook also shows your live open sessions, so a fresh agent session can resume an in-flight review.
 **Restart your agent session after running this** so the new hook takes effect.
 
@@ -168,7 +168,7 @@ pnpm link
 | `lavish-axi stop`             | Shut down the background server.                                                                                                                                            |
 | `lavish-axi playbook [id]`    | List focused artifact guidance or show one playbook; agents must open each matching playbook before writing HTML.                                                           |
 | `lavish-axi design`           | Show the Tailwind + DaisyUI CDN fallback, content-to-playbook router, Mermaid diagram tooling, `luxury` default theme, DaisyUI `@apply` warning, and layout safety snippet. |
-| `lavish-axi setup hooks`      | Install or repair optional SessionStart hooks for Claude Code, Codex, and OpenCode; restart the agent session afterward.                                                    |
+| `lavish-axi setup hooks`      | Install or repair optional SessionStart hooks for Claude Code, Codex, OpenCode, and GitHub Copilot CLI; restart the agent session afterward.                                |
 | `lavish-axi server`           | Run the local Lavish Editor server.                                                                                                                                         |
 
 Known playbook IDs: `diagram`, `table`, `comparison`, `plan`, `code`, `input`, `slides`.

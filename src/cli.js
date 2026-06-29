@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { access } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -366,19 +366,121 @@ async function setupCommand(args) {
     homeDir: resolveHookHomeDir(),
     onError: (message) => errors.push(message),
   });
+  installCopilotCliSessionStartHook({
+    hookDir: resolveCopilotHookDir(process.env, resolveHookHomeDir()),
+    onError: (message) => errors.push(message),
+  });
 
   if (errors.length > 0) {
     throw new AxiError("Failed to install lavish-axi agent hooks", "SERVER_ERROR", errors);
   }
 
   return {
-    hooks: { status: "installed", integrations: "Claude Code, Codex, OpenCode" },
+    hooks: { status: "installed", integrations: "Claude Code, Codex, OpenCode, GitHub Copilot CLI" },
     help: ["Restart your agent session to receive lavish-axi ambient context"],
   };
 }
 
 export function resolveHookHomeDir(env = process.env, fallback = os.homedir()) {
   return env.HOME || fallback;
+}
+
+export function resolveCopilotHookDir(env = process.env, homeDir = resolveHookHomeDir(env)) {
+  return path.join(env.COPILOT_HOME || path.join(homeDir, ".copilot"), "hooks");
+}
+
+export function createCopilotCliAmbientContextScript(command = "lavish-axi") {
+  return [
+    'const { spawnSync } = require("node:child_process");',
+    `const command = ${JSON.stringify(command)};`,
+    'const result = spawnSync(command, [], { encoding: "utf8", shell: true });',
+    'const detail = result.error ? result.error.message : (result.stderr || result.stdout || "exit " + (result.status ?? "unknown"));',
+    "const text = String(result.status === 0 ? result.stdout : detail).trim();",
+    'if (!text) { console.log("{}"); process.exit(0); }',
+    'const prefix = result.status === 0 ? "## AXI ambient context: lavish-axi\\n" : "## AXI ambient context: lavish-axi\\nerror: lavish-axi ambient context failed: ";',
+    "console.log(JSON.stringify({ additionalContext: prefix + text }));",
+  ].join(" ");
+}
+
+export function createCopilotCliSessionStartHook(command = "lavish-axi", timeoutSec = 10) {
+  const script = createCopilotCliAmbientContextScript(command);
+  return {
+    type: "command",
+    bash: `node -e ${quoteForPosixShell(script)}`,
+    powershell: `node -e ${quoteForPowerShell(script)}`,
+    timeoutSec,
+  };
+}
+
+export function computeCopilotCliHookUpdate(settings, hook = createCopilotCliSessionStartHook()) {
+  const updated = structuredClone(settings && typeof settings === "object" ? settings : {});
+  let changed = false;
+
+  if (updated.version !== 1) {
+    updated.version = 1;
+    changed = true;
+  }
+  if (!updated.hooks || typeof updated.hooks !== "object" || Array.isArray(updated.hooks)) {
+    updated.hooks = {};
+    changed = true;
+  }
+
+  const current = Array.isArray(updated.hooks.sessionStart) ? updated.hooks.sessionStart : [];
+  const unmanaged = current.filter((entry) => !isManagedCopilotCliHook(entry));
+  const next = [...unmanaged, hook];
+
+  if (!deepEqual(current, next)) {
+    updated.hooks.sessionStart = next;
+    changed = true;
+  }
+
+  return [changed ? updated : settings, changed];
+}
+
+export function installCopilotCliSessionStartHook({
+  hookDir = resolveCopilotHookDir(),
+  command = "lavish-axi",
+  timeoutSec = 10,
+  onError = undefined,
+} = {}) {
+  const target = path.join(hookDir, "lavish-axi.json");
+  try {
+    mkdirSync(path.dirname(target), { recursive: true });
+    const current = existsSync(target) ? JSON.parse(readFileSync(target, "utf8")) : {};
+    const [updated, changed] = computeCopilotCliHookUpdate(
+      current,
+      createCopilotCliSessionStartHook(command, timeoutSec),
+    );
+    if (changed) {
+      writeFileSync(target, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    onError?.(`${target}: ${message}`);
+  }
+}
+
+function isManagedCopilotCliHook(entry) {
+  return (
+    entry &&
+    typeof entry === "object" &&
+    (typeof entry.bash === "string" || typeof entry.powershell === "string" || typeof entry.command === "string") &&
+    [entry.bash, entry.powershell, entry.command].some(
+      (value) => typeof value === "string" && value.includes("lavish-axi"),
+    )
+  );
+}
+
+function quoteForPosixShell(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function quoteForPowerShell(value) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function deepEqual(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 async function serverCommand(args) {
@@ -676,7 +778,7 @@ const COMMAND_HELP = {
   stop: `Usage: lavish-axi stop [--port <port>]\n\nShut down the background Lavish Editor server. The server also stops itself when no browser or poll has been connected for a while (LAVISH_AXI_IDLE_TIMEOUT_MS, default 30m) and immediately when the last session ends with nothing connected.\n`,
   playbook: `Usage: lavish-axi playbook [playbook_id]\n\nList focused artifact guidance playbooks, or show one playbook by ID. Known IDs: diagram, table, comparison, plan, code, input, slides.\n\n${PLAYBOOK_ROUTER_HELP}\n\nExamples:\n  lavish-axi playbook\n  lavish-axi playbook diagram\n  lavish-axi playbook input\n`,
   design: `Usage: lavish-axi design\n\nShow a copy-pasteable CDN snippet for Tailwind CSS browser runtime v4 + DaisyUI v5 + themes, Mermaid diagram tooling, a content-to-playbook router, an optional layout safety CSS snippet, plus technical reference for DaisyUI components. ${PLAYBOOK_ROUTER_HELP} Lavish artifacts stay portable HTML. This CDN snippet is the design fallback, not the default: inspect the subject project before falling back, and paste the layout safety CSS only when useful for dense nested grid/flex layouts, badges, wide fonts, or local media. The strict priority order is: (1) if the user asked for a specific look or named design system, follow that; (2) otherwise, match the design system of the project the artifact is about, not necessarily your current working directory. If the artifact previews, proposes, or mocks a specific app's UI, use that app's own design system; (3) only when both come up empty, prefer the Lavish-recommended Tailwind + DaisyUI CDN snippet over hand-writing styles unless explicitly instructed otherwise by the user.\n`,
-  setup: `Usage: lavish-axi setup hooks\n\nInstall or repair agent SessionStart hooks for lavish-axi ambient context in Claude Code, Codex, and OpenCode. Restart your agent session afterward to receive the context.\n`,
+  setup: `Usage: lavish-axi setup hooks\n\nInstall or repair agent SessionStart hooks for lavish-axi ambient context in Claude Code, Codex, OpenCode, and GitHub Copilot CLI. Restart your agent session afterward to receive the context.\n`,
   server: `Usage: lavish-axi server [--port 4387] [--verbose]\n\nRun the local Lavish Editor server. Pass --verbose (or set LAVISH_AXI_DEBUG=1) to log session and watcher events to stderr. Detached server output is appended to ~/.lavish-axi/server.log, or LAVISH_AXI_STATE_DIR/server.log when set, for startup and crash diagnostics.\n\nLAVISH_AXI_HOST sets the bind address (default 127.0.0.1; a wildcard 0.0.0.0 or :: binds every interface). Binding beyond loopback exposes an unauthenticated server that can read and serve arbitrary local files to anything that can reach it, so only do so on a trusted network. LAVISH_AXI_LINK_HOST sets the hostname written into generated session links (default: the bind address, or loopback when bound to a wildcard). LAVISH_AXI_NO_OPEN=1 (or --no-open) suppresses the local browser launch.\n`,
 };
 

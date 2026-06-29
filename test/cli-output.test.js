@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -11,6 +12,9 @@ import { AxiError } from "axi-sdk-js";
 
 import {
   collapseHomeDirectory,
+  computeCopilotCliHookUpdate,
+  createCopilotCliAmbientContextScript,
+  createCopilotCliSessionStartHook,
   createDesignOutput,
   createHomeOutput,
   createOpenOutput,
@@ -23,6 +27,7 @@ import {
   pollInterruptedText,
   pollWaitBannerText,
   pollWaitTickText,
+  resolveCopilotHookDir,
   resolveHookHomeDir,
   resolveServerEntry,
   shutdownServerOnPort,
@@ -36,6 +41,12 @@ import {
   VERSION,
 } from "../src/cli.js";
 import { serve } from "../src/server.js";
+
+function setupHooksEnv(homeDir, stateDir) {
+  // eslint-disable-next-line no-unused-vars
+  const { COPILOT_HOME, ...env } = process.env;
+  return { ...env, HOME: homeDir, LAVISH_AXI_STATE_DIR: stateDir };
+}
 
 test("CLI version tracks package.json so release-please bumps reach the published binary", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
@@ -543,6 +554,59 @@ test("setup hooks resolves HOME before platform-specific user profile variables"
   );
 });
 
+test("setup hooks resolves Copilot hook directory from COPILOT_HOME first", () => {
+  assert.equal(
+    resolveCopilotHookDir({ COPILOT_HOME: "/tmp/copilot-home", HOME: "/tmp/home" }),
+    path.join("/tmp/copilot-home", "hooks"),
+  );
+  assert.equal(resolveCopilotHookDir({ HOME: "/tmp/home" }), path.join("/tmp/home", ".copilot", "hooks"));
+});
+
+test("setup hooks creates a Copilot CLI hook that injects additional context", () => {
+  const hook = createCopilotCliSessionStartHook();
+  const [updated, changed] = computeCopilotCliHookUpdate(
+    {
+      version: 1,
+      hooks: {
+        sessionStart: [{ type: "command", bash: "echo keep-me" }],
+      },
+    },
+    hook,
+  );
+
+  assert.equal(changed, true);
+  assert.equal(updated.version, 1);
+  assert.equal(updated.hooks.sessionStart.length, 2);
+  assert.equal(updated.hooks.sessionStart[0].bash, "echo keep-me");
+  assert.match(updated.hooks.sessionStart[1].bash, /additionalContext/);
+  assert.match(updated.hooks.sessionStart[1].powershell, /additionalContext/);
+  assert.match(updated.hooks.sessionStart[1].bash, /lavish-axi/);
+  assert.equal(updated.hooks.sessionStart[1].timeoutSec, 10);
+
+  const [unchanged, unchangedFlag] = computeCopilotCliHookUpdate(updated, hook);
+  assert.equal(unchangedFlag, false);
+  assert.equal(unchanged, updated);
+});
+
+test("Copilot CLI ambient context script wraps lavish output as hook JSON", async () => {
+  const tempDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-copilot-hook-`);
+  try {
+    const fakeCli = path.join(tempDir, "fake-lavish.js");
+    await writeFile(fakeCli, 'console.log("sessions: []");\n', "utf8");
+    const command = `"${process.execPath}" "${fakeCli}"`;
+    const result = spawnSync(process.execPath, ["-e", createCopilotCliAmbientContextScript(command)], {
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const output = JSON.parse(result.stdout);
+    assert.match(output.additionalContext, /## AXI ambient context: lavish-axi/);
+    assert.match(output.additionalContext, /sessions: \[\]/);
+  } finally {
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
 test("setup hooks installs agent session hooks explicitly", async () => {
   const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-setup-state-`);
   const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-setup-home-`);
@@ -553,15 +617,23 @@ test("setup hooks installs agent session hooks explicitly", async () => {
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         encoding: "utf8",
-        env: { ...process.env, HOME: homeDir, LAVISH_AXI_STATE_DIR: stateDir },
+        env: setupHooksEnv(homeDir, stateDir),
       },
     );
 
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.match(result.stdout, /hooks:/);
     assert.match(result.stdout, /status: installed/);
+    assert.match(result.stdout, /GitHub Copilot CLI/);
     assert.match(result.stdout, /Restart your agent session/);
     assert.ok(existsSync(`${homeDir}/.claude/settings.json`));
+    assert.ok(existsSync(`${homeDir}/.copilot/hooks/lavish-axi.json`));
+
+    const copilotHook = JSON.parse(await readFile(`${homeDir}/.copilot/hooks/lavish-axi.json`, "utf8"));
+    assert.equal(copilotHook.version, 1);
+    assert.equal(copilotHook.hooks.sessionStart.length, 1);
+    assert.match(copilotHook.hooks.sessionStart[0].bash, /additionalContext/);
+    assert.match(copilotHook.hooks.sessionStart[0].powershell, /additionalContext/);
   } finally {
     await rm(stateDir, { force: true, recursive: true });
     await rm(homeDir, { force: true, recursive: true });
@@ -581,7 +653,7 @@ test("setup hooks exits with an error when hook installation fails", async () =>
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         encoding: "utf8",
-        env: { ...process.env, HOME: homeDir, LAVISH_AXI_STATE_DIR: stateDir },
+        env: setupHooksEnv(homeDir, stateDir),
       },
     );
 
