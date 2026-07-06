@@ -365,7 +365,15 @@ export async function serve({
         return;
       }
       await watchSession(session, watchers, events, logEvent);
-      res.type("html").send(createChromeHtml(session, { layoutGateEnabled: shouldEnableLayoutGate(req.query || {}) }));
+      const artifactHtml = await readFile(session.file, "utf8").catch(() => "");
+      const { faviconTag, title } = extractArtifactHead(artifactHtml);
+      res.type("html").send(
+        createChromeHtml(session, {
+          layoutGateEnabled: shouldEnableLayoutGate(req.query || {}),
+          faviconTag,
+          title: title ? `${title} · Lavish` : "Lavish Editor",
+        }),
+      );
     } catch (error) {
       next(error);
     }
@@ -850,7 +858,54 @@ function normalizeFlagValue(value) {
   return value === undefined || value === null ? "" : String(value).trim().toLowerCase();
 }
 
-export function createChromeHtml(session, { layoutGateEnabled = true } = {}) {
+const LAVISH_DEFAULT_FAVICON =
+  "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>\u{1F48E}</text></svg>\">";
+
+function readTagAttr(tag, name) {
+  // Tokenize real attributes rather than searching for the bare name anywhere in
+  // the tag: a `\b`-anchored name matches attribute-name suffixes (e.g. `href`
+  // inside `data-href`) and names that appear inside another attribute's quoted
+  // value (e.g. `href=` inside a `title="... href=x"`), both of which would make
+  // us adopt the wrong href. Walking whole `name="value"` pairs consumes each
+  // value as one unit, so only genuine attribute names are matched.
+  const attrRe = /([a-z][\w:-]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+  const target = name.toLowerCase();
+  let match;
+  while ((match = attrRe.exec(tag)) !== null) {
+    if (match[1].toLowerCase() === target) {
+      return (match[3] ?? match[4] ?? match[5] ?? "").trim();
+    }
+  }
+  return "";
+}
+
+// Pull a tab favicon + title out of the artifact's own <head>. Lavish renders the
+// artifact in a sandboxed iframe, so the artifact's own <link rel="icon"> and
+// <title> never reach the browser tab; surfacing them here makes a wall of Lavish
+// tabs identifiable. Falls back to the Lavish default favicon. Only data: and
+// absolute (http/https/protocol-relative) icon hrefs are adopted verbatim;
+// artifact-relative hrefs would not resolve against the chrome page, so they fall
+// back to the default.
+export function extractArtifactHead(html) {
+  const head = String(html || "").slice(0, 10000);
+  let faviconTag = LAVISH_DEFAULT_FAVICON;
+  const linkTags = head.match(/<link\b(?:"[^"]*"|'[^']*'|[^"'>])*>/gi) || [];
+  const iconTag = linkTags.find((tag) => /(^|\s)icon(\s|$)/i.test(readTagAttr(tag, "rel")));
+  const iconHref = iconTag ? readTagAttr(iconTag, "href") : "";
+  if (iconHref && /^(data:|https?:|\/\/)/i.test(iconHref)) {
+    const safeHref = iconHref.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+    faviconTag = `<link rel="icon" href="${safeHref}">`;
+  }
+  let title = "";
+  const titleMatch = head.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (titleMatch) title = titleMatch[1].replace(/\s+/g, " ").trim();
+  return { faviconTag, title };
+}
+
+export function createChromeHtml(
+  session,
+  { layoutGateEnabled = true, faviconTag = LAVISH_DEFAULT_FAVICON, title = "Lavish Editor" } = {},
+) {
   const sessionJson = jsonScript({
     key: session.key,
     file: session.file,
@@ -868,7 +923,8 @@ export function createChromeHtml(session, { layoutGateEnabled = true } = {}) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lavish Editor</title>
+<title>${escapeHtml(title)}</title>
+${faviconTag}
 <link rel="stylesheet" href="/chrome.css">
 </head>
 <body class="${bodyClass}">
