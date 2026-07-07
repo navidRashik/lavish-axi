@@ -15,6 +15,7 @@ function isModeToggleHotkeyEvent(event) {
 }
 
 const frame = /** @type {HTMLIFrameElement} */ (document.getElementById("artifact"));
+const panelScroll = /** @type {HTMLDivElement} */ (document.getElementById("panelScroll"));
 const annotationPills = /** @type {HTMLDivElement} */ (document.getElementById("annotationPills"));
 const chatLog = /** @type {HTMLDivElement} */ (document.getElementById("chatLog"));
 const chatInput = /** @type {HTMLTextAreaElement} */ (document.getElementById("chatInput"));
@@ -146,6 +147,7 @@ function render() {
     closeButton.addEventListener("click", (event) => removeQueuedPrompt(Number(closeButton.dataset.index), event));
   }
   updateSendState();
+  scrollPanelToBottom();
 }
 
 function updateSendState() {
@@ -204,14 +206,15 @@ async function copyText(text) {
   return true;
 }
 
-function addChat(role, text) {
+function addChat(role, text, shouldScroll = true) {
   if (!text) return;
 
   const el = document.createElement("div");
   el.className = "bubble " + role;
   el.innerHTML = "<small>" + (role === "agent" ? "Agent" : "You") + "</small><div>" + escapeHtml(text) + "</div>";
   chatLog.appendChild(el);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  if (shouldScroll) scrollElementIntoView(el);
+  return el;
 }
 
 function syncChat(chat) {
@@ -219,9 +222,14 @@ function syncChat(chat) {
     el.remove();
   }
 
-  for (const item of chat) addChat(item.role, item.text);
-  if (workingBubble) chatLog.appendChild(workingBubble);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  let lastChatBubble = null;
+  for (const item of chat) lastChatBubble = addChat(item.role, item.text, false) || lastChatBubble;
+  if (workingBubble) {
+    chatLog.appendChild(workingBubble);
+    scrollElementIntoView(workingBubble);
+  } else if (lastChatBubble) {
+    scrollElementIntoView(lastChatBubble);
+  }
 }
 
 function setAgentPresence(state) {
@@ -241,7 +249,15 @@ function setAgentPresence(state) {
     workingBubble.innerHTML = '<span class="spinner"></span><span>Working...</span>';
     chatLog.appendChild(workingBubble);
   }
-  chatLog.scrollTop = chatLog.scrollHeight;
+  scrollElementIntoView(workingBubble);
+}
+
+function scrollPanelToBottom() {
+  panelScroll.scrollTop = panelScroll.scrollHeight;
+}
+
+function scrollElementIntoView(el) {
+  el.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 function removeQueuedPrompt(index, event) {
