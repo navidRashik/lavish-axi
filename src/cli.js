@@ -49,6 +49,10 @@ export function detectInvokingAgent(env = process.env) {
   return ["CODEX_SANDBOX", "CODEX_THREAD_ID"].some((key) => Object.hasOwn(env, key)) ? "codex" : "generic";
 }
 
+export function shouldNarratePollWaitTicks({ isTTY }) {
+  return Boolean(isTTY);
+}
+
 export function pollExecutionGuidance({ agent = "generic" } = {}) {
   const sharedGuidance = POLL_WAKE_PATH_RULES.join(" ");
   const agentGuidance = agent === "codex" ? ` ${CODEX_POLL_WAKE_PATH_GUIDANCE}` : "";
@@ -259,6 +263,9 @@ async function pollCommand(args) {
   // The indefinite poll looks hung from the agent's side (stdout stays empty until the user
   // acts), so narrate the wait on stderr and leave re-run guidance behind if the agent's
   // harness kills the process anyway. stderr keeps the stdout JSON contract intact.
+  // The one-shot banner is that "not hung" signal and stays unconditional; only the recurring
+  // ticks - one line per minute, unbounded - are gated on an interactive stderr so piped,
+  // merged agent captures do not accumulate them.
   const onPollSignal = (signal) => {
     process.stderr.write(`\n${pollInterruptedText(absolute)}\n`);
     process.exit(signal === "SIGINT" ? 130 : 143);
@@ -270,7 +277,12 @@ async function pollCommand(args) {
     process.on("SIGINT", onPollSignal);
     process.on("SIGTERM", onPollSignal);
   }
-  const waitReporter = timeoutMs ? null : startPollWaitReporter({ file: absolute });
+  const waitReporter = timeoutMs
+    ? null
+    : startPollWaitReporter({
+        file: absolute,
+        narrateTicks: shouldNarratePollWaitTicks({ isTTY: process.stderr.isTTY }),
+      });
   try {
     const response = await fetchJson(`${baseUrl}/api/poll?file=${encodeURIComponent(absolute)}${timeoutQuery}`, {
       retries: 3,
@@ -311,8 +323,10 @@ export function startPollWaitReporter({
     process.stderr.write(line);
   },
   intervalMs = 60_000,
+  narrateTicks = true,
 }) {
   write(`${pollWaitBannerText(file)}\n`);
+  if (!narrateTicks) return { stop: () => {} };
   let elapsedMs = 0;
   const timer = setInterval(() => {
     elapsedMs += intervalMs;
