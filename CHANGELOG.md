@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.44](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.43...lavish-axi-v0.1.44) (2026-07-23)
+
+
+### Bug Fixes
+
+* **cli:** suppress recurring poll wait ticks outside interactive terminals ([#179](https://github.com/kunchenguid/lavish-axi/issues/179)) ([50b0fac](https://github.com/kunchenguid/lavish-axi/commit/50b0facb61b5fc36cb1737e33b20d2894a64323b))
+* execute every PR body compliance event ([#197](https://github.com/kunchenguid/lavish-axi/issues/197)) ([f5a1ecb](https://github.com/kunchenguid/lavish-axi/commit/f5a1ecb8e32cfa7eb61bc7c713befd99b180e121))
+
 ## [0.1.43](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.42...lavish-axi-v0.1.43) (2026-07-22)
 
 
