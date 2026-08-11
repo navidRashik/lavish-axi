@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -92,19 +93,35 @@ export function isWhiteboardWriteApiPath(pathname) {
   return /^\/api\/[0-9a-f]{16}\/whiteboard\/\d{1,3}(\/feedback-files)?$/.test(String(pathname || ""));
 }
 
-export function createWhiteboardChannelToken(secret, now = Date.now()) {
-  const payload = `${now}.${crypto.randomBytes(24).toString("base64url")}`;
-  const signature = crypto.createHmac("sha256", secret).update(payload).digest("base64url");
-  return `${payload}.${signature}`;
+// The signed payload carries the session key, so a token is a capability for
+// exactly one session. Without that binding any token - including one minted by
+// a request that named no session - authenticated an arbitrary session's
+// whiteboard channel. The wire format stays `${issuedAt}.${nonce}.${signature}`;
+// the key is signed over, never transmitted in the token.
+function whiteboardChannelPayload(issuedAt, nonce, sessionKey) {
+  return `${issuedAt}.${nonce}.${sessionKey}`;
 }
 
-export function isValidWhiteboardChannelToken(token, secret, now = Date.now()) {
+export function createWhiteboardChannelToken(secret, sessionKey, now = Date.now()) {
+  const nonce = crypto.randomBytes(24).toString("base64url");
+  const signature = crypto
+    .createHmac("sha256", secret)
+    .update(whiteboardChannelPayload(now, nonce, String(sessionKey || "")))
+    .digest("base64url");
+  return `${now}.${nonce}.${signature}`;
+}
+
+export function isValidWhiteboardChannelToken(token, secret, sessionKey, now = Date.now()) {
+  if (!isValidWhiteboardKey(sessionKey)) return false;
   const [issuedAtText, nonce, signature, extra] = String(token || "").split(".");
   if (extra !== undefined || !/^\d{13}$/.test(issuedAtText) || !/^[A-Za-z0-9_-]{32}$/.test(nonce)) return false;
   const issuedAt = Number(issuedAtText);
   if (!Number.isSafeInteger(issuedAt) || issuedAt > now || now - issuedAt > WHITEBOARD_CHANNEL_TOKEN_TTL_MS)
     return false;
-  const expected = crypto.createHmac("sha256", secret).update(`${issuedAtText}.${nonce}`).digest("base64url");
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(whiteboardChannelPayload(issuedAtText, nonce, String(sessionKey)))
+    .digest("base64url");
   const actualBuffer = Buffer.from(signature || "", "utf8");
   const expectedBuffer = Buffer.from(expected, "utf8");
   return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
@@ -172,7 +189,8 @@ export async function serve({
   // who front the server with their own authentication. When a reverse proxy sits
   // in front, X-Forwarded-Host is validated too (see isAllowedRequestHost).
   const allowedHostnames = buildAllowedHostnames({ host, linkHost: linkHostName, allowedHosts });
-  if (!allowsAllHosts(allowedHosts)) {
+  const allowAnyHostname = allowsAllHosts(allowedHosts);
+  if (!allowAnyHostname) {
     app.use((req, res, next) => {
       const requestHost = { host: req.headers.host, forwardedHost: req.headers["x-forwarded-host"] };
       if (isAllowedRequestHost(requestHost, allowedHostnames)) {
@@ -312,8 +330,16 @@ export async function serve({
     }
   });
 
+  // The one route that puts words in the reviewer's mouth: whatever lands here
+  // reaches the agent as the user's own instructions. The session key is derived
+  // from the artifact path, not a secret, so knowing it must not be enough -
+  // only this server's own chrome may queue prompts.
   app.post("/api/:key/prompts", async (req, res, next) => {
     try {
+      if (!isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
+        res.status(403).json({ error: "cross-origin prompt submission rejected" });
+        return;
+      }
       const shouldEndSession = Boolean(req.body?.endSession || req.body?.end_session);
       const hasLayoutWarningPrompt = Array.isArray(req.body?.prompts)
         ? req.body.prompts.some((prompt) => prompt?.tag === "layout-warnings")
@@ -504,7 +530,7 @@ export async function serve({
   // loopback server.
   app.post("/api/:key/share", async (req, res, next) => {
     try {
-      if (!isSameOriginRequest(req)) {
+      if (!isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
         res.status(403).json({ error: "cross-origin share request rejected" });
         return;
       }
@@ -565,6 +591,15 @@ export async function serve({
       await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
       const artifactHtml = await readFile(session.file, "utf8").catch(() => "");
       const { faviconTag, title } = extractArtifactHead(artifactHtml);
+      // Nothing legitimately frames the review chrome - it is the top-level
+      // page, and shares/exports ship standalone HTML rather than embedding it.
+      // Refusing to be framed denies an attacker page both a window handle to
+      // this chrome and a clickjacking surface over Send. Scoped to this route:
+      // /artifact/* is framed by this page and /whiteboard-frame is framed by
+      // that artifact document, whose sandbox gives it an opaque origin no
+      // frame-ancestors expression can name.
+      res.setHeader("x-frame-options", "DENY");
+      res.setHeader("content-security-policy", "frame-ancestors 'none'");
       res.type("html").send(
         createChromeHtml(session, {
           layoutGateEnabled: shouldEnableLayoutGate(req.query || {}),
@@ -587,7 +622,7 @@ export async function serve({
 
   app.post("/api/:key/chrome-loads/begin", async (req, res, next) => {
     try {
-      if (!isSameOriginRequest(req)) {
+      if (!isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
         res.status(403).json({ error: "cross-origin chrome handoff rejected" });
         return;
       }
@@ -798,7 +833,16 @@ export async function serve({
   // reports ready.
   app.get("/whiteboard-frame", (req, res) => {
     res.setHeader("cache-control", "no-store");
-    res.type("html").send(createWhiteboardFrameHtml(createWhiteboardChannelToken(whiteboardChannelSecret)));
+    // The frame's channel token is minted for one session, so the caller must
+    // name it. Both call sites (the chrome overlay and the artifact SDK's
+    // inline embed) know their own key; a request without one could only
+    // produce a token that authenticates nothing, so reject it outright.
+    const sessionKey = String(req.query.key || "");
+    if (!isValidWhiteboardKey(sessionKey)) {
+      res.status(400).type("text/plain").send("Missing session key");
+      return;
+    }
+    res.type("html").send(createWhiteboardFrameHtml(createWhiteboardChannelToken(whiteboardChannelSecret, sessionKey)));
   });
 
   // Whiteboard bundle, stylesheet, and vendored Excalidraw fonts. The frame
@@ -870,7 +914,7 @@ export async function serve({
 
   app.post("/api/:key/whiteboard-channel", async (req, res, next) => {
     try {
-      if (!isSameOriginRequest(req)) {
+      if (!isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
         res.status(403).json({ error: "cross-origin whiteboard channel request rejected" });
         return;
       }
@@ -879,7 +923,7 @@ export async function serve({
         res.status(404).json({ error: "session not found" });
         return;
       }
-      if (!isValidWhiteboardChannelToken(req.body?.token, whiteboardChannelSecret)) {
+      if (!isValidWhiteboardChannelToken(req.body?.token, whiteboardChannelSecret, req.params.key)) {
         res.status(403).json({ error: "invalid whiteboard channel" });
         return;
       }
@@ -895,7 +939,7 @@ export async function serve({
   // loopback server.
   app.put("/api/:key/whiteboard/:index", async (req, res, next) => {
     try {
-      if (!isSameOriginRequest(req)) {
+      if (!isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
         res.status(403).json({ error: "cross-origin whiteboard write rejected" });
         return;
       }
@@ -922,7 +966,7 @@ export async function serve({
   // target. Files stay on this machine; the prompt carries only the paths.
   app.post("/api/:key/whiteboard/:index/feedback-files", async (req, res, next) => {
     try {
-      if (!isSameOriginRequest(req)) {
+      if (!isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
         res.status(403).json({ error: "cross-origin whiteboard write rejected" });
         return;
       }
@@ -1130,25 +1174,40 @@ export function allowsAllHosts(allowedHosts = []) {
   return allowedHosts.some((value) => String(value).trim() === "*");
 }
 
+function parseHostAuthority(value) {
+  const raw = String(value).trim();
+  if (!raw || /[@/\\?#\s]/.test(raw)) return null;
+
+  let hostname;
+  let port;
+  let bracketed = false;
+  if (raw.startsWith("[")) {
+    const match = /^\[([0-9A-Fa-f:.]+)\](?::(\d+))?$/.exec(raw);
+    if (!match || isIP(match[1]) !== 6) return null;
+    [, hostname, port = ""] = match;
+    bracketed = true;
+  } else {
+    const match = /^([A-Za-z0-9._-]+)(?::(\d+))?$/.exec(raw);
+    if (!match) return null;
+    [, hostname, port = ""] = match;
+  }
+  if (port && Number(port) > 65535) return null;
+
+  hostname = hostname.toLowerCase();
+  const authority = `${bracketed ? `[${hostname}]` : hostname}${port ? `:${port}` : ""}`;
+  try {
+    const parsed = new URL(`http://${authority}`);
+    if (!parsed.origin || parsed.origin === "null") return null;
+  } catch {
+    return null;
+  }
+  return { hostname, port, authority };
+}
+
 // Extract the hostname (without port) from a Host header value, honoring
 // bracketed IPv6 literals ("[::1]:4387"). Returns null for a malformed authority.
 export function hostnameFromHostHeader(value) {
-  const raw = String(value).trim();
-  if (raw.startsWith("[")) {
-    const end = raw.indexOf("]");
-    if (end === -1) return null;
-    // Anything after the closing bracket must be a `:port` suffix; reject trailing
-    // garbage (e.g. "[::1]evil.com") instead of reading it as the bracketed host.
-    const rest = raw.slice(end + 1);
-    if (rest.length > 0 && !rest.startsWith(":")) return null;
-    return raw.slice(1, end).toLowerCase();
-  }
-  const colon = raw.indexOf(":");
-  const hostname = colon === -1 ? raw : raw.slice(0, colon);
-  // A bare, unbracketed IPv6 literal is not a valid authority; reject it rather
-  // than mistaking a hextet for a port.
-  if (hostname.includes(":")) return null;
-  return hostname.toLowerCase();
+  return parseHostAuthority(value)?.hostname ?? null;
 }
 
 // DNS-rebinding defense: a loopback-bound server answers only to its own known
@@ -1158,11 +1217,8 @@ export function hostnameFromHostHeader(value) {
 // fail open.
 export function isAllowedHostHeader(hostHeader, allowedHostnames) {
   if (hostHeader === undefined || hostHeader === null) return false;
-  const raw = String(hostHeader).trim();
-  if (raw === "") return false;
-  const hostname = hostnameFromHostHeader(raw);
-  if (hostname === null) return false;
-  return allowedHostnames.has(hostname);
+  const authority = parseHostAuthority(hostHeader);
+  return authority !== null && allowedHostnames.has(authority.hostname);
 }
 
 // Validate a request's effective host for DNS-rebinding protection. The Host
@@ -1185,8 +1241,34 @@ export function isAllowedRequestHost({ host, forwardedHost }, allowedHostnames) 
 
 // Guard state-changing, outward-facing routes (publishing to a third-party host) against CSRF: a
 // browser attaches an Origin/Referer that must match this server's own origin.
-function isSameOriginRequest(req) {
-  const expectedOrigin = `${req.protocol}://${req.get("host")}`;
+function isSameOriginRequest(req, allowedHostnames, allowAnyHostname = false) {
+  const host = parseHostAuthority(req.headers.host);
+  if (!host) return false;
+
+  let protocol = req.protocol;
+  let authority = host;
+  const forwardedHost = String(req.get("x-forwarded-host") || "")
+    .split(",")
+    .pop()
+    .trim();
+  if (forwardedHost) {
+    const forwardedAuthority = parseHostAuthority(forwardedHost);
+    if (
+      !forwardedAuthority ||
+      (!allowAnyHostname &&
+        (!allowedHostnames.has(host.hostname) || !allowedHostnames.has(forwardedAuthority.hostname)))
+    )
+      return false;
+    protocol = String(req.get("x-forwarded-proto") || req.protocol)
+      .split(",")
+      .pop()
+      .trim()
+      .toLowerCase();
+    if (protocol !== "http" && protocol !== "https") return false;
+    authority = forwardedAuthority;
+  }
+  const expectedOrigin = normalizeOrigin(`${protocol}://${authority.authority}`);
+  if (!expectedOrigin) return false;
   const origin = req.get("origin");
   if (origin) {
     return normalizeOrigin(origin) === expectedOrigin;
@@ -1568,7 +1650,6 @@ export function createSdkJs(key, artifactRevision = 0, artifactLoadToken = "") {
   const loadToken = String(artifactLoadToken || "").slice(0, 200);
   return `(() => {
 const key=${JSON.stringify(key)};
-void key;
 const artifactRevision=${revision};
 const artifactLoadToken=${JSON.stringify(loadToken)};
 const deriveQueueKey=${deriveLavishQueueKey.toString()};
@@ -1582,7 +1663,7 @@ const findStableLayoutFindings=${findStableLayoutFindings.toString()};
 const isNearTotalOcclusion=${isNearTotalOcclusion.toString()};
 ${mermaidHelperDecls}
 const mermaidHelpers={ ${mermaidHelperKeys} };
-(${createArtifactSdk.toString()})(deriveQueueKey, isNativeInteractiveControl, mermaidHelpers, artifactRevision, artifactLoadToken);
+(${createArtifactSdk.toString()})(deriveQueueKey, isNativeInteractiveControl, mermaidHelpers, artifactRevision, artifactLoadToken, key);
 })();`;
 }
 
