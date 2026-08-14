@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node
 import { createServer, request as httpRequest } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import test from "node:test";
 
 process.env.LAVISH_AXI_HOST = "127.0.0.1";
@@ -20,6 +21,7 @@ import {
   hostnameFromHostHeader,
   isAllowedHostHeader,
   isAllowedRequestHost,
+  readAttachmentUploadBody,
   resolveArtifactAsset,
   resolveDesignAssetPath,
   resolveIdleTimeoutMs,
@@ -127,6 +129,30 @@ test("server serves chrome browser behavior from a dedicated source file", async
   assert.match(html, /<script id="lavish-session" type="application\/json">/);
   assert.match(html, /<script src="\/chrome-client\.js"><\/script>/);
   assert.doesNotMatch(html, /<script>\s*const key=/);
+});
+
+test("createChromeHtml exposes the attachment byte cap so the chrome can pre-check uploads", () => {
+  const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" }, { attachmentMaxBytes: 12345 });
+  assert.match(html, /"attachmentMaxBytes":12345/);
+});
+
+test("readAttachmentUploadBody buffers under the cap and drains the stream when over it", async () => {
+  const under = await readAttachmentUploadBody(Readable.from([Buffer.from("ab"), Buffer.from("c")]), 10);
+  assert.equal(under.tooLarge, false);
+  assert.equal(under.buffer.toString(), "abc");
+
+  // Over the cap: it must consume every chunk (drain to end) and report tooLarge
+  // without buffering, so the route can send a clean 413 after the body is read.
+  let drained = 0;
+  const chunks = [Buffer.alloc(6), Buffer.alloc(8), Buffer.alloc(4)];
+  const stream = Readable.from(chunks);
+  stream.on("data", (chunk) => {
+    drained += chunk.length;
+  });
+  const over = await readAttachmentUploadBody(stream, 10);
+  assert.equal(over.tooLarge, true);
+  assert.equal(over.buffer, null);
+  assert.equal(drained, 18);
 });
 
 test("server serves chrome styles from a dedicated source file", async () => {
@@ -720,7 +746,7 @@ test("sending with an empty composer nudges instead of blocking", async () => {
   const css = await chromeCssSource();
 
   assert.match(html, /class="send-hint" id="sendHint" hidden>Write a message or annotate an element first\.<\/div>/);
-  assert.match(js, /function showSendHint\(\)/);
+  assert.match(js, /function showSendHint\(message = DEFAULT_SEND_HINT/);
   assert.match(js, /sendHint\.hidden = false/);
   assert.match(js, /chatInput\.focus\(\)/);
   assert.match(css, /\.send-hint\{/);
@@ -4038,7 +4064,8 @@ test("annotation card queues prompt on Enter and inserts newline on Shift+Enter"
   assert.match(js, /textarea\.addEventListener\(["']keydown["']/);
   assert.match(js, /event\.key === ["']Enter["'] && !event\.shiftKey/);
   assert.match(js, /event\.preventDefault\(\)/);
-  assert.match(js, /sendButton\.click\(\)/);
+  // Enter routes through tryQueue(), which gates on in-flight uploads (R2.4).
+  assert.match(js, /const queued = tryQueue\(\)/);
 });
 
 test("annotation card queues and sends immediately on Ctrl+Enter or Cmd+Enter", () => {
@@ -4047,7 +4074,7 @@ test("annotation card queues and sends immediately on Ctrl+Enter or Cmd+Enter", 
   assert.match(js, /event\.ctrlKey \|\| event\.metaKey/);
   assert.match(js, /sendQueuedPrompts\(\)/);
   assert.match(js, /class="lavish-hint"/);
-  assert.match(js, /\+Enter to send now/);
+  assert.match(js, /\+Enter to send/);
   assert.match(js, /\.lavish-annotation-card \.lavish-hint\{/);
 });
 

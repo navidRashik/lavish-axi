@@ -14,12 +14,17 @@ import {
   classifySevereTextOverflow,
   classifyMaterialRectEscape,
   createArtifactSdk,
+  deriveAttachmentNoticeState,
   deriveLavishQueueKey,
   findStableLayoutFindings,
   isMaterialPageOverflow,
   isModeToggleHotkeyEvent,
   isNativeInteractiveControl,
   isNearTotalOcclusion,
+  isTrustedAttachmentResult,
+  attachmentSizeError,
+  classifyAttachmentBatch,
+  partitionDroppedFiles,
   MODE_TOGGLE_HOTKEY_KEY,
 } from "./artifact-sdk.js";
 import {
@@ -46,6 +51,15 @@ import { publishToHtmlApp } from "./html-app.js";
 import { injectLavishSdk } from "./html-transform.js";
 import { bindHost, extraAllowedHosts, hostForUrl, IPV6_LOOPBACK_HOST, linkHost, LOOPBACK_HOST } from "./paths.js";
 import { canonicalFile, SessionStore, sessionKey } from "./session-store.js";
+import {
+  isValidAttachmentKey,
+  removeAttachment,
+  resolveAttachment,
+  resolveAttachmentConfig,
+  statAttachmentForServe,
+  sweepAttachments,
+  writeAttachment,
+} from "./attachment-store.js";
 
 const chromeClientUrl = new URL("./chrome-client.js", import.meta.url);
 const chromeCssUrl = new URL("./chrome.css", import.meta.url);
@@ -69,6 +83,10 @@ const designAssetUrls = {
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WHITEBOARD_CHANNEL_TOKEN_TTL_MS = 5 * 60_000;
+// Sweep orphaned/expired attachments periodically, not just at startup: a
+// detached server can run for days, and an upload whose /prompts follow-up never
+// arrived would otherwise linger until the next restart.
+const ATTACHMENT_SWEEP_INTERVAL_MS = 60 * 60_000;
 
 // Live-reload coalescing. A normal save is one reload after a short debounce. While a queued
 // layout-warning batch is outstanding, the agent is applying several related edits, so widen the
@@ -91,6 +109,66 @@ export function defaultWhiteboardAssetsDir() {
 // whiteboard write routes get the larger limit.
 export function isWhiteboardWriteApiPath(pathname) {
   return /^\/api\/[0-9a-f]{16}\/whiteboard\/\d{1,3}(\/feedback-files)?$/.test(String(pathname || ""));
+}
+
+// The attachment upload carries raw image bytes, not JSON, so it bypasses both
+// JSON body parsers and is read straight from the request stream by the route.
+export function isAttachmentUploadApiPath(pathname) {
+  return /^\/api\/[0-9a-f]{16}\/attachments$/.test(String(pathname || ""));
+}
+
+// Read the raw upload body, buffering at most `maxBytes` but always draining the
+// stream to its end. If the body exceeds the cap it resolves `{ tooLarge: true }`
+// (bytes discarded) rather than aborting mid-stream, so the caller can send a clean
+// 413 the browser reliably receives even while it is still uploading a large file.
+export function readAttachmentUploadBody(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    let overCap = false;
+    let settled = false;
+    const cleanup = () => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      req.off("aborted", onAborted);
+      req.off("close", onClose);
+    };
+    const onData = (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        // Stop buffering but keep consuming so the response is not sent while the
+        // request body is still in flight.
+        overCap = true;
+        chunks.length = 0;
+      } else {
+        chunks.push(chunk);
+      }
+    };
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(overCap ? { tooLarge: true, buffer: null } : { tooLarge: false, buffer: Buffer.concat(chunks) });
+    };
+    const onError = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAborted = () => onError(new Error("attachment upload aborted"));
+    // Safety net: if the socket closes before "end" (client aborted mid-upload),
+    // reject rather than leaving the route awaiting a promise that never settles.
+    const onClose = () => {
+      if (!settled) onError(new Error("attachment upload connection closed"));
+    };
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+    req.on("aborted", onAborted);
+    req.on("close", onClose);
+  });
 }
 
 // The signed payload carries the session key, so a token is a capability for
@@ -188,6 +266,9 @@ export async function serve({
   // LAVISH_AXI_ALLOWED_HOSTS; a lone "*" there disables the guard for operators
   // who front the server with their own authentication. When a reverse proxy sits
   // in front, X-Forwarded-Host is validated too (see isAllowedRequestHost).
+  //
+  // This guard is installed as the first middleware so every route - including the
+  // attachment upload/fetch/remove endpoints below - is behind the Host allowlist.
   const allowedHostnames = buildAllowedHostnames({ host, linkHost: linkHostName, allowedHosts });
   const allowAnyHostname = allowsAllHosts(allowedHosts);
   if (!allowAnyHostname) {
@@ -204,11 +285,28 @@ export async function serve({
     });
   }
 
+  const attachmentConfig = resolveAttachmentConfig();
+  // Attachment bytes are content-addressed on disk alongside the whiteboard sidecars.
+  const attachmentStateRoot = path.dirname(stateFile);
+  // The store owns the ONE shared lock covering BOTH state consistency AND the
+  // attachment lifecycle. It serializes every state.json read-modify-write
+  // internally (E1); the server routes its attachment disk sections - upload
+  // finalize, delete, the reference-aware sweep - through the same lock via
+  // `store.runExclusive`, so a reference can never be acquired in the window between
+  // the sweeper's reference snapshot and its delete (D5), and `queuePrompts` cannot
+  // interleave with a concurrent poll.
+
   const defaultJsonParser = express.json({ limit: "2mb" });
   const whiteboardJsonParser = express.json({ limit: "20mb" });
-  app.use((req, res, next) =>
-    isWhiteboardWriteApiPath(req.path) ? whiteboardJsonParser(req, res, next) : defaultJsonParser(req, res, next),
-  );
+  app.use((req, res, next) => {
+    // The attachment upload reads the raw request stream itself (see the route),
+    // so no body parser runs for it - express.raw's limit aborts on Content-Length
+    // WITHOUT draining the body, which leaves the browser's in-flight upload to be
+    // reset mid-stream instead of receiving the 413.
+    if (req.method === "POST" && isAttachmentUploadApiPath(req.path)) return next();
+    if (isWhiteboardWriteApiPath(req.path)) return whiteboardJsonParser(req, res, next);
+    return defaultJsonParser(req, res, next);
+  });
 
   app.get("/health", (req, res) => {
     res.json({ ok: true, app: "lavish-axi", version });
@@ -344,11 +442,28 @@ export async function serve({
       const hasLayoutWarningPrompt = Array.isArray(req.body?.prompts)
         ? req.body.prompts.some((prompt) => prompt?.tag === "layout-warnings")
         : false;
-      const session = await store.queuePrompts(req.params.key, req.body || {});
-      if (!session) {
+      const result = await store.queuePrompts(req.params.key, req.body || {}, {
+        resolveAttachment: (sessionKeyValue, id) => resolveAttachment(attachmentStateRoot, sessionKeyValue, id),
+        maxPerPrompt: attachmentConfig.maxPerPrompt,
+        maxPromptBytes: attachmentConfig.maxPromptBytes,
+      });
+      if (!result) {
         res.status(404).json({ error: "session not found" });
         return;
       }
+      // Atomic attachment rejection (C4): the batch resolved-and-persisted nothing
+      // because one or more images could not be honored. Return 400 with the
+      // rejected refs and the caps so the chrome keeps its queue and can surface
+      // exactly what to fix, instead of silently dropping the images.
+      if (result.rejected) {
+        res.status(400).json({
+          error: "some attachments could not be delivered",
+          rejected: result.rejected,
+          caps: result.caps,
+        });
+        return;
+      }
+      const session = result;
       if (session.conflict) {
         res.status(409).json({
           status: "conflict",
@@ -609,6 +724,7 @@ export async function serve({
           artifactLoadToken: chromeLoad.artifact_load_token,
           artifactLoadSequence: chromeLoad.artifact_load_sequence,
           chromeLoadToken: chromeLoad.chrome_load_token,
+          attachmentMaxBytes: attachmentConfig.maxBytes,
         }),
       );
     } catch (error) {
@@ -817,9 +933,12 @@ export async function serve({
         res.status(409).json({ status: "stale" });
         return;
       }
-      res
-        .type("application/javascript")
-        .send(createSdkJs(String(req.query.key || ""), verified.artifact_revision, verified.artifact_load_token));
+      res.type("application/javascript").send(
+        createSdkJs(String(req.query.key || ""), verified.artifact_revision, verified.artifact_load_token, {
+          maxAttachmentCount: attachmentConfig.maxPerPrompt,
+          maxAttachmentBytes: attachmentConfig.maxBytes,
+        }),
+      );
     } catch (error) {
       next(error);
     }
@@ -988,6 +1107,97 @@ export async function serve({
     }
   });
 
+  // Annotation image attachments. Upload writes raw bytes to the state dir and
+  // returns server-vetted metadata (content-hash id + absolute path); the prompt
+  // later references the id and the server re-resolves it (see queuePrompts).
+  // Upload and delete write/remove local files, so they are same-origin guarded
+  // like the whiteboard writes - a hostile cross-origin page must not drive them.
+  app.post("/api/:key/attachments", async (req, res, next) => {
+    try {
+      if (!isSameOriginRequest(req)) {
+        res.status(403).json({ error: "cross-origin attachment upload rejected" });
+        return;
+      }
+      if (!isValidAttachmentKey(req.params.key) || !(await store.findByKey(req.params.key))) {
+        res.status(404).json({ error: "session not found" });
+        return;
+      }
+      // Read the raw stream ourselves, draining past the cap to end-of-body before
+      // responding. That guarantees the browser receives the 413 for an over-cap
+      // upload instead of a mid-stream connection reset (only the same-origin chrome
+      // can reach this route, so draining a rejected body is bounded and trusted).
+      const { tooLarge, buffer } = await readAttachmentUploadBody(req, attachmentConfig.maxBytes);
+      if (tooLarge) {
+        res.status(413).json({ error: `attachment exceeds the ${attachmentConfig.maxBytes} byte limit` });
+        return;
+      }
+      // Finalize under the lifecycle lock so the dedup mtime refresh (B3), the dims
+      // sidecar write, AND the disk-cap admission (reference snapshot + reclaim +
+      // write) are one atomic critical section. Admission is a HARD cap: a new object
+      // that can't fit after reclaiming unreferenced files is refused with 507, so
+      // concurrent pages can never push committed storage past `maxDiskBytes` via
+      // queued references (the sweep alone never evicts referenced files). The
+      // eviction grace keeps a just-uploaded ready card off the reclaim list so it
+      // survives until the user sends it.
+      const attachment = await store.runExclusive(async () => {
+        const referenced = await store.referencedAttachmentIds();
+        return writeAttachment(attachmentStateRoot, req.params.key, buffer, {
+          maxBytes: attachmentConfig.maxBytes,
+          maxDiskBytes: attachmentConfig.maxDiskBytes,
+          maxObjects: attachmentConfig.maxObjects,
+          ttlMs: attachmentConfig.ttlMs,
+          referenced,
+          evictionGraceMs: attachmentConfig.evictionGraceMs,
+        });
+      });
+      res.json({ status: "stored", attachment });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/:key/attachments/:id", async (req, res, next) => {
+    try {
+      // D6: a render is one stat + one streamed read. `statAttachmentForServe`
+      // confirms existence and derives the mime from the validated id extension
+      // WITHOUT re-parsing the image to recover dimensions the route never uses.
+      const serve = await statAttachmentForServe(attachmentStateRoot, req.params.key, req.params.id);
+      if (!serve) {
+        res.status(404).json({ error: "attachment not found" });
+        return;
+      }
+      res.setHeader("cache-control", "private, max-age=300");
+      res.type(serve.mime);
+      res.sendFile(serve.file, { dotfiles: "allow" });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete("/api/:key/attachments/:id", async (req, res, next) => {
+    try {
+      if (!isSameOriginRequest(req)) {
+        res.status(403).json({ error: "cross-origin attachment delete rejected" });
+        return;
+      }
+      // Reference-counted delete under the lifecycle lock: a content-addressed file
+      // shared by an already-queued prompt (the same image attached twice, deduped
+      // to one id) must survive a chip removal, or the queued prompt's thumbnail and
+      // path break. `referencedAttachmentIds` also covers attachments delivered
+      // within the read grace, so a poll's images are not deletable out from under
+      // the agent. The chrome never drives this route (see chrome-client's note on
+      // the removed eager delete); it remains a same-origin-guarded server API.
+      const status = await store.runExclusive(async () => {
+        const referenced = await store.referencedAttachmentIds();
+        if (referenced.has(`${req.params.key}/${req.params.id}`)) return "referenced";
+        return (await removeAttachment(attachmentStateRoot, req.params.key, req.params.id)) ? "removed" : "absent";
+      });
+      res.json({ status });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.use((error, req, res, _next) => {
     // Body-parser errors carry a meaningful HTTP status (413 payload-too-large,
     // 400 malformed JSON); surface it instead of flattening everything to 500.
@@ -1010,6 +1220,10 @@ export async function serve({
     if (idleTimer) {
       clearTimeout(idleTimer);
       idleTimer = null;
+    }
+    if (attachmentSweepTimer) {
+      clearInterval(attachmentSweepTimer);
+      attachmentSweepTimer = null;
     }
     // Tell open browser chromes to reload before we drop their SSE connection. The new
     // server adopts the session via state.json once it binds, so the reloaded chrome
@@ -1088,6 +1302,42 @@ export async function serve({
 
   function reloadDebounceMs(key) {
     return outstandingRepairBatches.has(key) ? BATCH_RELOAD_DEBOUNCE_MS : RELOAD_DEBOUNCE_MS;
+  }
+
+  // Reference-aware attachment cleanup: reap files that are both past their TTL
+  // and unreferenced, plus the optional disk-cap backstop. Runs once at startup
+  // and then on a fixed interval; skipped entirely when neither a TTL nor a disk
+  // cap is configured. Never touches attachments referenced by pending prompts.
+  const attachmentSweepEnabled = attachmentConfig.ttlMs != null || attachmentConfig.maxDiskBytes != null;
+  let attachmentSweepTimer = null;
+  async function sweepAttachmentsNow() {
+    try {
+      // The reference snapshot AND the enumerate/delete run as one critical section
+      // so a reference acquired mid-sweep (a concurrent upload finalize or /prompts
+      // resolve) can never point at a file this sweep is about to remove (D5).
+      const result = await store.runExclusive(async () => {
+        const referenced = await store.referencedAttachmentIds();
+        return sweepAttachments(attachmentStateRoot, {
+          ttlMs: attachmentConfig.ttlMs,
+          maxDiskBytes: attachmentConfig.maxDiskBytes,
+          maxObjects: attachmentConfig.maxObjects,
+          referenced,
+          evictionGraceMs: attachmentConfig.evictionGraceMs,
+        });
+      });
+      if (result.deleted > 0) {
+        logEvent?.(`attachment sweep removed ${result.deleted} file(s), freed ${result.freedBytes} bytes`);
+      }
+    } catch (error) {
+      logEvent?.(`attachment sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (attachmentSweepEnabled) {
+    sweepAttachmentsNow();
+    attachmentSweepTimer = setInterval(() => {
+      sweepAttachmentsNow();
+    }, ATTACHMENT_SWEEP_INTERVAL_MS);
+    attachmentSweepTimer.unref?.();
   }
 
   // Arm the idle timer for a server that is spawned but never opens a session.
@@ -1578,6 +1828,7 @@ export function createChromeHtml(
     artifactLoadToken = "",
     artifactLoadSequence = 0,
     chromeLoadToken = "",
+    attachmentMaxBytes = 0,
   } = {},
 ) {
   const sessionJson = jsonScript({
@@ -1593,6 +1844,7 @@ export function createChromeHtml(
     chromeLoadToken,
     layoutGateEnabled,
     modeToggleHotkeyKey: MODE_TOGGLE_HOTKEY_KEY,
+    attachmentMaxBytes,
   });
   const { head: pathHead, tail: pathTail } = displayPathParts(session.file);
   const bodyClass = layoutGateEnabled ? "lavish layout-gate-active" : "lavish";
@@ -1637,7 +1889,18 @@ export function createWhiteboardFrameHtml(channelToken = "") {
 </html>`;
 }
 
-export function createSdkJs(key, artifactRevision = 0, artifactLoadToken = "") {
+/**
+ * @param {string} key
+ * @param {number} [artifactRevision]
+ * @param {string} [artifactLoadToken]
+ * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number }} [options]
+ */
+export function createSdkJs(
+  key,
+  artifactRevision = 0,
+  artifactLoadToken = "",
+  { maxAttachmentCount, maxAttachmentBytes } = {},
+) {
   // Serialize every helper exported by mermaid-node.js as a same-scope const so
   // cross-helper calls (e.g. mermaidNodeFrom → mermaidNodeElement) resolve in the
   // browser. Deriving this from the module's exports — rather than a hand-kept
@@ -1648,6 +1911,14 @@ export function createSdkJs(key, artifactRevision = 0, artifactLoadToken = "") {
   const revisionNumber = Number(artifactRevision);
   const revision = Number.isFinite(revisionNumber) && revisionNumber >= 0 ? Math.trunc(revisionNumber) : 0;
   const loadToken = String(artifactLoadToken || "").slice(0, 200);
+  // The per-prompt attachment cap is authoritative on the server (attachment-store.js);
+  // pass it to the SDK so the annotation card's local count guard matches the server
+  // limit instead of a hardcoded literal (W1). The card is still only a UX guide - the
+  // server re-enforces the cap on /prompts and rejects the whole batch on a mismatch.
+  const sdkOptions = {
+    maxAttachmentCount: Number.isFinite(maxAttachmentCount) ? maxAttachmentCount : undefined,
+    maxAttachmentBytes: Number.isFinite(maxAttachmentBytes) ? maxAttachmentBytes : undefined,
+  };
   return `(() => {
 const key=${JSON.stringify(key)};
 const artifactRevision=${revision};
@@ -1661,9 +1932,14 @@ const classifyMaterialRectEscape=${classifyMaterialRectEscape.toString()};
 const isMaterialPageOverflow=${isMaterialPageOverflow.toString()};
 const findStableLayoutFindings=${findStableLayoutFindings.toString()};
 const isNearTotalOcclusion=${isNearTotalOcclusion.toString()};
+const attachmentSizeError=${attachmentSizeError.toString()};
+const classifyAttachmentBatch=${classifyAttachmentBatch.toString()};
+const partitionDroppedFiles=${partitionDroppedFiles.toString()};
+const isTrustedAttachmentResult=${isTrustedAttachmentResult.toString()};
+const deriveAttachmentNoticeState=${deriveAttachmentNoticeState.toString()};
 ${mermaidHelperDecls}
 const mermaidHelpers={ ${mermaidHelperKeys} };
-(${createArtifactSdk.toString()})(deriveQueueKey, isNativeInteractiveControl, mermaidHelpers, artifactRevision, artifactLoadToken, key);
+(${createArtifactSdk.toString()})(deriveQueueKey, isNativeInteractiveControl, mermaidHelpers, artifactRevision, artifactLoadToken, key, ${JSON.stringify(sdkOptions)});
 })();`;
 }
 
