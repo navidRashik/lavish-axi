@@ -257,6 +257,56 @@ export async function serve({
   const logEvent = verbose ? (line) => writeLog(`[lavish] ${line}`) : null;
   let publicPort = port;
 
+  function finishFeedbackDelivery(key, result) {
+    if (result.status !== "feedback") return;
+    const chat = result.chat;
+    delete result.chat;
+    markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
+    // A batch flagged `session_ended` is the last one this session will ever deliver, so no
+    // later poll or agent reply can retire the working state markFeedbackDelivered just set:
+    // release it here or presence reports an agent still working on a session that is over.
+    if (result.session_ended) clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
+    if (Array.isArray(chat)) events.emit("chat-sync", key, chat);
+  }
+
+  // `takeFeedback` is destructive: it clears the batch from `state.json` before anything is
+  // written to the response. A client that disconnected while that take was in flight would
+  // otherwise lose the feedback for good, so put it back verbatim through the store's `restore`
+  // mode and leave delivery unmarked - nothing reached an agent. A restore that comes back short
+  // is logged, so a batch that could not be put back whole is visible instead of silently gone.
+  async function restoreClosedFeedback(key, result) {
+    if (result.status !== "feedback") return;
+    const prompts = Array.isArray(result.prompts) ? result.prompts : [];
+    const session = await store.queuePrompts(
+      key,
+      {
+        dom_snapshot: result.dom_snapshot || "",
+        prompts,
+        ...(Array.isArray(result.artifact_failures) ? { artifact_failures: result.artifact_failures } : {}),
+      },
+      {
+        restore: true,
+        resolveAttachment: (sessionKeyValue, id) => resolveAttachment(attachmentStateRoot, sessionKeyValue, id),
+        maxPerPrompt: attachmentConfig.maxPerPrompt,
+        maxPromptBytes: attachmentConfig.maxPromptBytes,
+      },
+    );
+    const restoredPrompts =
+      prompts.length === 0
+        ? []
+        : session && !session.rejected && !session.conflict && Array.isArray(session.prompts)
+          ? session.prompts.slice(-prompts.length)
+          : null;
+    const restoredFailures = session && Array.isArray(session.artifact_failures) ? session.artifact_failures : null;
+    if (
+      !restoredPrompts ||
+      JSON.stringify(restoredPrompts) !== JSON.stringify(prompts) ||
+      (Array.isArray(result.artifact_failures) &&
+        JSON.stringify(restoredFailures) !== JSON.stringify(result.artifact_failures))
+    ) {
+      writeLog("[lavish] closed poll feedback restore was incomplete; delivery was not marked");
+    }
+  }
   // Whiteboard sidecar files live next to state.json, keyed by session + diagram.
   const whiteboardStateRoot = path.dirname(stateFile);
 
@@ -384,6 +434,18 @@ export async function serve({
   });
 
   app.get("/api/poll", async (req, res, next) => {
+    // `close` is subscribed before the first `await` and re-checked after the listeners are armed,
+    // because a client that disconnects while `takeFeedback` is in flight would otherwise arrive
+    // too late for its own cleanup: the handler marks the poll active afterwards and nothing left
+    // would clear it, leaving presence stuck on "listening" for an agent that is already gone.
+    let requestClosed = Boolean(req.destroyed);
+    let cleanupPoll = null;
+    const onRequestClose = () => {
+      requestClosed = true;
+      cleanupPoll?.();
+    };
+    const detachRequestClose = () => req.off("close", onRequestClose);
+    req.on("close", onRequestClose);
     try {
       const file = await canonicalFile(String(req.query.file || ""));
       const key = sessionKey(file);
@@ -391,8 +453,18 @@ export async function serve({
         req.query.timeoutMs === undefined ? null : Math.max(0, Math.min(Number(req.query.timeoutMs || 0), 2147483647));
       const immediate = await store.takeFeedback(key);
       if (immediate.status !== "waiting") {
-        if (immediate.status === "feedback") markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
+        if (requestClosed || req.destroyed || res.writableEnded) {
+          await restoreClosedFeedback(key, immediate);
+          detachRequestClose();
+          return;
+        }
+        finishFeedbackDelivery(key, immediate);
+        detachRequestClose();
         res.json(immediate);
+        return;
+      }
+      if (requestClosed || req.destroyed || res.writableEnded) {
+        detachRequestClose();
         return;
       }
       const streamHeartbeat = timeoutMs === null;
@@ -407,7 +479,7 @@ export async function serve({
       }
       setPollActive(key, activePolls, deliveredFeedback, events, true);
       refreshIdleTimer();
-      const timer = timeoutMs === null ? null : setTimeout(() => respond().catch(handleRespondError), timeoutMs);
+      let timer = null;
       let cleaned = false;
       let responding = false;
       const cleanup = () => {
@@ -419,13 +491,15 @@ export async function serve({
         events.off("ended", onFeedback);
         setPollActive(key, activePolls, deliveredFeedback, events, false);
         refreshIdleTimer();
+        cleanupPoll = null;
+        detachRequestClose();
       };
       const respond = async () => {
         if (responding || res.writableEnded) return;
         responding = true;
         try {
           const result = await store.takeFeedback(key);
-          if (result.status === "feedback") markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
+          finishFeedbackDelivery(key, result);
           if (streamHeartbeat) {
             res.end(JSON.stringify(result));
           } else {
@@ -451,8 +525,15 @@ export async function serve({
       };
       events.on("feedback", onFeedback);
       events.on("ended", onFeedback);
-      req.on("close", cleanup);
+      cleanupPoll = cleanup;
+      if (requestClosed || req.destroyed || res.writableEnded) {
+        cleanup();
+        return;
+      }
+      timer = timeoutMs === null ? null : setTimeout(() => respond().catch(handleRespondError), timeoutMs);
     } catch (error) {
+      cleanupPoll?.();
+      detachRequestClose();
       next(error);
     }
   });
@@ -628,9 +709,9 @@ export async function serve({
       }
       events.emit("agent-reply", req.params.key, text);
       // The reply concludes the delivered-feedback "working" state. Without this, a poll that
-      // drains feedback and then releases leaves presence stuck on "working" — the chrome keeps
-      // Send disabled — until some future poll happens to attach, even though the agent already
-      // answered. See "SSE agent-presence returns to waiting after an agent reply".
+      // drains feedback and then releases leaves presence stuck on "working" even after the agent
+      // answers. Human sends remain available while working because the server queues them for the
+      // next poll. See "SSE agent-presence returns to waiting after an agent reply".
       clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, events);
       res.json({ status: "sent" });
     } catch (error) {

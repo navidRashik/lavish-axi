@@ -142,6 +142,12 @@ export class SessionStore {
     }
     const prompts = Array.isArray(payload.prompts) ? payload.prompts : [];
     const shouldEndSession = Boolean(payload.endSession || payload.end_session);
+    // `options.restore` re-queues a batch `takeFeedback` already removed (a poll whose client
+    // disconnected before its response was written). Those prompts were accepted once already, so
+    // restoring replays them verbatim: no layout-warning plan or conflict check to re-run, no chat
+    // messages to re-append, and `artifact_failures` is reinstated rather than merged. Attachments
+    // are still re-derived through the resolver, because restore re-enters the same trust boundary.
+    const restoring = options.restore === true;
     const alreadyEnded = session.status === "ended";
     const normalized = prompts.map(normalizePrompt);
     const normalizedPrompts = normalized.map((entry) => entry.prompt);
@@ -172,52 +178,70 @@ export class SessionStore {
     const revision = normalizeRevision(session.artifact_revision);
     const at = new Date().toISOString();
     let warnings = normalizeStoredWarnings(session.layout_warnings);
-    const layoutPlans = [];
-    const conflicts = new Set();
-    for (const prompt of normalizedPrompts) {
-      const warningIds = layoutWarningPromptIds(prompt);
-      if (warningIds === null) {
-        layoutPlans.push({
-          prompt,
-          warningIds: null,
-          expectedRevision: null,
-          conflicts: [],
-          queueIds: [],
-          hadKnownWarning: false,
-        });
-        continue;
+    let acceptedPrompts;
+    if (restoring) {
+      acceptedPrompts = normalizedPrompts;
+    } else {
+      const layoutPlans = [];
+      const conflicts = new Set();
+      for (const prompt of normalizedPrompts) {
+        const warningIds = layoutWarningPromptIds(prompt);
+        if (warningIds === null) {
+          layoutPlans.push({
+            prompt,
+            warningIds: null,
+            expectedRevision: null,
+            conflicts: [],
+            queueIds: [],
+            hadKnownWarning: false,
+          });
+          continue;
+        }
+        const plan = planLayoutWarningPrompt(warnings, prompt, revision);
+        for (const id of plan.conflicts) conflicts.add(id);
+        layoutPlans.push({ prompt, ...plan });
       }
-      const plan = planLayoutWarningPrompt(warnings, prompt, revision);
-      for (const id of plan.conflicts) conflicts.add(id);
-      layoutPlans.push({ prompt, ...plan });
-    }
-    if (conflicts.size > 0) {
-      return {
-        conflict: true,
-        session,
-        warning_ids: [...conflicts],
-        warnings: serializeLayoutWarnings(warnings),
-      };
-    }
-    const acceptedPrompts = [];
-    for (const plan of layoutPlans) {
-      if (plan.warningIds === null) {
-        acceptedPrompts.push(plan.prompt);
-        continue;
+      if (conflicts.size > 0) {
+        return {
+          conflict: true,
+          session,
+          warning_ids: [...conflicts],
+          warnings: serializeLayoutWarnings(warnings),
+        };
       }
-      const result = queueWarningRecords(warnings, plan.queueIds, { revision, at });
-      warnings = result.warnings;
-      if (result.queued.length > 0 || !plan.hadKnownWarning) acceptedPrompts.push(plan.prompt);
+      acceptedPrompts = [];
+      for (const plan of layoutPlans) {
+        if (plan.warningIds === null) {
+          acceptedPrompts.push(plan.prompt);
+          continue;
+        }
+        const result = queueWarningRecords(warnings, plan.queueIds, { revision, at });
+        warnings = result.warnings;
+        if (result.queued.length > 0 || !plan.hadKnownWarning) acceptedPrompts.push(plan.prompt);
+      }
     }
     session.layout_warnings = warnings;
-    const userMessages = acceptedPrompts
-      .filter((prompt) => prompt.tag === "message" && prompt.prompt)
-      .map((prompt) => ({ role: "user", text: prompt.prompt, at: new Date().toISOString() }));
+    const userMessages = restoring
+      ? []
+      : acceptedPrompts
+          .filter((prompt) => prompt.tag === "message" && prompt.prompt)
+          .map((prompt) => ({ role: "user", text: prompt.prompt, at: new Date().toISOString() }));
     session.prompts = [...(session.prompts || []), ...acceptedPrompts];
     session.chat = [...(session.chat || []), ...userMessages];
+    if (restoring) {
+      session.artifact_failures = Array.isArray(payload.artifact_failures)
+        ? JSON.parse(JSON.stringify(payload.artifact_failures))
+        : [];
+    }
     session.pending_prompts = session.prompts.length;
     session.dom_snapshot = String(payload.domSnapshot || payload.dom_snapshot || "");
-    session.status = shouldEndSession || alreadyEnded ? "ended" : session.prompts.length > 0 ? "feedback" : "open";
+    session.status =
+      shouldEndSession || alreadyEnded
+        ? "ended"
+        : session.prompts.length > 0 ||
+            (restoring && Array.isArray(session.artifact_failures) && session.artifact_failures.length > 0)
+          ? "feedback"
+          : "open";
     if (shouldEndSession) session.ended_by = "user";
     session.updated_at = new Date().toISOString();
     await this.writeState(state);
