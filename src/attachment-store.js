@@ -152,6 +152,14 @@ function diskCapEnv(raw, fallback = DEFAULT_MAX_ATTACHMENT_DISK_BYTES) {
   return bytes >= 1 ? bytes : fallback;
 }
 
+// The image types this store admits, in the order clients should offer them.
+// `detectImageType` below is the enforcing authority; every client-facing list
+// derives from this one - both file pickers' `accept` attributes, the composer's
+// paste/drop filter and its rejection copy, and the annotation card's filter
+// (through `acceptedImageTypes`) - so a new format can never be offered by a
+// surface that then refuses it.
+export const ACCEPTED_IMAGE_MIME = ["image/png", "image/jpeg", "image/webp"];
+
 // Detect the image format from magic bytes alone. Returns { mime, ext } or null.
 export function detectImageType(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 12) return null;
