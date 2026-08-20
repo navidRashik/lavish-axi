@@ -107,6 +107,15 @@ function cell(tag, text) {
 function bootSdk() {
   const posted = [];
   const documentListeners = [];
+  // Deferred work the SDK schedules, run only when a test asks for it: the draft-anchor settle
+  // re-query is a real timer, and asserting on it means running it rather than assuming it.
+  const timers = [];
+  const scheduleTimer = (fn, ms) => timers.push({ fn, ms }) && timers.length;
+  const cancelTimer = (id) => {
+    if (timers[id - 1]) timers[id - 1].cancelled = true;
+  };
+  /** @type {(selector: string) => any} */
+  let documentQuery = () => null;
   const documentElement = createElement("html");
   const head = createElement("head");
   const body = createElement("body");
@@ -133,8 +142,8 @@ function bootSdk() {
       revokeObjectURL() {},
     },
     getComputedStyle: () => ({}),
-    setTimeout: () => 0,
-    clearTimeout() {},
+    setTimeout: scheduleTimer,
+    clearTimeout: cancelTimer,
     requestAnimationFrame: () => 0,
     document: {
       readyState: "complete",
@@ -147,16 +156,17 @@ function bootSdk() {
       removeEventListener() {},
       createElement,
       getElementById: () => null,
-      querySelector: () => null,
+      querySelector: (selector) => documentQuery(selector),
       querySelectorAll: () => [],
       getSelection: () => null,
     },
   };
+  const windowListeners = [];
   sandbox.window = {
-    addEventListener() {},
+    addEventListener: (type, handler) => windowListeners.push({ type, handler }),
     removeEventListener() {},
-    setTimeout: () => 0,
-    clearTimeout() {},
+    setTimeout: scheduleTimer,
+    clearTimeout: cancelTimer,
     requestAnimationFrame: () => 0,
     innerWidth: 1280,
     innerHeight: 800,
@@ -178,10 +188,28 @@ function bootSdk() {
       assert.ok(listener, "the SDK registers a document click listener");
       listener.handler({ target, preventDefault() {}, stopPropagation() {} });
     },
-    card() {
-      const card = documentElement.children
+    setDocumentQuery(query) {
+      documentQuery = query;
+    },
+    runTimers() {
+      const pending = timers.splice(0, timers.length);
+      for (const timer of pending) {
+        if (!timer.cancelled) timer.fn();
+      }
+    },
+    // The chrome is the only legitimate sender, so its messages arrive with `source: parent`.
+    sendChromeMessage(data) {
+      const listeners = windowListeners.filter((entry) => entry.type === "message");
+      assert.ok(listeners.length > 0, "the SDK registers a window message listener");
+      for (const listener of listeners) listener.handler({ source: sandbox.parent, data });
+    },
+    cards() {
+      return documentElement.children
         .flatMap((child) => child.shadowRoot?.children || [])
-        .findLast((child) => child.className === "lavish-annotation-card");
+        .filter((child) => child.className === "lavish-annotation-card");
+    },
+    card() {
+      const card = this.cards().at(-1);
       assert.ok(card, "clicking an element opens an annotation card");
       return card;
     },
@@ -283,4 +311,119 @@ test("the served SDK bundle annotates elements outside tables with no table targ
 
   assert.equal(message.prompt.tag, "p");
   assert.equal(message.prompt.target, undefined);
+});
+
+// The chrome cannot see into this document, so a draft whose anchor is gone is only ever retired
+// if the SDK says so. Silence left it to be retried against every later load.
+test("the served SDK bundle reports a draft whose anchor the artifact no longer has", () => {
+  const sdk = bootSdk();
+
+  sdk.sendChromeMessage({
+    type: "lavish:restoreReviewState",
+    state: { card: { selector: "#hero", text: "needs a shorter headline" }, fields: [] },
+  });
+
+  // The load event proves the document parsed, not that it finished rendering, so nothing is
+  // reported until the anchor has had time to appear.
+  assert.equal(
+    sdk.posted.some((message) => message.type === "lavish:reviewDraftUnrestorable"),
+    false,
+  );
+
+  sdk.runTimers();
+  const report = sdk.posted.at(-1);
+  assert.equal(report.type, "lavish:reviewDraftUnrestorable");
+  assert.equal(report.selector, "#hero");
+  assert.equal(report.artifact_load_token, "load-token");
+});
+
+// A section this page builds in script, or a Mermaid diagram, is not in the document when it
+// loads. Reporting that as a missing anchor is how a live draft gets thrown away.
+test("the served SDK bundle restores a draft whose anchor arrives after the load", () => {
+  const sdk = bootSdk();
+  let late = null;
+  sdk.setDocumentQuery((selector) => (selector === "#hero" ? late : null));
+
+  sdk.sendChromeMessage({
+    type: "lavish:restoreReviewState",
+    state: { card: { selector: "#hero", text: "needs a shorter headline" }, fields: [] },
+  });
+  late = appendTo(sdk.body, cell("h1", "Headline"));
+  sdk.runTimers();
+
+  assert.equal(
+    sdk.posted.some((message) => message.type === "lavish:reviewDraftUnrestorable"),
+    false,
+    "an anchor that arrived late is restored, not reported gone",
+  );
+  assert.equal(sdk.card().querySelector("textarea").value, "needs a shorter headline");
+});
+
+test("the served SDK bundle reports nothing when there is no draft to restore", () => {
+  const sdk = bootSdk();
+  const before = sdk.posted.length;
+
+  sdk.sendChromeMessage({ type: "lavish:restoreReviewState", state: { card: null, fields: [] } });
+  sdk.sendChromeMessage({ type: "lavish:restoreReviewState", state: { card: { selector: "#hero", text: "  " } } });
+  sdk.runTimers();
+
+  assert.equal(sdk.posted.length, before);
+});
+
+// `showAnnotationCard` closes whatever card is open before it draws, so a late restore landing on
+// a card the user opened inside the settle window would delete text they are still typing - text
+// no report has carried to the chrome yet.
+test("the served SDK bundle leaves a card the user opened alone when the anchor arrives late", () => {
+  const sdk = bootSdk();
+  let late = null;
+  sdk.setDocumentQuery((selector) => (selector === "#hero" ? late : null));
+
+  sdk.sendChromeMessage({
+    type: "lavish:restoreReviewState",
+    state: { card: { selector: "#hero", text: "needs a shorter headline" }, fields: [] },
+  });
+
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  sdk.click(paragraph);
+  sdk.card().querySelector("textarea").value = "typing something new";
+  late = appendTo(sdk.body, cell("h1", "Headline"));
+  sdk.runTimers();
+
+  assert.equal(sdk.card().querySelector("textarea").value, "typing something new");
+  // The draft is still stored on the chrome side, so a later load can try again; nothing here
+  // claims the anchor is gone either.
+  assert.equal(
+    sdk.posted.some((message) => message.type === "lavish:reviewDraftUnrestorable"),
+    false,
+  );
+});
+
+// Cancelling a card reports `card: null`, which is what retires the stored draft on the chrome
+// side. A late restore firing after that cancel would draw text the chrome no longer holds and
+// report it back as a live draft, so the card the user dismissed reappears with someone else's
+// text in it.
+test("the served SDK bundle drops a late restore once the user has opened a card of their own", () => {
+  const sdk = bootSdk();
+  let late = null;
+  sdk.setDocumentQuery((selector) => (selector === "#hero" ? late : null));
+
+  sdk.sendChromeMessage({
+    type: "lavish:restoreReviewState",
+    state: { card: { selector: "#hero", text: "needs a shorter headline" }, fields: [] },
+  });
+
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  sdk.click(paragraph);
+  sdk.card().querySelector(".lavish-cancel").onclick();
+  const cardsAfterCancel = sdk.cards().length;
+
+  late = appendTo(sdk.body, cell("h1", "Headline"));
+  sdk.runTimers();
+
+  assert.equal(sdk.cards().length, cardsAfterCancel, "the cancelled card is not replaced by a restored one");
+  assert.notEqual(sdk.card().querySelector("textarea").value, "needs a shorter headline");
+  assert.equal(
+    sdk.posted.some((message) => message.type === "lavish:reviewDraftUnrestorable"),
+    false,
+  );
 });

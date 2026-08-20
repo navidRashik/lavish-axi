@@ -8,6 +8,15 @@ const queueStorageKey = "lavish-axi:queued:" + key;
 // Review-chrome state that must survive a browser refresh. Keyed per session so one review's
 // triage can never leak into another artifact's.
 const warningSelectionStorageKey = "lavish-axi:warning-selection:" + key;
+// Unsent annotation-card text lives only in the sandboxed iframe, so a full page reload would
+// destroy it unless the chrome persists what the SDK reports. Keyed per session like the queue,
+// so a draft can never reappear over a different artifact.
+const reviewStateStorageKey = "lavish-axi:review-state:" + key;
+// Drafts Lavish could not replay. The text outlives the draft that carried it, so the user can
+// still read and copy it after the anchor it was written against is gone for good.
+const retiredDraftStorageKey = "lavish-axi:retired-drafts:" + key;
+/** @type {any[]} */
+const retiredDraftNodes = [];
 const internalQueueKeyField = "_lavishQueueKey";
 const initialChat = Array.isArray(sessionData.initialChat) ? sessionData.initialChat : [];
 const MODE_TOGGLE_HOTKEY_KEY = String(sessionData.modeToggleHotkeyKey || "").toLowerCase();
@@ -128,6 +137,10 @@ const copyHintText = /** @type {HTMLSpanElement} */ (document.getElementById("co
 const presenceBanner = /** @type {HTMLDivElement} */ (document.getElementById("presenceBanner"));
 const handoffBanner = /** @type {HTMLDivElement} */ (document.getElementById("handoffBanner"));
 const handoffTakeoverButton = /** @type {HTMLButtonElement} */ (document.getElementById("handoffTakeover"));
+const outdatedBanner = /** @type {HTMLDivElement} */ (document.getElementById("outdatedBanner"));
+const outdatedText = /** @type {HTMLSpanElement} */ (document.getElementById("outdatedText"));
+const outdatedReloadButton = /** @type {HTMLButtonElement} */ (document.getElementById("outdatedReload"));
+const outdatedDismissButton = /** @type {HTMLButtonElement} */ (document.getElementById("outdatedDismiss"));
 const endedOverlay = /** @type {HTMLDivElement} */ (document.getElementById("endedOverlay"));
 const layoutGateOverlay = /** @type {HTMLDivElement} */ (document.getElementById("layoutGateOverlay"));
 const layoutGateTitle = /** @type {HTMLDivElement} */ (document.getElementById("layoutGateTitle"));
@@ -160,9 +173,20 @@ const layoutGateMaxHoldMs =
   Number.isFinite(configuredLayoutGateMaxHoldMs) && configuredLayoutGateMaxHoldMs > 0
     ? Math.min(configuredLayoutGateMaxHoldMs, 60_000)
     : 12_000;
+let chromeOutdatedReason = "";
+let chromeOutdatedGeneration = 0;
+let outdatedReloadInFlight = false;
+/** @type {{ selector: string, revision: number } | null} */
+let unrestorableDraftMiss = null;
+let retiredDrafts = loadRetiredDrafts();
 let layoutGateVisible = false;
 let layoutGateArmed = false;
 let layoutGateManuallyBypassed = !layoutGateEnabled;
+let layoutGateFailureActive = false;
+// A failure only the user can retire. The artifact-load card clears itself once a load succeeds;
+// the server-replacement card must not, because the page is still running the pre-upgrade client
+// against the replacement server and nothing else would tell the user that.
+let layoutGateFailureSticky = false;
 let layoutGateCycle = 0;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let layoutGateTimer;
@@ -179,10 +203,33 @@ let submitQueuedAgain = false;
 let lastScroll = { x: 0, y: 0 };
 // In-iframe review context (an open annotation card's unsent text, Lavish-owned question
 // answers). The sandbox means the chrome cannot read it back after a reload, so the SDK reports
-// it as it changes and the chrome replays it once the new document is up.
-let lastReviewState = null;
+// it as it changes and the chrome replays it once the new document is up. It is persisted per
+// session so a full page reload replays it too.
+let lastReviewState = loadJsonState(reviewStateStorageKey, null);
+if (lastReviewState && typeof lastReviewState !== "object") lastReviewState = null;
 const ARTIFACT_SILENCE_PROBE_MS = 8000;
 const ARTIFACT_LOAD_BEGIN_RETRY_DELAYS_MS = [100, 300];
+// Backoff for retrying a whole begin-load attempt after its in-call retries ran out. The
+// in-call retries span 400ms, which only covers a slow response - not the multi-second window
+// where the server is being replaced (a version-driven restart, or another `lavish-axi <file>`
+// invocation restarting the shared server). Without these the chrome abandons the artifact for
+// good: the frame is never navigated, `artifact_revision` never advances, and the page sits on
+// the layout gate and then on an empty frame with nothing to click.
+const ARTIFACT_LOAD_RECOVERY_DELAYS_MS = [1000, 3000, 8000, 20000];
+// How long a chrome told to reload after a server restart keeps probing /health before giving
+// up, and how long it waits for an outage to appear at all before treating a healthy answer as
+// "the server never went away".
+const CHROME_RESTART_SETTLE_MS = 5000;
+const CHROME_RESTART_WAIT_MS = 60000;
+// Probe fast while the replacement is expected to bind, then back off: a server that never comes
+// back would otherwise spend the whole wait filling the network log with refused connections.
+const CHROME_RESTART_PROBE_MS = 100;
+const CHROME_RESTART_SLOW_PROBE_MS = 500;
+// A probe must always settle, so the control that is waiting on it always comes back.
+const HEALTH_PROBE_TIMEOUT_MS = 4000;
+const HEALTH_NO_ANSWER_TITLE = "Lavish did not answer.";
+const HEALTH_NO_ANSWER_COPY =
+  "Lavish did not answer the check, so this page cannot tell whether it is running. Try again in a moment.";
 let artifactLoadToken = "";
 let artifactLoadRevision = Number(sessionData.initialArtifactRevision) || 0;
 let artifactLoadRequestSequence = Number(sessionData.initialArtifactLoadSequence) || 0;
@@ -191,6 +238,9 @@ artifactLoadToken = String(sessionData.initialArtifactLoadToken || "");
 let artifactSpokeToken = "";
 let artifactMessageSequence = 0;
 let layoutDiagnosticSequence = 0;
+let artifactLoadRecoveryAttempt = 0;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let artifactLoadRecoveryTimer;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let artifactSilenceTimer;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
@@ -236,8 +286,10 @@ function loadJsonState(storageKey, fallback) {
 function saveJsonState(storageKey, value) {
   try {
     sessionStorage.setItem(storageKey, JSON.stringify(value));
+    return true;
   } catch {
     // The in-memory state still works if browser storage is unavailable.
+    return false;
   }
 }
 
@@ -476,12 +528,13 @@ function syncChat(chat) {
 
   let lastChatBubble = null;
   for (const item of chat) lastChatBubble = addChat(item.role, item.text, false) || lastChatBubble;
-  if (workingBubble) {
-    chatLog.appendChild(workingBubble);
-    scrollElementIntoView(workingBubble);
-  } else if (lastChatBubble) {
-    scrollElementIntoView(lastChatBubble);
-  }
+  if (workingBubble) chatLog.appendChild(workingBubble);
+  // Handed-back drafts were written at the end of the conversation, and a rebuild re-appends the
+  // whole transcript - so without this they end up above it, where the scroll below would leave
+  // them off-screen. They are the one thing here the user cannot recover anywhere else.
+  for (const note of retiredDraftNodes) chatLog.appendChild(note);
+  const anchor = retiredDraftNodes[retiredDraftNodes.length - 1] || workingBubble || lastChatBubble;
+  if (anchor) scrollElementIntoView(anchor);
 }
 
 function setAgentPresence(state) {
@@ -506,6 +559,115 @@ function setAgentPresence(state) {
 
 function setHandoffSuperseded(visible) {
   if (handoffBanner) handoffBanner.hidden = ended || !visible;
+}
+
+// The server this page was connected to went away. What is true beyond that depends on why, so
+// the shutdown names its reason and each one gets its own line - a page told "Lavish was updated"
+// after a deliberate stop is being told something false. An unnamed reason (SIGTERM, or any
+// caller that names none) claims neither.
+// Both shutdown events carry the reason the same way, so both render from one rule.
+function shutdownEventReason(event) {
+  try {
+    return String(JSON.parse(event?.data || "{}").reason || "");
+  } catch {
+    return "";
+  }
+}
+
+function chromeOutdatedCopy(reason) {
+  if (reason === "upgrade") return "Lavish was updated. This page is running the previous version.";
+  if (reason === "local-build") {
+    return "Lavish was restarted to pick up a local build. This page is running the copy the previous server sent.";
+  }
+  if (reason === "stop") return "Lavish was stopped. Reload after you start it again.";
+  return "The Lavish server this page was connected to is no longer running. Reloading will work once it is running again.";
+}
+
+// Say so where the user can dismiss it, and never reload on their behalf - a forced reload
+// interrupts whatever they were reading or writing.
+function setChromeOutdated(visible, reason = chromeOutdatedReason) {
+  chromeOutdatedReason = String(reason || "");
+  chromeOutdatedGeneration += 1;
+  if (outdatedText) outdatedText.textContent = chromeOutdatedCopy(chromeOutdatedReason);
+  outdatedReloadInFlight = false;
+  if (outdatedReloadButton) outdatedReloadButton.disabled = false;
+  if (outdatedBanner) outdatedBanner.hidden = ended || !visible;
+}
+
+function setReviewState(state) {
+  lastReviewState = state;
+  // The artifact reported a card, so its anchor exists: whatever miss was recorded is answered.
+  if (state?.card) unrestorableDraftMiss = null;
+  if (!state || (!state.card && !(Array.isArray(state.fields) && state.fields.length))) {
+    try {
+      sessionStorage.removeItem(reviewStateStorageKey);
+    } catch {
+      // The in-memory state still works if browser storage is unavailable.
+    }
+    return;
+  }
+  saveJsonState(reviewStateStorageKey, state);
+}
+
+function hasUnsentDraft() {
+  return Boolean(lastReviewState && lastReviewState.card && String(lastReviewState.card.text || "").trim());
+}
+
+// The SDK looked for this draft's anchor in a loaded artifact and did not find it. Retiring a
+// draft is itself data loss - the user may still be typing while the agent rewrites the element
+// they anchored to - so one miss only records the answer. The draft is retired only when a
+// SECOND artifact revision reports the same anchor missing: an element that is merely being
+// rewritten comes back, and a report on the revision already recorded is the same answer twice,
+// not two answers. Any report for a different draft, or for a draft that is no longer stored,
+// leaves the stored text alone.
+function discardUnrestorableDraft(selector) {
+  if (!selector || !lastReviewState || !lastReviewState.card) return;
+  if (String(lastReviewState.card.selector || "") !== selector) return;
+  const revision = artifactLoadRevision;
+  if (unrestorableDraftMiss?.selector !== selector) {
+    unrestorableDraftMiss = { selector, revision };
+    return;
+  }
+  if (unrestorableDraftMiss.revision === revision) return;
+  unrestorableDraftMiss = null;
+  keepRetiredDraft(String(lastReviewState.card.text || ""));
+  setReviewState({ ...lastReviewState, card: null });
+}
+
+// Retiring a draft ends Lavish's ability to replay it, so the text itself is handed back to the
+// user before it goes: it is written to the conversation panel verbatim, where it is selectable,
+// nothing overwrites what they may already be typing, and no control can discard it by accident.
+// It is persisted per session so a reload does not take the last copy with it.
+function loadRetiredDrafts() {
+  const stored = loadJsonState(retiredDraftStorageKey, []);
+  if (!Array.isArray(stored)) return [];
+  return stored.filter((entry) => typeof entry === "string" && entry.trim());
+}
+
+// No entry already handed back is ever dropped to make room for a new one. When browser storage
+// refuses the write, the note says so on the spot instead of an older one quietly disappearing at
+// the next page load - the text the user wrote is the thing being protected here.
+function keepRetiredDraft(text) {
+  if (!text.trim()) return;
+  retiredDrafts = [...retiredDrafts, text];
+  renderRetiredDraft(text, saveJsonState(retiredDraftStorageKey, retiredDrafts));
+}
+
+function renderRetiredDraft(text, stored = true) {
+  if (!chatLog) return;
+  const el = document.createElement("div");
+  el.className = "bubble note";
+  el.innerHTML =
+    "<small>Unsent annotation</small><div>The element this note was attached to is no longer in the artifact, so Lavish could not reopen the card. Your text is kept here:</div>" +
+    '<div class="note-draft">' +
+    escapeHtml(text) +
+    "</div>" +
+    (stored
+      ? ""
+      : '<div class="note-warning">This browser refused to store it, so copy it before you reload this page.</div>');
+  retiredDraftNodes.push(el);
+  chatLog.appendChild(el);
+  scrollElementIntoView(el);
 }
 
 async function refreshChromeLoadHandoff(requestSequence) {
@@ -916,7 +1078,88 @@ function setLayoutGateActive(active) {
   document.body?.classList?.toggle("layout-gate-active", active);
 }
 
+// Terminal, user-recoverable failure state for the one thing the chrome cannot work around on
+// its own: the artifact never loaded and retrying stopped helping. The overlay is reused because
+// it already covers the empty artifact area; without this the user is left looking at either a
+// spinner that never resolves or a blank frame, with nothing explaining it and nothing to click.
+// Bumping the cycle retires any pending reveal timer so a stale one cannot hide this card.
+function setLayoutGateFailure(title, copy, actionLabel = "Reload", onAction, { sticky = false } = {}) {
+  if (ended) return;
+  // A sticky card is the user's to retire, and that has to hold against being overwritten as
+  // well as against being cleared: the version-skew warning is the only thing telling this page
+  // it is running the pre-upgrade client, and a later ordinary load failure must not replace it.
+  if (layoutGateFailureActive && layoutGateFailureSticky && !sticky) return;
+  layoutGateFailureActive = true;
+  layoutGateFailureSticky = sticky;
+  layoutGateCycle += 1;
+  clearLayoutGateTimer();
+  layoutGateArmed = false;
+  if (layoutGateTitle) layoutGateTitle.textContent = title;
+  if (layoutGateCopy) layoutGateCopy.textContent = copy;
+  if (layoutGateAction) {
+    layoutGateAction.disabled = false;
+    layoutGateAction.textContent = actionLabel;
+    layoutGateAction.onclick = onAction || (() => location.reload());
+  }
+  setLayoutGateActive(true);
+}
+
+// Every failure card in this feature is raised in a state where the server may not be listening,
+// so none of them may navigate on trust: a reload into a dead port replaces a recoverable page
+// with the browser's own connection-error page. Ask first, and say so when nothing answers.
+// Title and body are written together: a probe that timed out establishes neither that the server
+// is running nor that it is gone, so a heading naming a definite cause may not stand over a line
+// saying the cause is unknown.
+function checkServerThenReload(failureTitle, stillDownCopy) {
+  let checking = false;
+  return async () => {
+    if (checking) return;
+    checking = true;
+    if (layoutGateAction) layoutGateAction.disabled = true;
+    // The card this click was made on. A probe can take until HEALTH_PROBE_TIMEOUT_MS, and the
+    // overlay may have moved on to a different card - or back to the checking gate - by then; its
+    // copy is not this probe's to overwrite.
+    const cycle = layoutGateCycle;
+    let outcome = "not-running";
+    let navigating = false;
+    try {
+      outcome = await probeChromeHealth();
+      if (outcome === "running") {
+        navigating = true;
+        await flushWhiteboardsBeforeChromeReload();
+        location.reload();
+      }
+    } finally {
+      // Every path that does not navigate hands the control back, including a probe that timed
+      // out or threw: a button that stays disabled is worse than the reload it was guarding.
+      if (!navigating) {
+        checking = false;
+        if (layoutGateAction) layoutGateAction.disabled = false;
+        if (cycle === layoutGateCycle) {
+          const answered = outcome !== "no-answer";
+          if (layoutGateTitle) layoutGateTitle.textContent = answered ? failureTitle : HEALTH_NO_ANSWER_TITLE;
+          if (layoutGateCopy) layoutGateCopy.textContent = answered ? stillDownCopy : HEALTH_NO_ANSWER_COPY;
+        }
+      }
+    }
+  };
+}
+
+// A load attempt that gets going again retires the failure card. This runs even when the gate is
+// disabled or the user already bypassed it, because otherwise the card would keep covering an
+// artifact that has since loaded.
+function clearLayoutGateFailure() {
+  if (!layoutGateFailureActive || layoutGateFailureSticky) return;
+  layoutGateFailureActive = false;
+  if (layoutGateAction) {
+    layoutGateAction.textContent = "Show anyway";
+    layoutGateAction.onclick = () => forceRevealLayoutGate("manual");
+  }
+  revealLayoutGate();
+}
+
 function revealLayoutGate() {
+  if (layoutGateFailureSticky) return;
   clearLayoutGateTimer();
   layoutGateArmed = false;
   setLayoutGateActive(false);
@@ -929,6 +1172,10 @@ function forceRevealLayoutGate(reason) {
 }
 
 function startLayoutGateCycle() {
+  clearLayoutGateFailure();
+  // A sticky failure owns the overlay until the user acts on it, so a later load must not repaint
+  // the checking card over the message it left there.
+  if (layoutGateFailureSticky) return;
   if (!layoutGateEnabled || layoutGateManuallyBypassed || ended) return;
 
   layoutGateCycle += 1;
@@ -1330,6 +1577,7 @@ async function endSession() {
 function markSessionEnded() {
   if (ended) return;
   ended = true;
+  cancelArtifactLoadRecovery();
   closeMenus();
   closeWarningsDrawer();
   renderWarnings();
@@ -1340,7 +1588,9 @@ function markSessionEnded() {
   updateSendState();
   if (presenceBanner) presenceBanner.hidden = true;
   if (handoffBanner) handoffBanner.hidden = true;
+  if (outdatedBanner) outdatedBanner.hidden = true;
   layoutGateManuallyBypassed = true;
+  layoutGateFailureSticky = false;
   revealLayoutGate();
   postToFrame({ type: "lavish:setAnnotationMode", enabled: false });
   endedOverlay.hidden = false;
@@ -1484,7 +1734,38 @@ async function publishShare(event) {
   }
 }
 
-async function replaceArtifactFrame() {
+function cancelArtifactLoadRecovery() {
+  if (artifactLoadRecoveryTimer) clearTimeout(artifactLoadRecoveryTimer);
+  artifactLoadRecoveryTimer = undefined;
+}
+
+// Retry a begin-load attempt that failed for a recoverable reason. Returns false once the
+// backoff is exhausted so the caller can surface the terminal failure. A `superseded` or
+// `out-of-order` outcome never lands here: another reviewer or a newer request in this same
+// chrome owns the artifact, and retrying would fight it.
+function scheduleArtifactLoadRecovery() {
+  if (ended) return false;
+  const delay = ARTIFACT_LOAD_RECOVERY_DELAYS_MS[artifactLoadRecoveryAttempt];
+  if (delay === undefined) return false;
+  artifactLoadRecoveryAttempt += 1;
+  const sequence = artifactLoadRequestSequence;
+  cancelArtifactLoadRecovery();
+  artifactLoadRecoveryTimer = setTimeout(() => {
+    artifactLoadRecoveryTimer = undefined;
+    if (ended || sequence !== artifactLoadRequestSequence) return;
+    replaceArtifactFrame({ recoveryRetry: true }).catch(() => {});
+  }, delay);
+  artifactLoadRecoveryTimer?.unref?.();
+  return true;
+}
+
+// The backoff budget belongs to the load attempt that started it, not to the page: anything
+// asking for a fresh load - a live reload, Reload artifact, a takeover - gets the whole budget
+// again, and only the recovery timer's own retries spend it down. A page that carried an
+// exhausted counter forward would have no retries left at all for the next outage.
+async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
+  cancelArtifactLoadRecovery();
+  if (!recoveryRetry) artifactLoadRecoveryAttempt = 0;
   clearTimeout(artifactSilenceTimer);
   // The iframe is sandboxed, so reload by resetting the iframe URL from chrome.
   if (!artifactSrc) {
@@ -1507,6 +1788,29 @@ async function replaceArtifactFrame() {
     }
     return false;
   };
+  // Keep whatever is on screen, then try again later. A begin-load can fail for reasons that
+  // clear on their own - the shared server is mid-restart, or its handoff map was reset by that
+  // restart and this chrome's one re-handshake landed in the same outage window. Giving up here
+  // is what leaves the review permanently unloaded.
+  const recoverLater = () => {
+    preservePreviousLoad();
+    if (requestSequence !== artifactLoadRequestSequence || ended) return false;
+    if (scheduleArtifactLoadRecovery()) return false;
+    // Out of retries. Only say so when there is nothing on screen to say it over: a chrome that
+    // already shows an artifact keeps showing it rather than losing a usable review.
+    if (!artifactLoadToken) {
+      setLayoutGateFailure(
+        "Lavish could not load this artifact.",
+        "The Lavish server did not answer this review's load request. It usually restarted while this page was opening. Check and reload to reconnect.",
+        "Check and reload",
+        checkServerThenReload(
+          "Lavish could not load this artifact.",
+          "Lavish is still not answering. Start it again with your agent, then use Check and reload.",
+        ),
+      );
+    }
+    return false;
+  };
   let load;
   let transportAttempt = 0;
   let handoffRefreshAttempted = false;
@@ -1526,18 +1830,32 @@ async function replaceArtifactFrame() {
       if (!response.ok) {
         const status = String(candidate?.status || "");
         if (status === "no-handoff") {
-          if (handoffRefreshAttempted) return preservePreviousLoad();
+          // One re-handshake per attempt keeps a live reviewer from being ping-ponged; the
+          // retry that follows is a whole fresh attempt, so the rule still holds.
+          if (handoffRefreshAttempted) return recoverLater();
           handoffRefreshAttempted = true;
           try {
             const refreshed = await refreshChromeLoadHandoff(requestSequence);
             if (!refreshed) return false;
           } catch {
-            return preservePreviousLoad();
+            return recoverLater();
           }
           continue;
         }
         if (status === "superseded") {
           setHandoffSuperseded(true);
+          // The takeover banner sits in the conversation panel, which the layout gate overlay
+          // covers whenever the gate is enabled. A chrome that never loaded the artifact would
+          // otherwise show the checking spinner until the gate's max hold expires and then
+          // reveal an empty frame, with the only recovery control hidden the whole time. Say it
+          // on the overlay instead. Still no background retry: the reload is the user's to make.
+          if (!artifactLoadToken) {
+            setLayoutGateFailure(
+              "This review is already open in another tab.",
+              "Lavish loads an artifact in one tab at a time. Take over here to move the review into this tab, or switch back to the tab that already has it.",
+              "Take over here",
+            );
+          }
           return preservePreviousLoad();
         }
         if (status === "out-of-order") return preservePreviousLoad();
@@ -1552,14 +1870,15 @@ async function replaceArtifactFrame() {
       break;
     } catch {
       const delay = ARTIFACT_LOAD_BEGIN_RETRY_DELAYS_MS[transportAttempt++];
-      if (delay === undefined) return preservePreviousLoad();
+      if (delay === undefined) return recoverLater();
       await new Promise((resolve) => window.setTimeout(resolve, delay));
     }
   }
   if (requestSequence !== artifactLoadRequestSequence || ended) return false;
   const revision = Number(load?.artifact_revision);
   const token = String(load?.artifact_load_token || "");
-  if (!Number.isSafeInteger(revision) || revision < 0 || !token) return preservePreviousLoad();
+  if (!Number.isSafeInteger(revision) || revision < 0 || !token) return recoverLater();
+  artifactLoadRecoveryAttempt = 0;
   artifactLoadRevision = revision;
   artifactLoadToken = token;
   artifactSpokeToken = "";
@@ -2083,33 +2402,123 @@ function reloadArtifact() {
   });
 }
 
-async function reloadAfterServerRestart() {
+async function reloadAfterServerRestart(reason) {
   if (chromeRestartReloadPromise) return chromeRestartReloadPromise;
-  chromeRestartReloadPromise = reloadChromeAfterServerRestart();
+  chromeRestartReloadPromise = reloadChromeAfterServerRestart(reason);
   return chromeRestartReloadPromise;
 }
 
-async function reloadChromeAfterServerRestart() {
+// Three outcomes, not two: a port that accepts a connection and then says nothing proves neither
+// that the server is running nor that it is gone, and a probe that never settles would leave the
+// control the user is holding disabled for as long as the browser's own network timeout takes.
+async function probeChromeHealth() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HEALTH_PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch("/health", { cache: "no-store", signal: controller.signal });
+    return res.ok ? "running" : "not-running";
+  } catch {
+    return controller.signal.aborted ? "no-answer" : "not-running";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The replacement server usually binds within a second, but it is a fresh node process competing
+// with whatever else the machine is doing, and several `lavish-axi` invocations can be racing for
+// the same port. Reloading on a fixed short deadline regardless of whether anything is listening
+// trades a recoverable page for the browser's connection-error page, which no Lavish code can
+// recover from. So wait for the port to answer, and if it never does, say so instead.
+async function reloadChromeAfterServerRestart(reason = "") {
   let sawOutage = false;
-  const deadline = Date.now() + 5000;
+  let healthy = false;
+  let settled = false;
+  // Keep the pre-outage behavior: a server that never actually went away is reloaded promptly.
+  const settleDeadline = Date.now() + CHROME_RESTART_SETTLE_MS;
+  const deadline = Date.now() + CHROME_RESTART_WAIT_MS;
 
   while (Date.now() < deadline) {
-    try {
-      const res = await fetch("/health", { cache: "no-store" });
-      if (sawOutage && res.ok) {
-        await flushWhiteboardsBeforeChromeReload();
-        location.reload();
-        return;
-      }
-    } catch {
-      sawOutage = true;
+    // The bounded probe is what keeps this loop honest: a port that accepts and then says nothing
+    // would otherwise hold one iteration open past the deadline, and neither the reload nor the
+    // card below would ever happen.
+    const outcome = await probeChromeHealth();
+    healthy = outcome === "running";
+    if (!healthy) sawOutage = true;
+    if (healthy && (sawOutage || Date.now() >= settleDeadline)) {
+      settled = true;
+      break;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const probeDelay = Date.now() < settleDeadline ? CHROME_RESTART_PROBE_MS : CHROME_RESTART_SLOW_PROBE_MS;
+    await new Promise((resolve) => setTimeout(resolve, probeDelay));
+  }
+
+  // A loop that ended on the deadline carries whatever the last probe happened to see, and in a
+  // hidden tab the browser clamps these timers to seconds or minutes - so a single probe can be
+  // the only one that ran. Neither answer may be trusted then: a stale failure claims a running
+  // server is gone, and a stale success reloads into a port nothing is listening on.
+  if (!settled) healthy = (await probeChromeHealth()) === "running";
+
+  if (!healthy) {
+    chromeRestartReloadPromise = null;
+    setLayoutGateFailure(
+      "Lavish is not running.",
+      "The Lavish server restarted and did not come back. Start it again with your agent, then check and reload this page.",
+      "Check and reload",
+      checkServerThenReload(
+        "Lavish is not running.",
+        "Lavish is still not running. Start it again with your agent, then use Check and reload.",
+      ),
+      { sticky: true },
+    );
+    return;
+  }
+
+  // Unsent annotation text is the user's writing. A reload replays it, but it is still their
+  // call when to interrupt the card they are typing into, so offer the reload instead of taking
+  // it. The same applies to a page the user is only reading: the banner never reloads by itself.
+  if (hasUnsentDraft()) {
+    chromeRestartReloadPromise = null;
+    // The line this page shows comes from the same reason its siblings were sent. An event that
+    // named none leaves the branch that claims neither.
+    setChromeOutdated(true, reason);
+    return;
   }
 
   await flushWhiteboardsBeforeChromeReload();
   location.reload();
+}
+
+// The banner is shown at the moment a server goes away, and in the deliberate-stop case nothing
+// is coming to replace it, so this button probes before it navigates for the same reason the
+// not-running card does: a reload into a dead port lands on the browser's own error page.
+async function reloadChromeForOutdatedBanner() {
+  if (outdatedReloadInFlight) return;
+  outdatedReloadInFlight = true;
+  if (outdatedReloadButton) outdatedReloadButton.disabled = true;
+  // The banner this click was made on: a later one carries a newer reason, and that line stands.
+  const generation = chromeOutdatedGeneration;
+  let outcome = "not-running";
+  let navigating = false;
+  try {
+    outcome = await probeChromeHealth();
+    if (outcome === "running") {
+      navigating = true;
+      await flushWhiteboardsBeforeChromeReload();
+      location.reload();
+    }
+  } finally {
+    if (!navigating) {
+      outdatedReloadInFlight = false;
+      if (outdatedReloadButton) outdatedReloadButton.disabled = false;
+      if (outdatedText && generation === chromeOutdatedGeneration) {
+        outdatedText.textContent =
+          outcome === "no-answer"
+            ? HEALTH_NO_ANSWER_COPY
+            : "Lavish is still not running. Start it again, then use Check and reload.";
+      }
+    }
+  }
 }
 
 window.addEventListener("message", (event) => {
@@ -2164,7 +2573,10 @@ window.addEventListener("message", (event) => {
     lastScroll = { x: Number(msg.x) || 0, y: Number(msg.y) || 0 };
   }
   if (msg.type === "lavish:reviewState") {
-    lastReviewState = msg.state && typeof msg.state === "object" ? msg.state : null;
+    setReviewState(msg.state && typeof msg.state === "object" ? msg.state : null);
+  }
+  if (msg.type === "lavish:reviewDraftUnrestorable") {
+    discardUnrestorableDraft(String(msg.selector || ""));
   }
   if (msg.type === "lavish:artifactAssetFailure") {
     reportArtifactFailures(
@@ -2433,6 +2845,8 @@ endButton.onclick = () => {
   endSession();
 };
 handoffTakeoverButton.onclick = () => location.reload();
+if (outdatedReloadButton) outdatedReloadButton.onclick = () => reloadChromeForOutdatedBanner();
+if (outdatedDismissButton) outdatedDismissButton.onclick = () => setChromeOutdated(false);
 document.addEventListener("mousedown", (event) => {
   const target = /** @type {Node} */ (event.target);
   if (!moreMenu.hidden && !moreWrap.contains(target)) setMenuOpen(moreButton, moreMenu, false);
@@ -2489,7 +2903,10 @@ events.addEventListener("reload", () => {
     if (reloaded) refreshWhiteboardSource();
   });
 });
-events.addEventListener("chrome-reload", () => reloadAfterServerRestart());
+events.addEventListener("chrome-reload", (event) => reloadAfterServerRestart(shutdownEventReason(event)));
+// The replacement server serves a different artifact's review. This page keeps working against
+// it; it is only running the previous version of the chrome, which is the user's to act on.
+events.addEventListener("chrome-outdated", (event) => setChromeOutdated(true, shutdownEventReason(event)));
 events.addEventListener("agent-reply", (event) => addChat("agent", JSON.parse(event.data).text));
 events.addEventListener("chat-sync", (event) => syncChat(JSON.parse(event.data).chat || []));
 events.addEventListener("agent-presence", (event) => setAgentPresence(JSON.parse(event.data).state));
@@ -2498,7 +2915,16 @@ events.addEventListener("layout-warnings", (event) => setLayoutWarnings(JSON.par
 events.addEventListener("open", () => refreshLayoutWarnings());
 
 render();
+setChromeOutdated(false);
 setWarningsDrawerOpen(false);
 renderWarnings();
 initialChat.forEach((item) => addChat(item.role, item.text));
+retiredDrafts.forEach((text) => renderRetiredDraft(text));
 setAgentPresence("waiting");
+
+// Reaching this line is the only proof that this file parsed and ran to completion. The page it
+// bootstraps ships with the layout-gate overlay already covering the artifact, and only this
+// script ever takes it down - so the inline failsafe in the page holds it up until here.
+const chromeBootWindow = /** @type {Record<string, any>} */ (/** @type {unknown} */ (window));
+chromeBootWindow.__lavishChromeReady = true;
+chromeBootWindow.__lavishCancelChromeBootFailsafe?.();

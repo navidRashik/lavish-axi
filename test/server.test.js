@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
 process.env.LAVISH_AXI_HOST = "127.0.0.1";
 process.env.LAVISH_AXI_LINK_HOST = "127.0.0.1";
@@ -13,6 +14,7 @@ process.env.LAVISH_AXI_LINK_HOST = "127.0.0.1";
 import {
   allowsAllHosts,
   buildAllowedHostnames,
+  CHROME_BOOT_FAILSAFE_MS,
   createChromeHtml,
   createSdkJs,
   displayPathParts,
@@ -76,6 +78,10 @@ function artifactMutation(load, body = {}) {
   };
 }
 
+function flushMicrotasks() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 function chromeSessionData(html) {
   const match = String(html).match(/<script id="lavish-session" type="application\/json">([\s\S]*?)<\/script>/);
   assert.ok(match);
@@ -128,8 +134,227 @@ test("server serves chrome browser behavior from a dedicated source file", async
 
   assert.match(source, /chrome-client\.js/);
   assert.match(html, /<script id="lavish-session" type="application\/json">/);
-  assert.match(html, /<script src="\/chrome-client\.js"><\/script>/);
+  assert.match(html, /<script src="\/chrome-client\.js"[^>]*><\/script>/);
   assert.doesNotMatch(html, /<script>\s*const key=/);
+});
+
+// The elements the served chrome page actually declares, so a document that no longer carries an
+// id the failsafe queries cannot be papered over by an invented element.
+function parseChromeElements(html) {
+  const elements = new Map();
+  for (const [, attributes] of html.matchAll(/<[a-zA-Z][\w-]*((?:"[^"]*"|[^">])*)>/g)) {
+    const id = attributes.match(/\sid="([^"]*)"/);
+    if (!id) continue;
+    const text = html.match(new RegExp(`\\sid="${id[1]}"(?:"[^"]*"|[^">])*>([^<]*)`));
+    elements.set(id[1], {
+      id: id[1],
+      hidden: /\shidden(?=[\s>=]|$)/.test(attributes),
+      textContent: text ? text[1] : "",
+      onclick: null,
+    });
+  }
+  return elements;
+}
+
+// Runs the chrome page's inline boot failsafe against a document built from the page the server
+// really serves, so the assertions below are about what the shipped script does rather than what
+// it says - and an id the page stopped declaring makes the script a no-op here exactly as it
+// would in a browser.
+function bootChromeFailsafe(options = {}) {
+  const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" }, options);
+  const inline = html.match(/<script>([\s\S]*?)<\/script>\s*<script src="\/chrome-client\.js"/);
+  assert.ok(inline, "the chrome page must inline a boot failsafe before its client script");
+
+  const elements = parseChromeElements(html);
+  const bodyClasses = new Set();
+  const timers = new Map();
+  let reloads = 0;
+  let nextTimerId = 1;
+  let serverRunning = false;
+  let serverWedged = false;
+
+  const context = {
+    AbortController,
+    fetch(url, init = {}) {
+      assert.equal(String(url), "/health", "the failsafe may only ask the server whether it runs");
+      if (serverWedged) {
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      }
+      return serverRunning ? Promise.resolve({ ok: true }) : Promise.reject(new Error("connection refused"));
+    },
+    document: {
+      body: { classList: { add: (name) => bodyClasses.add(name) } },
+      getElementById(id) {
+        return elements.get(id) || null;
+      },
+    },
+    location: {
+      reload() {
+        reloads += 1;
+      },
+    },
+    setTimeout(fn, ms) {
+      const id = nextTimerId++;
+      timers.set(id, { fn, ms });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+  };
+  context.window = context;
+  runInNewContext(inline[1], context);
+
+  return {
+    context,
+    html,
+    element(id) {
+      const el = context.document.getElementById(id);
+      assert.ok(el, `the chrome page must declare #${id} for the boot failsafe to recover it`);
+      return el;
+    },
+    bodyClasses,
+    pendingDelays: () => [...timers.values()].map((timer) => timer.ms),
+    runTimers() {
+      for (const [id, timer] of [...timers]) {
+        timers.delete(id);
+        timer.fn();
+      }
+    },
+    reloadCount: () => reloads,
+    startServer() {
+      serverWedged = false;
+      serverRunning = true;
+    },
+    wedgeServer() {
+      serverWedged = true;
+    },
+  };
+}
+
+test("the chrome boot failsafe turns the layout gate into a reloadable failure when its script never runs", async () => {
+  const boot = bootChromeFailsafe();
+
+  // The failsafe must be armed BEFORE the external script tag: a request that hangs instead of
+  // erroring blocks parsing, so anything after that tag would never be reached.
+  const failsafeIndex = boot.html.indexOf("__lavishCancelChromeBootFailsafe");
+  const scriptIndex = boot.html.indexOf('<script src="/chrome-client.js"');
+  assert.ok(failsafeIndex > -1);
+  assert.ok(scriptIndex > failsafeIndex);
+
+  assert.deepEqual(boot.pendingDelays(), [CHROME_BOOT_FAILSAFE_MS]);
+  assert.match(boot.element("layoutGateTitle").textContent, /Checking layout/);
+
+  boot.runTimers();
+
+  assert.equal(boot.element("layoutGateOverlay").hidden, false);
+  assert.match(boot.element("layoutGateTitle").textContent, /could not finish loading/);
+  assert.match(boot.element("layoutGateCopy").textContent, /did not load/);
+  assert.equal(boot.element("layoutGateAction").textContent, "Check and reload");
+  assert.equal(boot.bodyClasses.has("layout-gate-active"), true);
+
+  boot.startServer();
+  boot.element("layoutGateAction").onclick();
+  await flushMicrotasks();
+  assert.equal(boot.reloadCount(), 1);
+});
+
+test("the chrome boot failsafe reveals a gate the page shipped hidden", () => {
+  const boot = bootChromeFailsafe({ layoutGateEnabled: false });
+
+  assert.equal(boot.element("layoutGateOverlay").hidden, true, "a gate-free page ships the overlay hidden");
+
+  boot.runTimers();
+
+  assert.equal(boot.element("layoutGateOverlay").hidden, false);
+  assert.match(boot.element("layoutGateTitle").textContent, /could not finish loading/);
+});
+
+test("the chrome client cancels the boot failsafe once it has run", () => {
+  const boot = bootChromeFailsafe();
+  const gateCopy = boot.element("layoutGateCopy").textContent;
+
+  boot.context.window.__lavishChromeReady = true;
+  boot.context.window.__lavishCancelChromeBootFailsafe();
+
+  assert.deepEqual(boot.pendingDelays(), [], "a cancelled failsafe leaves no timer behind");
+  boot.runTimers();
+  assert.equal(boot.element("layoutGateAction").textContent, "Show anyway");
+  assert.equal(boot.element("layoutGateCopy").textContent, gateCopy);
+});
+
+test("a boot failsafe that fires after the chrome client is ready changes nothing", () => {
+  const boot = bootChromeFailsafe();
+  const gateCopy = boot.element("layoutGateCopy").textContent;
+
+  boot.context.window.__lavishChromeReady = true;
+  boot.runTimers();
+
+  assert.equal(boot.element("layoutGateAction").textContent, "Show anyway");
+  assert.equal(boot.element("layoutGateCopy").textContent, gateCopy);
+  assert.equal(boot.bodyClasses.size, 0);
+});
+
+test("a chrome client script that fails to load raises the failure card immediately", () => {
+  const boot = bootChromeFailsafe();
+  const onerror = boot.html.match(/<script src="\/chrome-client\.js" onerror="([^"]+)"><\/script>/);
+  assert.ok(onerror, "the client script tag must report its own load failure");
+
+  runInNewContext(onerror[1].replaceAll("&quot;", '"'), boot.context);
+
+  assert.equal(boot.element("layoutGateOverlay").hidden, false);
+  assert.match(boot.element("layoutGateTitle").textContent, /could not finish loading/);
+  assert.equal(boot.element("layoutGateAction").textContent, "Check and reload");
+  assert.deepEqual(boot.pendingDelays(), [], "the immediate failure retires the pending timer");
+});
+
+// The failsafe's own copy says the server most likely went away between serving this page and
+// serving the client script, so its button is the one most likely to be clicked while nothing is
+// listening. It cannot use the client's helper - the client is exactly what failed to load.
+test("the chrome boot failsafe asks the server before navigating", async () => {
+  const boot = bootChromeFailsafe();
+  boot.runTimers();
+
+  assert.equal(boot.element("layoutGateAction").textContent, "Check and reload");
+  boot.element("layoutGateAction").onclick();
+  await flushMicrotasks();
+
+  assert.equal(boot.reloadCount(), 0, "never navigate into a port nothing is listening on");
+  assert.match(boot.element("layoutGateCopy").textContent, /still not running/);
+  assert.equal(boot.element("layoutGateAction").disabled, false, "the button stays usable for a later try");
+
+  boot.startServer();
+  boot.element("layoutGateAction").onclick();
+  await flushMicrotasks();
+  assert.equal(boot.reloadCount(), 1);
+});
+
+// The failsafe's button is the only control on a page whose client script never ran, so a probe
+// that never answers must not take it away.
+test("a boot failsafe check that never answers hands its button back", async () => {
+  const boot = bootChromeFailsafe();
+  boot.runTimers();
+  boot.wedgeServer();
+
+  boot.element("layoutGateAction").onclick();
+  await flushMicrotasks();
+  assert.equal(boot.element("layoutGateAction").disabled, true, "the check is in flight");
+
+  boot.runTimers();
+  await flushMicrotasks();
+
+  assert.equal(boot.reloadCount(), 0);
+  assert.equal(boot.element("layoutGateAction").disabled, false);
+  const copy = boot.element("layoutGateCopy").textContent;
+  assert.match(copy, /did not answer/);
+  assert.doesNotMatch(copy, /still not running/);
+
+  boot.startServer();
+  boot.element("layoutGateAction").onclick();
+  await flushMicrotasks();
+  assert.equal(boot.reloadCount(), 1);
 });
 
 test("artifact iframe sandbox lets popups escape without granting same-origin", () => {
@@ -994,15 +1219,6 @@ test("chrome ignores Lavish postMessages not sent by the artifact iframe", async
   const js = await chromeClientSource();
 
   assert.match(js, /event\.source\s*!==\s*frame\.contentWindow/);
-});
-
-test("chrome waits for the replacement server before version-driven reload", async () => {
-  const js = await chromeClientSource();
-
-  assert.match(js, /async function reloadAfterServerRestart\(\)/);
-  assert.match(js, /let sawOutage = false/);
-  assert.match(js, /if \(sawOutage && res\.ok\) \{/);
-  assert.match(js, /addEventListener\("chrome-reload", \(\) => reloadAfterServerRestart\(\)\)/);
 });
 
 test("chrome restores queued prompts from tab storage after reload", async () => {
@@ -3158,6 +3374,147 @@ test("POST /shutdown stops the listener so the client can spawn a fresh server",
     await server.done;
     await assert.rejects(() => fetch(`http://127.0.0.1:${server.port}/health`), /fetch failed|ECONNREFUSED/);
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Collects a chrome's SSE stream until the server ends it, which is what a shutdown does.
+async function collectEventStream(base, key) {
+  const controller = new AbortController();
+  const res = await fetch(`${base}/events/${key}`, { signal: controller.signal });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  const finished = (async () => {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) return text;
+      text += decoder.decode(value, { stream: true });
+    }
+  })();
+  return {
+    finished: () =>
+      Promise.race([
+        finished,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("event stream never closed")), 2000)),
+      ]),
+    close() {
+      controller.abort();
+    },
+  };
+}
+
+async function openShutdownBroadcastServer() {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const opened = path.join(dir, "opened.html");
+  const other = path.join(dir, "other.html");
+  await writeFile(opened, "<!doctype html><html><body>opened</body></html>");
+  await writeFile(other, "<!doctype html><html><body>other</body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const base = `http://127.0.0.1:${server.port}`;
+  const openSession = async (file) => {
+    const res = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file }),
+    });
+    return (await res.json()).key;
+  };
+  return {
+    base,
+    dir,
+    server,
+    openedKey: await openSession(opened),
+    otherKey: await openSession(other),
+  };
+}
+
+// The chrome renders a different line per reason, so the reason has to survive the wire - on both
+// events, because the reloaded page can end up showing a line from it too.
+function shutdownEventReason(events, name) {
+  const match = String(events).match(new RegExp(`event: ${name}\\ndata: (.+)\\n`));
+  assert.ok(match, `the stream must carry a ${name} event`);
+  return JSON.parse(match[1]).reason;
+}
+
+function outdatedReason(events) {
+  return shutdownEventReason(events, "chrome-outdated");
+}
+
+test("a version-driven shutdown reloads only the chrome whose session it names", async () => {
+  const { base, dir, server, openedKey, otherKey } = await openShutdownBroadcastServer();
+  const openedStream = await collectEventStream(base, openedKey);
+  const otherStream = await collectEventStream(base, otherKey);
+  try {
+    await fetch(`${base}/shutdown`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reload_key: openedKey, reason: "upgrade" }),
+    });
+
+    const openedEvents = await openedStream.finished();
+    const otherEvents = await otherStream.finished();
+    assert.match(openedEvents, /event: chrome-reload/);
+    assert.doesNotMatch(openedEvents, /event: chrome-outdated/);
+    // A page the user never asked to reopen keeps its review on screen and is only told it is
+    // running the previous version.
+    assert.match(otherEvents, /event: chrome-outdated/);
+    assert.doesNotMatch(otherEvents, /event: chrome-reload/);
+    assert.equal(outdatedReason(otherEvents), "upgrade");
+    // One shutdown, one cause: the reloaded page is told the same thing as its siblings.
+    assert.equal(shutdownEventReason(openedEvents, "chrome-reload"), "upgrade");
+  } finally {
+    openedStream.close();
+    otherStream.close();
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a shutdown that names no session reloads nobody", async () => {
+  const { base, dir, server, openedKey, otherKey } = await openShutdownBroadcastServer();
+  const openedStream = await collectEventStream(base, openedKey);
+  const otherStream = await collectEventStream(base, otherKey);
+  try {
+    await fetch(`${base}/shutdown`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "stop" }),
+    });
+
+    for (const events of [await openedStream.finished(), await otherStream.finished()]) {
+      assert.doesNotMatch(events, /event: chrome-reload/);
+      assert.match(events, /event: chrome-outdated/);
+      assert.equal(outdatedReason(events), "stop");
+    }
+  } finally {
+    openedStream.close();
+    otherStream.close();
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A page must never be told something the shutdown did not claim, so an unnamed or unrecognized
+// reason reaches the chrome as no reason at all.
+test("a shutdown that names no reason claims none", async () => {
+  const { base, dir, server, openedKey, otherKey } = await openShutdownBroadcastServer();
+  const openedStream = await collectEventStream(base, openedKey);
+  const otherStream = await collectEventStream(base, otherKey);
+  try {
+    await fetch(`${base}/shutdown`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "because" }),
+    });
+
+    for (const events of [await openedStream.finished(), await otherStream.finished()]) {
+      assert.equal(outdatedReason(events), "");
+    }
+  } finally {
+    openedStream.close();
+    otherStream.close();
+    await server.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
