@@ -4358,6 +4358,327 @@ test("a disconnect during immediate feedback take requeues the batch without wor
   }
 });
 
+test("a disconnect during event-driven feedback take requeues the batch without working presence", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  const stateFile = path.join(dir, "state.json");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const originalTakeFeedback = SessionStore.prototype.takeFeedback;
+  const originalQueuePrompts = SessionStore.prototype.queuePrompts;
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+    const queued = {
+      domSnapshot: 'uid=1 body "review"',
+      prompts: [{ uid: "message-1", prompt: "Looks good", selector: "body", tag: "message", text: "" }],
+    };
+
+    /** @type {() => void} */
+    let releaseTake = () => {};
+    const takeReleased = new Promise((resolve) => {
+      releaseTake = () => resolve();
+    });
+    let takeStarted;
+    const takePending = new Promise((resolve) => {
+      takeStarted = resolve;
+    });
+    let takeCount = 0;
+    SessionStore.prototype.takeFeedback = async function (sessionKey) {
+      takeCount += 1;
+      if (takeCount === 2 && sessionKey === key) {
+        takeStarted();
+        await takeReleased;
+      }
+      return originalTakeFeedback.call(this, sessionKey);
+    };
+
+    const presence = await startPresenceStream(base, key);
+    try {
+      assert.equal(await presence.next(), "waiting");
+      const socket = await new Promise((resolve, reject) => {
+        const client = netConnect(server.port, "127.0.0.1", () => {
+          client.write(
+            `GET /api/poll?file=${encodeURIComponent(artifact)} HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`,
+            () => resolve(client),
+          );
+        });
+        client.on("error", reject);
+      });
+      assert.equal(await presence.next(), "listening");
+
+      const submitted = await fetch(`${base}/api/${key}/prompts`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: base },
+        body: JSON.stringify(queued),
+      });
+      assert.equal(submitted.status, 200);
+      const beforeState = JSON.parse(await readFile(stateFile, "utf8")).sessions[key];
+
+      let restoreCompleted;
+      const restorePending = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("timed out waiting for closed poll feedback restore")), 500);
+        restoreCompleted = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      SessionStore.prototype.queuePrompts = async function (sessionKey, payload, options) {
+        const result = await originalQueuePrompts.call(this, sessionKey, payload, options);
+        if (sessionKey === key && options?.restore) restoreCompleted();
+        return result;
+      };
+
+      await takePending;
+      socket.on("error", () => {});
+      socket.destroy();
+      assert.equal(await presence.next(), "waiting");
+      releaseTake();
+      await restorePending;
+
+      const afterRestorePresence = await startPresenceStream(base, key);
+      try {
+        assert.equal(await afterRestorePresence.next(), "waiting");
+      } finally {
+        await afterRestorePresence.close();
+      }
+      const next = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
+      const feedback = await next.json();
+      assert.equal(feedback.status, "feedback");
+      assert.equal(feedback.dom_snapshot, queued.domSnapshot);
+      assert.deepEqual(feedback.prompts, [queued.prompts[0]]);
+      assert.deepEqual(JSON.parse(await readFile(stateFile, "utf8")).sessions[key].chat, beforeState.chat);
+    } finally {
+      await presence.close();
+    }
+  } finally {
+    SessionStore.prototype.takeFeedback = originalTakeFeedback;
+    SessionStore.prototype.queuePrompts = originalQueuePrompts;
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a restored batch wakes a poll that started listening during the restore", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  const stateFile = path.join(dir, "state.json");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const originalTakeFeedback = SessionStore.prototype.takeFeedback;
+  const originalQueuePrompts = SessionStore.prototype.queuePrompts;
+  const secondPoll = new AbortController();
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+
+    /** @type {() => void} */
+    let releaseTake = () => {};
+    const takeReleased = new Promise((resolve) => {
+      releaseTake = () => resolve();
+    });
+    let takeStarted;
+    const takePending = new Promise((resolve) => {
+      takeStarted = resolve;
+    });
+    let takeCount = 0;
+    SessionStore.prototype.takeFeedback = async function (sessionKey) {
+      takeCount += 1;
+      if (takeCount === 2 && sessionKey === key) {
+        takeStarted();
+        await takeReleased;
+      }
+      return originalTakeFeedback.call(this, sessionKey);
+    };
+
+    /** @type {() => void} */
+    let releaseRestore = () => {};
+    const restoreReleased = new Promise((resolve) => {
+      releaseRestore = () => resolve();
+    });
+    let restoreStarted;
+    const restorePending = new Promise((resolve) => {
+      restoreStarted = resolve;
+    });
+    let restoreCompleted;
+    const restoreDone = new Promise((resolve) => {
+      restoreCompleted = resolve;
+    });
+    SessionStore.prototype.queuePrompts = async function (sessionKey, payload, options) {
+      if (sessionKey === key && options?.restore) {
+        restoreStarted();
+        await restoreReleased;
+        const restored = await originalQueuePrompts.call(this, sessionKey, payload, options);
+        restoreCompleted();
+        return restored;
+      }
+      return originalQueuePrompts.call(this, sessionKey, payload, options);
+    };
+
+    const presence = await startPresenceStream(base, key);
+    try {
+      assert.equal(await presence.next(), "waiting");
+      const socket = await new Promise((resolve, reject) => {
+        const client = netConnect(server.port, "127.0.0.1", () => {
+          client.write(
+            `GET /api/poll?file=${encodeURIComponent(artifact)} HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`,
+            () => resolve(client),
+          );
+        });
+        client.on("error", reject);
+      });
+      assert.equal(await presence.next(), "listening");
+
+      const submitted = await fetch(`${base}/api/${key}/prompts`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: base },
+        body: JSON.stringify({
+          domSnapshot: 'uid=1 body "review"',
+          prompts: [{ prompt: "Looks good", tag: "message" }],
+        }),
+      });
+      assert.equal(submitted.status, 200);
+
+      await takePending;
+      socket.on("error", () => {});
+      socket.destroy();
+      assert.equal(await presence.next(), "waiting");
+      releaseTake();
+      // The first poll's take has now cleared the batch and its restore is held open, which is
+      // exactly the window a second poll can enter and find nothing waiting for it.
+      await restorePending;
+
+      const second = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}`, { signal: secondPoll.signal });
+      assert.equal(await presence.next(), "listening");
+
+      releaseRestore();
+      await restoreDone;
+
+      const feedback = await Promise.race([
+        second.then((response) => response.json()),
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ status: "never-woken" }), 2000).unref?.();
+        }),
+      ]);
+      assert.equal(feedback.status, "feedback");
+      assert.equal(feedback.dom_snapshot, 'uid=1 body "review"');
+      assert.deepEqual(
+        feedback.prompts.map((prompt) => prompt.prompt),
+        ["Looks good"],
+      );
+    } finally {
+      await presence.close();
+    }
+  } finally {
+    secondPoll.abort();
+    SessionStore.prototype.takeFeedback = originalTakeFeedback;
+    SessionStore.prototype.queuePrompts = originalQueuePrompts;
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a restore that fails to persist is logged instead of silently dropping the batch", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  const stateFile = path.join(dir, "state.json");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  /** @type {string[]} */
+  const logs = [];
+  const server = await serve({
+    port: 0,
+    stateFile,
+    version: "9.9.9-test",
+    log: (line) => logs.push(line),
+  });
+  const originalTakeFeedback = SessionStore.prototype.takeFeedback;
+  const originalQueuePrompts = SessionStore.prototype.queuePrompts;
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+    const submitted = await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({ domSnapshot: "uid=1 body", prompts: [{ prompt: "Looks good", tag: "message" }] }),
+    });
+    assert.equal(submitted.status, 200);
+
+    /** @type {() => void} */
+    let releaseTake = () => {};
+    const takeReleased = new Promise((resolve) => {
+      releaseTake = () => resolve();
+    });
+    let takeStarted;
+    const takePending = new Promise((resolve) => {
+      takeStarted = resolve;
+    });
+    let delayed = true;
+    SessionStore.prototype.takeFeedback = async function (sessionKey) {
+      if (delayed && sessionKey === key) {
+        delayed = false;
+        takeStarted();
+        await takeReleased;
+      }
+      return originalTakeFeedback.call(this, sessionKey);
+    };
+    let restoreAttempted;
+    const restorePending = new Promise((resolve) => {
+      restoreAttempted = resolve;
+    });
+    SessionStore.prototype.queuePrompts = async function (sessionKey, payload, options) {
+      if (sessionKey === key && options?.restore) {
+        restoreAttempted();
+        throw new Error("ENOSPC: no space left on device");
+      }
+      return originalQueuePrompts.call(this, sessionKey, payload, options);
+    };
+
+    const socket = await new Promise((resolve, reject) => {
+      const client = netConnect(server.port, "127.0.0.1", () => {
+        client.write(
+          `GET /api/poll?file=${encodeURIComponent(artifact)} HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`,
+          () => resolve(client),
+        );
+      });
+      client.on("error", reject);
+    });
+    await takePending;
+    socket.on("error", () => {});
+    socket.destroy();
+    releaseTake();
+    await restorePending;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.ok(
+      logs.some((line) => line.includes("closed poll feedback restore failed") && line.includes("ENOSPC")),
+      `expected a restore failure log, got ${JSON.stringify(logs)}`,
+    );
+    const health = await fetch(`${base}/health`);
+    assert.equal(health.status, 200);
+    assert.equal((await health.json()).ok, true);
+  } finally {
+    SessionStore.prototype.takeFeedback = originalTakeFeedback;
+    SessionStore.prototype.queuePrompts = originalQueuePrompts;
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("SSE agent-presence resets to waiting after ending and reopening a session", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");

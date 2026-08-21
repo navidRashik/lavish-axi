@@ -280,38 +280,62 @@ export async function serve({
   // otherwise lose the feedback for good, so put it back verbatim through the store's `restore`
   // mode and leave delivery unmarked - nothing reached an agent. A restore that comes back short
   // is logged, so a batch that could not be put back whole is visible instead of silently gone.
+  // A restore that THROWS (the state write failed) is the same loss with no return value to
+  // inspect, and the caller is a socket the client already closed, so it is logged and swallowed
+  // here rather than escaping into an error path that has no one left to tell.
+  // The re-queued batch also has to be announced: another poll can take "waiting" in the window
+  // between the destructive take and this restore, and it would then long-poll forever over
+  // feedback that is sitting in `state.json`. Emitting wakes it exactly like a fresh `/prompts`.
   async function restoreClosedFeedback(key, result) {
     if (result.status !== "feedback") return;
     const prompts = Array.isArray(result.prompts) ? result.prompts : [];
-    const session = await store.queuePrompts(
-      key,
-      {
-        dom_snapshot: result.dom_snapshot || "",
-        prompts,
-        ...(Array.isArray(result.artifact_failures) ? { artifact_failures: result.artifact_failures } : {}),
-      },
-      {
-        restore: true,
-        resolveAttachment: (sessionKeyValue, id) => resolveAttachment(attachmentStateRoot, sessionKeyValue, id),
-        maxPerPrompt: attachmentConfig.maxPerPrompt,
-        maxPromptBytes: attachmentConfig.maxPromptBytes,
-      },
-    );
+    let session = null;
+    let restoreError = null;
+    try {
+      session = await store.queuePrompts(
+        key,
+        {
+          dom_snapshot: result.dom_snapshot || "",
+          prompts,
+          ...(Array.isArray(result.artifact_failures) ? { artifact_failures: result.artifact_failures } : {}),
+        },
+        {
+          restore: true,
+          resolveAttachment: (sessionKeyValue, id) => resolveAttachment(attachmentStateRoot, sessionKeyValue, id),
+          maxPerPrompt: attachmentConfig.maxPerPrompt,
+          maxPromptBytes: attachmentConfig.maxPromptBytes,
+        },
+      );
+    } catch (error) {
+      restoreError = error;
+    }
     const restoredPrompts =
       prompts.length === 0
         ? []
         : session && !session.rejected && !session.conflict && Array.isArray(session.prompts)
-          ? session.prompts.slice(-prompts.length)
+          ? session.prompts.slice(0, prompts.length)
           : null;
     const restoredFailures = session && Array.isArray(session.artifact_failures) ? session.artifact_failures : null;
-    if (
-      !restoredPrompts ||
-      JSON.stringify(restoredPrompts) !== JSON.stringify(prompts) ||
-      (Array.isArray(result.artifact_failures) &&
-        JSON.stringify(restoredFailures) !== JSON.stringify(result.artifact_failures))
-    ) {
+    const failuresRestored =
+      !Array.isArray(result.artifact_failures) ||
+      (Array.isArray(restoredFailures) &&
+        result.artifact_failures.every((failure) =>
+          restoredFailures.some((restoredFailure) => JSON.stringify(restoredFailure) === JSON.stringify(failure)),
+        ));
+    const persistedNothing = !session || Boolean(session.rejected) || Boolean(session.conflict);
+    if (restoreError) {
+      writeLog(
+        `[lavish] closed poll feedback restore failed; the batch was lost: ${restoreError?.message || restoreError}`,
+      );
+    } else if (persistedNothing) {
+      writeLog("[lavish] closed poll feedback restore was refused; nothing was persisted and the batch was lost");
+    } else if (!restoredPrompts || JSON.stringify(restoredPrompts) !== JSON.stringify(prompts) || !failuresRestored) {
       writeLog("[lavish] closed poll feedback restore was incomplete; delivery was not marked");
     }
+    const pendingAfterRestore =
+      (Array.isArray(restoredPrompts) && restoredPrompts.length > 0) ||
+      (Array.isArray(restoredFailures) && restoredFailures.length > 0);
+    if (pendingAfterRestore) events.emit("feedback", key);
   }
   // Whiteboard sidecar files live next to state.json, keyed by session + diagram.
   const whiteboardStateRoot = path.dirname(stateFile);
@@ -511,6 +535,10 @@ export async function serve({
         responding = true;
         try {
           const result = await store.takeFeedback(key);
+          if (requestClosed || req.destroyed || res.writableEnded) {
+            await restoreClosedFeedback(key, result);
+            return;
+          }
           finishFeedbackDelivery(key, result);
           if (streamHeartbeat) {
             res.end(JSON.stringify(result));

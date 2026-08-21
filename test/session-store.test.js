@@ -1393,6 +1393,199 @@ test("queuePrompts and takeFeedback serialize so a mid-resolution poll never clo
   }
 });
 
+test("restoring a taken batch preserves newer prompts, snapshot, chat, and artifact failures", async () => {
+  await withStore(async ({ store, session }) => {
+    const first = { uid: "A", prompt: "First", selector: "", tag: "message", text: "" };
+    const second = { uid: "B", prompt: "Second", selector: "", tag: "message", text: "" };
+    await store.queuePrompts(session.key, { domSnapshot: "FIRST snapshot", prompts: [first] });
+    const taken = feedbackResult(await store.takeFeedback(session.key));
+
+    await store.queuePrompts(session.key, { domSnapshot: "SECOND snapshot", prompts: [second] });
+    const load = await beginArtifactLoad(store, session.key);
+    const failure = { kind: "artifact-asset-unavailable", detail: "newer asset" };
+    const recorded = await store.recordArtifactFailures(session.key, {
+      ...diagnosticPayload(load, 1),
+      failures: [failure],
+    });
+    assert.equal(recorded.changed, true);
+
+    const restored = await store.queuePrompts(
+      session.key,
+      {
+        dom_snapshot: taken.dom_snapshot,
+        prompts: taken.prompts,
+        artifact_failures: taken.artifact_failures,
+      },
+      { restore: true },
+    );
+    assert.deepEqual(
+      restored.prompts.map((prompt) => prompt.uid),
+      ["A", "B"],
+    );
+    assert.equal(restored.dom_snapshot, "SECOND snapshot");
+    assert.deepEqual(
+      restored.chat.map((message) => message.text),
+      ["First", "Second"],
+    );
+    assert.deepEqual(
+      restored.artifact_failures.map((item) => item.detail),
+      ["newer asset"],
+    );
+
+    const feedback = feedbackResult(await store.takeFeedback(session.key));
+    assert.deepEqual(
+      feedback.prompts.map((prompt) => prompt.uid),
+      ["A", "B"],
+    );
+    assert.equal(feedback.dom_snapshot, "SECOND snapshot");
+    assert.deepEqual(
+      feedback.artifact_failures.map((item) => item.detail),
+      ["newer asset"],
+    );
+  });
+});
+
+test("restoring a delivery larger than one request's attachment bound loses nothing", async () => {
+  await withStore(async ({ store, session }) => {
+    const resolveAttachment = async (_key, attachmentId) => ({
+      id: attachmentId,
+      type: "image",
+      path: "/tmp/" + attachmentId,
+      mime: "image/png",
+      bytes: 10,
+      width: 1,
+      height: 1,
+    });
+    const opts = { resolveAttachment, maxPerPrompt: 4, maxPromptBytes: 25 * 1024 * 1024 };
+    const batch = (offset) =>
+      Array.from({ length: MAX_REQUEST_ATTACHMENT_REFS / 4 }, (_, i) => ({
+        uid: `${offset}-${i}`,
+        prompt: "p",
+        selector: "h1",
+        tag: "h1",
+        text: "",
+        attachments: Array.from({ length: 4 }, (_, j) => ({ id: unknownAttachmentId(offset + i * 4 + j) })),
+      }));
+    // Two accepted POSTs, each exactly at the per-request bound, drained by one poll.
+    await store.queuePrompts(session.key, { prompts: batch(1000) }, opts);
+    await store.queuePrompts(session.key, { prompts: batch(2000) }, opts);
+    const taken = feedbackResult(await store.takeFeedback(session.key));
+    assert.equal(taken.prompts.length, MAX_REQUEST_ATTACHMENT_REFS / 2);
+
+    // That delivery carries twice what one request may queue. Measuring the restore
+    // against the per-request bound would reject the whole batch and lose it for good.
+    const restored = await store.queuePrompts(
+      session.key,
+      { dom_snapshot: taken.dom_snapshot, prompts: taken.prompts },
+      { ...opts, restore: true },
+    );
+    assert.equal(restored.rejected, undefined, "the restore was not refused");
+    assert.deepEqual(
+      restored.prompts.map((prompt) => prompt.uid),
+      taken.prompts.map((prompt) => prompt.uid),
+    );
+
+    const feedback = feedbackResult(await store.takeFeedback(session.key));
+    assert.equal(
+      feedback.prompts.flatMap((prompt) => prompt.attachments || []).length,
+      MAX_REQUEST_ATTACHMENT_REFS * 2,
+      "every attachment survived the restore",
+    );
+  });
+});
+
+test("restoring artifact failures dedupes against one re-reported in the disconnect window", async () => {
+  await withStore(async ({ store, session }) => {
+    const load = await beginArtifactLoad(store, session.key);
+    const failure = { kind: "artifact-asset-unavailable", detail: "missing.css" };
+    await store.recordArtifactFailures(session.key, { ...diagnosticPayload(load, 1), failures: [failure] });
+    const taken = feedbackResult(await store.takeFeedback(session.key));
+    assert.equal(taken.artifact_failures?.length, 1);
+
+    // The take cleared the list, so the SDK's re-report for the still-current load
+    // records the identical failure again before the restore puts the taken one back.
+    const recorded = await store.recordArtifactFailures(session.key, {
+      ...diagnosticPayload(load, 2),
+      failures: [failure],
+    });
+    assert.equal(recorded.changed, true);
+
+    const restored = await store.queuePrompts(
+      session.key,
+      { dom_snapshot: "", prompts: [], artifact_failures: taken.artifact_failures },
+      { restore: true },
+    );
+    assert.deepEqual(
+      restored.artifact_failures.map((item) => item.detail),
+      ["missing.css"],
+      "the same failure is not handed to the agent twice",
+    );
+  });
+});
+
+// Which entries survive the bound is the policy, not the count. The restore REPLACES
+// session.artifact_failures, so anything its merge trims is gone from the store: a restore
+// that trimmed the newest end would delete the failures recorded inside its own disconnect
+// window, which have never been delivered either and describe the current artifact. The bound
+// therefore keeps the newest entries for both writers, and the restore's own overflow - the
+// only loss the bound can still cause - is what restoreClosedFeedback reports as incomplete.
+const restoreRetentionCases = [
+  {
+    name: "keeps every failure recorded during the disconnect window",
+    windowCount: 5,
+    // 20 restored + 5 window = 25 over a bound of 20: the five oldest restored entries go.
+    expected: [...range(5, 20).map((i) => `asset-${i}.css`), ...range(0, 5).map((i) => `asset-${100 + i}.css`)],
+  },
+  {
+    name: "never evicts a window failure to make room for a restored one",
+    windowCount: 20,
+    expected: range(0, 20).map((i) => `asset-${100 + i}.css`),
+  },
+];
+
+for (const testCase of restoreRetentionCases) {
+  test(`a restore bounded at the artifact-failure retention limit ${testCase.name}`, async () => {
+    await withStore(async ({ store, session }) => {
+      const load = await beginArtifactLoad(store, session.key);
+      const failures = (offset, count) =>
+        range(0, count).map((i) => ({
+          kind: "artifact-asset-unavailable",
+          detail: `asset-${offset + i}.css`,
+        }));
+      await store.recordArtifactFailures(session.key, { ...diagnosticPayload(load, 1), failures: failures(0, 20) });
+      const taken = feedbackResult(await store.takeFeedback(session.key));
+      assert.equal(taken.artifact_failures?.length, 20);
+
+      await store.recordArtifactFailures(session.key, {
+        ...diagnosticPayload(load, 2),
+        failures: failures(100, testCase.windowCount),
+      });
+      const restored = await store.queuePrompts(
+        session.key,
+        { dom_snapshot: "", prompts: [], artifact_failures: taken.artifact_failures },
+        { restore: true },
+      );
+      assert.equal(restored.artifact_failures.length, 20, "the merged list stays bounded");
+      assert.deepEqual(
+        restored.artifact_failures.map((failure) => failure.detail),
+        testCase.expected,
+      );
+
+      // The store is the only place these live, so what the next poll delivers is the proof.
+      const delivered = feedbackResult(await store.takeFeedback(session.key));
+      assert.deepEqual(
+        delivered.artifact_failures.map((failure) => failure.detail),
+        testCase.expected,
+        "the surviving failures are the ones the agent is handed",
+      );
+    });
+  });
+}
+
+function range(start, end) {
+  return Array.from({ length: end - start }, (_, i) => start + i);
+}
+
 // A well-formed but nonexistent content-hash id, distinct per index.
 function unknownAttachmentId(index) {
   return String(index).padStart(64, "0") + ".png";
