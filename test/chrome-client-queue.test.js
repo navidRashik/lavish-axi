@@ -238,6 +238,7 @@ async function createChromeHarness({
   element("chatComposer").parentElement = element("panel");
   element("panelScroll").parentElement = element("panel");
   element("whiteboardOverlay").hidden = true;
+  element("layoutGateBypass").hidden = true;
   element("shareDialog").hidden = true;
   element("moreMenu").hidden = true;
   element("warningsDrawer").hidden = true;
@@ -2695,18 +2696,117 @@ test("the not-running card survives a later successful artifact load", async () 
   assert.equal(chrome.element("layoutGateAction").textContent, "Check and reload");
   assert.equal(chrome.element("layoutGateOverlay").hidden, false);
 
-  // A completed diagnostic pass from the replacement server reaches the overlay by a second
-  // route, and must not take the card down either.
+  // A completed diagnostic pass from the replacement server must release the visual gate even
+  // while the sticky card copy remains in state. The card is not allowed to trap the artifact.
   chrome.sendFrameMessage({
     artifact_load_token: chrome.artifactLoadToken(),
     type: "lavish:layoutDiagnostics",
     complete: true,
     findings: [],
   });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+  assert.equal(chrome.element("layoutGateTitle").textContent, "Lavish is not running.");
+
+  chrome.eventSource().listeners.get("reload")();
   await flushPromises();
   await flushPromises();
   assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+  assert.equal(chrome.element("layoutGateBypass").hidden, false);
+  chrome.element("layoutGateBypass").click();
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+test("a sticky failure cannot outlive the layout gate timeout", async () => {
+  const chrome = await createChromeHarness({
+    artifactSrc: "/artifact/abc/index.html",
+    fakeClock: true,
+    fetchImpl: async (url) => {
+      if (String(url) === "/health") throw new Error("connection refused");
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+
+  chrome.eventSource().listeners.get("chrome-reload")();
+  await flushPromises();
+  chrome.advanceClock(61000);
+  for (let i = 0; i < 3; i += 1) {
+    chrome.runTimers(100);
+    await flushPromises();
+  }
   assert.equal(chrome.element("layoutGateTitle").textContent, "Lavish is not running.");
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  // setLayoutGateFailure() is sticky here; its hold timer must still release the visual gate.
+  chrome.runTimers(12000);
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+test("a no-gate sticky failure reveals by pass, manual bypass, or timeout", async () => {
+  async function createFailedChrome() {
+    const chrome = await createChromeHarness({
+      artifactSrc: "/artifact/abc/index.html",
+      fakeClock: true,
+      sessionData: { ...defaultSessionData, layoutGateEnabled: false },
+      fetchImpl: async (url) => {
+        if (String(url) === "/health") throw new Error("connection refused");
+        return { ok: true, json: async () => ({}) };
+      },
+    });
+
+    assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+    chrome.eventSource().listeners.get("chrome-reload")();
+    await flushPromises();
+    chrome.advanceClock(61000);
+    for (let i = 0; i < 3; i += 1) {
+      chrome.runTimers(100);
+      await flushPromises();
+    }
+    assert.equal(chrome.element("layoutGateTitle").textContent, "Lavish is not running.");
+    assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+    return chrome;
+  }
+
+  const completed = await createFailedChrome();
+  completed.sendFrameMessage({
+    artifact_load_token: completed.artifactLoadToken(),
+    type: "lavish:layoutDiagnostics",
+    complete: true,
+    findings: [],
+  });
+  assert.equal(completed.element("layoutGateOverlay").hidden, true);
+
+  const bypassed = await createFailedChrome();
+  bypassed.element("layoutGateBypass").click();
+  assert.equal(bypassed.element("layoutGateOverlay").hidden, true);
+
+  const timedOut = await createFailedChrome();
+  timedOut.runTimers(12000);
+  assert.equal(timedOut.element("layoutGateOverlay").hidden, true);
+});
+
+test("a diagnostics network failure does not hold the visual gate", async () => {
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url) => {
+      if (String(url).includes("/layout-diagnostics")) throw new Error("server replaced");
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+
+  chrome.sendFrameMessage({ type: "lavish:layoutDiagnostics", complete: true, findings: [] });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+test("a layout pass lost to a token race requests a fresh pass", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  const oldToken = "stale-load-token";
+
+  chrome.sendFrameMessage({
+    artifact_load_token: oldToken,
+    type: "lavish:layoutDiagnostics",
+    complete: true,
+    findings: [],
+  });
+  assert.equal(chrome.postedToFrame.at(-1).type, "lavish:requestLayoutDiagnostics");
 });
 
 function sendChromeOutdated(chrome, reason) {
