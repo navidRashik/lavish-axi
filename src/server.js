@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
+import { createServer } from "node:http";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -52,7 +53,19 @@ import {
 } from "./export-bundle.js";
 import { hostRejectedShareWrite, publishedDespiteError, publishToHtmlApp } from "./html-app.js";
 import { injectLavishSdk } from "./html-transform.js";
-import { bindHost, extraAllowedHosts, hostForUrl, IPV6_LOOPBACK_HOST, linkHost, LOOPBACK_HOST } from "./paths.js";
+import {
+  bindHost,
+  extraAllowedHosts,
+  hostForUrl,
+  IPV6_LOOPBACK_HOST,
+  isWildcardHost,
+  LOOPBACK_HOST,
+  resolveConcreteListenHosts,
+  resolveLinkHost,
+  resolveListenHosts,
+  sanitizeListenHosts,
+} from "./paths.js";
+import { detectTailscale } from "./tailscale.js";
 import { canonicalFile, SessionStore, sessionKey } from "./session-store.js";
 import { generateSharePassword } from "./share-password.js";
 import {
@@ -88,6 +101,8 @@ const designAssetUrls = {
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WHITEBOARD_CHANNEL_TOKEN_TTL_MS = 5 * 60_000;
+const NETWORK_RECONCILE_CACHE_MS = 1_000;
+const TAILSCALE_BIND_RETRY_DELAYS_MS = [100, 250, 500];
 // An escaped popup can navigate to an artifact-owned HTML or SVG asset on the
 // server origin. Keep every artifact response sandboxed at the response layer
 // so active documents stay opaque-origin even when they are top-level.
@@ -233,7 +248,11 @@ export function resolveIdleTimeoutMs(env = process.env) {
   return value;
 }
 
+/**
+ * @param {{ [key: string]: any }} [options]
+ */
 export async function serve({
+  env = process.env,
   port,
   stateFile,
   version = "",
@@ -241,11 +260,29 @@ export async function serve({
   log = null,
   pollHeartbeatMs = 15_000,
   idleTimeoutMs = resolveIdleTimeoutMs(),
-  host = bindHost(),
-  linkHost: linkHostName = linkHost(),
-  allowedHosts = extraAllowedHosts(),
+  host = bindHost(env),
+  hosts,
+  linkHost: linkHostName,
+  allowedHosts,
+  detectTailscale: detectTailscaleFn,
+  lookupHost,
   whiteboardAssetsDir = defaultWhiteboardAssetsDir(),
-}) {
+} = {}) {
+  const extraHosts = allowedHosts ?? extraAllowedHosts(env);
+  const envHost = env.LAVISH_AXI_HOST?.trim();
+  const autoTailscale = !envHost;
+  const detect = detectTailscaleFn === undefined ? detectTailscale : detectTailscaleFn;
+  const tailscale = !hosts?.length && autoTailscale && typeof detect === "function" ? await detect() : null;
+  const requestedListenHosts = sanitizeListenHosts(
+    hosts?.length ? hosts : resolveListenHosts({ host, env, tailscale }),
+  );
+  const listenHosts = await resolveConcreteListenHosts(requestedListenHosts, {
+    ...(lookupHost ? { lookup: lookupHost } : {}),
+  });
+  const activeTailscaleNetwork = tailscaleNetworkKey(tailscale);
+  let tailscalePhoneReady = false;
+  let networkWarning = typeof tailscale?.warning === "string" ? tailscale.warning : "";
+  let resolvedLinkHost = linkHostName ?? resolveLinkHost({ env, tailscale, fallbackHost: host });
   const app = express();
   const store = new SessionStore(stateFile);
   const events = new EventEmitter();
@@ -259,10 +296,39 @@ export async function serve({
   // Sessions with at least one warning the user queued that has not been re-checked yet.
   const outstandingRepairBatches = new Set();
   const diagnosticViewportClasses = resolveDiagnosticViewportClasses();
-  const verbose = debug || process.env.LAVISH_AXI_DEBUG === "1";
+  const verbose = debug || env.LAVISH_AXI_DEBUG === "1";
   const writeLog = typeof log === "function" ? log : (line) => process.stderr.write(`${line}\n`);
   const logEvent = verbose ? (line) => writeLog(`[lavish] ${line}`) : null;
+  if (networkWarning) writeLog(`[lavish] WARNING: ${networkWarning}`);
   let publicPort = port;
+  let serverReady = false;
+  let networkReconcileCheckedAt = 0;
+  let cachedNetworkStale = false;
+  /** @type {Promise<boolean> | null} */
+  let networkReconcilePromise = null;
+
+  async function reconcileTailscaleNetwork() {
+    if (Date.now() - networkReconcileCheckedAt < NETWORK_RECONCILE_CACHE_MS) return cachedNetworkStale;
+    if (networkReconcilePromise) return networkReconcilePromise;
+    networkReconcilePromise = (async () => {
+      try {
+        const detectedTailscale = await detect();
+        const detectedNetwork = tailscaleNetworkKey(detectedTailscale);
+        const stale = detectedNetwork !== activeTailscaleNetwork;
+        if (stale) networkWarning = typeof detectedTailscale?.warning === "string" ? detectedTailscale.warning : "";
+        return stale;
+      } catch {
+        return false;
+      }
+    })();
+    try {
+      cachedNetworkStale = await networkReconcilePromise;
+      networkReconcileCheckedAt = Date.now();
+      return cachedNetworkStale;
+    } finally {
+      networkReconcilePromise = null;
+    }
+  }
 
   function finishFeedbackDelivery(key, result) {
     if (result.status !== "feedback") return;
@@ -360,8 +426,44 @@ export async function serve({
   // This guard is installed as the first middleware so every route - including the
   // attachment upload/fetch/remove endpoints below - is behind the Host allowlist.
   // The mutating-route origin/Referer guard is installed immediately after.
-  const allowedHostnames = buildAllowedHostnames({ host, linkHost: linkHostName, allowedHosts });
-  const allowAnyHostname = allowsAllHosts(allowedHosts);
+  const allowedHostnames = buildAllowedHostnames({
+    host: requestedListenHosts[0],
+    hosts: [...requestedListenHosts, ...listenHosts],
+    linkHost: resolvedLinkHost,
+    allowedHosts: extraHosts,
+  });
+  const allowAnyHostname = allowsAllHosts(extraHosts);
+
+  function workingUrlFor(req, { includeSessionPath = true } = {}) {
+    const origin = `http://${hostForUrl(resolvedLinkHost)}:${publicPort}`;
+    if (includeSessionPath && typeof req.path === "string" && req.path.startsWith("/session/")) {
+      return `${origin}${req.path}`;
+    }
+    return `${origin}/`;
+  }
+
+  function sendDenied(req, res, { status, error, title, message, workingUrl = undefined }) {
+    const resolvedWorkingUrl = workingUrl || workingUrlFor(req);
+    if (wantsHtml(req)) {
+      res
+        .status(status)
+        .type("html")
+        .send(createDeniedHtml({ title, message, workingUrl: resolvedWorkingUrl }));
+      return;
+    }
+    res.status(status).json({ error });
+  }
+
+  function sendSessionNotFound(req, res) {
+    sendDenied(req, res, {
+      status: 404,
+      error: "session not found",
+      title: "Session not found",
+      message: "This review session does not exist. Return to your agent and open the session URL it printed.",
+      workingUrl: workingUrlFor(req, { includeSessionPath: false }),
+    });
+  }
+
   if (!allowAnyHostname) {
     app.use((req, res, next) => {
       const requestHost = { host: req.headers.host, forwardedHost: req.headers["x-forwarded-host"] };
@@ -372,7 +474,14 @@ export async function serve({
       logEvent?.(
         `rejected request with disallowed host host=${req.headers.host ?? ""} x-forwarded-host=${req.headers["x-forwarded-host"] ?? ""} path=${req.path}`,
       );
-      res.status(403).json({ error: "forbidden host" });
+      sendDenied(req, res, {
+        status: 403,
+        error: "forbidden host",
+        title: "Wrong address",
+        message: tailscalePhoneReady
+          ? "This Lavish review server does not accept that host. Open the working URL below on this computer or your phone through Tailscale."
+          : "This Lavish review server does not accept that host. Open the working URL below on this computer. Phone access is unavailable.",
+      });
     });
   }
 
@@ -418,8 +527,26 @@ export async function serve({
     return defaultJsonParser(req, res, next);
   });
 
-  app.get("/health", (req, res) => {
-    res.json({ ok: true, app: "lavish-axi", version });
+  app.get("/", (_req, res) => {
+    res.type("html").send(createLandingHtml());
+  });
+
+  app.get("/health", async (req, res) => {
+    if (!serverReady) {
+      res.status(503).json({ ok: false, app: "lavish-axi", version });
+      return;
+    }
+    const networkStale =
+      req.query.reconcile_network === "1" && autoTailscale && typeof detect === "function"
+        ? await reconcileTailscaleNetwork()
+        : false;
+    res.json({
+      ok: true,
+      app: "lavish-axi",
+      version,
+      ...(networkStale ? { network_stale: true } : {}),
+      ...(networkWarning ? { network_warning: networkWarning } : {}),
+    });
   });
 
   let shutdownResolve;
@@ -445,6 +572,7 @@ export async function serve({
       const key = sessionKey(file);
       const reopen = Boolean(req.body.reopen);
       const existing = await store.findByKey(key);
+      const sessionUrl = `http://${hostForUrl(resolvedLinkHost)}:${publicPort}/session/${key}`;
       // A user-initiated end (ending or send-and-ending from the browser) means the human
       // deliberately closed the review surface. Silently reopening it on the next
       // `lavish-axi <file>` is the exact behavior this route exists to prevent - require an
@@ -452,10 +580,15 @@ export async function serve({
       // (`lavish-axi end`) keep reviving on the next open, same as before this change.
       if (existing?.status === "ended" && existing.ended_by === "user" && !reopen) {
         logEvent?.(`session open blocked (user-ended) key=${key} file=${file}`);
-        res.json({ key, file, url: existing.url, status: "user-ended" });
+        res.json({
+          key,
+          file,
+          url: sessionUrl,
+          status: "user-ended",
+          ...(networkWarning ? { network_warning: networkWarning } : {}),
+        });
         return;
       }
-      const sessionUrl = `http://${hostForUrl(linkHostName)}:${publicPort}/session/${key}`;
       const url = shouldDisableLayoutGateOpen(req.body || {}) ? appendNoGateParam(sessionUrl) : sessionUrl;
       const session = await store.upsertSession(file, sessionUrl);
       if (existing?.status === "ended") {
@@ -464,7 +597,13 @@ export async function serve({
       logEvent?.(`session opened key=${key} file=${file}`);
       await syncOutstandingRepairs(key);
       await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
-      res.json({ key, file, url, status: "opened" });
+      res.json({
+        key,
+        file,
+        url,
+        status: "opened",
+        ...(networkWarning ? { network_warning: networkWarning } : {}),
+      });
     } catch (error) {
       next(error);
     }
@@ -900,7 +1039,7 @@ export async function serve({
     try {
       const chromeLoad = await store.issueReviewerHandoff(req.params.key);
       if (!chromeLoad) {
-        res.status(404).send("Session not found");
+        sendSessionNotFound(req, res);
         return;
       }
       const session = chromeLoad.session;
@@ -989,7 +1128,7 @@ export async function serve({
       const revision = req.query.artifact_revision;
       const beforeRead = await store.verifyArtifactLoad(key, token, revision);
       if (!beforeRead) {
-        res.status(404).send("Session not found");
+        sendSessionNotFound(req, res);
         return;
       }
       if (!beforeRead.valid) {
@@ -1025,7 +1164,7 @@ export async function serve({
       const assetPath = req.params[1];
       const session = await store.findByKey(key);
       if (!session) {
-        res.status(404).send("Session not found");
+        sendSessionNotFound(req, res);
         return;
       }
       const root = path.dirname(session.file);
@@ -1158,7 +1297,7 @@ export async function serve({
         req.query.artifact_revision,
       );
       if (!verified) {
-        res.status(404).send("Session not found");
+        sendSessionNotFound(req, res);
         return;
       }
       if (!verified.valid) {
@@ -1437,13 +1576,53 @@ export async function serve({
     res.status(status).json({ error: error instanceof Error ? error.message : String(error) });
   });
 
-  const httpServer = await new Promise((resolve, reject) => {
-    const s = app.listen(port, host, () => {
-      if (s.address()) resolve(s);
+  const httpServers = [];
+  const boundHosts = [];
+  let boundPort = port;
+  for (const listenHost of listenHosts) {
+    const retryDelays = listenHost === tailscale?.ipv4 ? TAILSCALE_BIND_RETRY_DELAYS_MS : [];
+    let retryIndex = 0;
+    while (true) {
+      try {
+        const httpServer = await listenHttp(app, boundPort, listenHost);
+        if (boundPort === 0) boundPort = httpServer.address().port;
+        httpServers.push(httpServer);
+        boundHosts.push(listenHost);
+        break;
+      } catch (error) {
+        if (httpServers.length === 0) throw error;
+        if (retryIndex < retryDelays.length) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelays[retryIndex]));
+          retryIndex += 1;
+          continue;
+        }
+        if (listenHost === tailscale?.ipv4) {
+          networkWarning = "Tailscale binding failed; there is no phone access. Lavish remains available on loopback.";
+          writeLog(`[lavish] WARNING: ${networkWarning} Address: ${listenHost}:${boundPort}.`);
+        } else {
+          logEvent?.(`failed to bind ${listenHost}:${boundPort}: ${error instanceof Error ? error.message : error}`);
+        }
+        break;
+      }
+    }
+  }
+  if (httpServers.length === 0) {
+    throw new Error("Lavish server failed to bind any address");
+  }
+  tailscalePhoneReady = Boolean(tailscale?.ipv4 && boundHosts.includes(tailscale.ipv4));
+  if (tailscale?.ipv4 && !tailscalePhoneReady) {
+    resolvedLinkHost = linkHostName ?? resolveLinkHost({ env, tailscale: null, fallbackHost: host });
+    const fallbackAllowedHostnames = buildAllowedHostnames({
+      host: requestedListenHosts[0],
+      hosts: [...requestedListenHosts.filter((requestedHost) => requestedHost !== tailscale.ipv4), ...boundHosts],
+      linkHost: resolvedLinkHost,
+      allowedHosts: extraHosts,
     });
-    s.once("error", reject);
-  });
-  publicPort = httpServer.address().port;
+    allowedHostnames.clear();
+    for (const allowedHostname of fallbackAllowedHostnames) allowedHostnames.add(allowedHostname);
+  }
+  publicPort = httpServers[0].address().port;
+  serverReady = true;
 
   let shuttingDown = false;
   function shutdown(reloadKey = "", reason = "") {
@@ -1481,10 +1660,17 @@ export async function serve({
       w.close().catch(() => {});
     }
     watchers.clear();
-    httpServer.close(() => shutdownResolve());
-    // Force-close keep-alive sockets so SSE / long-polls don't keep us alive.
-    if (typeof httpServer.closeAllConnections === "function") {
-      httpServer.closeAllConnections();
+    let remaining = httpServers.length;
+    const closed = () => {
+      remaining -= 1;
+      if (remaining === 0) shutdownResolve();
+    };
+    for (const httpServer of httpServers) {
+      httpServer.close(closed);
+      // Force-close keep-alive sockets so SSE / long-polls don't keep us alive.
+      if (typeof httpServer.closeAllConnections === "function") {
+        httpServer.closeAllConnections();
+      }
     }
   }
 
@@ -1584,13 +1770,63 @@ export async function serve({
   refreshIdleTimer();
 
   return {
-    port: httpServer.address().port,
+    port: publicPort,
+    hosts: boundHosts,
+    addresses: httpServers.map((server) => server.address()),
     close: async () => {
       shutdown();
       await done;
     },
     done,
   };
+}
+
+function listenHttp(app, port, host) {
+  return new Promise((resolve, reject) => {
+    const server = createServer(app);
+    const onError = (error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      const address = server.address();
+      if (address && typeof address === "object" && isWildcardHost(address.address)) {
+        server.close(() => reject(new Error(`Refusing all-interfaces listener at ${address.address}`)));
+        return;
+      }
+      resolve(server);
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    // `host` has already been sanitized by resolveListenHosts. Keeping this helper
+    // concrete is an important defense: Tailscale reachability must never turn into
+    // an all-interfaces wildcard listener.
+    server.listen({ port, host });
+  });
+}
+
+function tailscaleNetworkKey(tailscale) {
+  if (!tailscale) return "down";
+  if (tailscale.warning) return "incomplete";
+  if (!tailscale.ipv4 || !tailscale.magicDnsName) return "incomplete";
+  return `up\n${tailscale.ipv4}\n${tailscale.magicDnsName}`;
+}
+
+function wantsHtml(req) {
+  const accept = String(req.get("accept") || "");
+  return accept.toLowerCase().includes("text/html");
+}
+
+function createLandingHtml() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lavish Editor</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f4ef;color:#25221f;font:16px/1.5 system-ui,sans-serif}.card{width:min(560px,calc(100% - 40px));padding:32px;border:1px solid #d9d0c5;border-radius:16px;background:#fffdf9;box-shadow:0 12px 40px #25221f18}h1{margin:0 0 12px;font-size:26px}p{margin:0}</style></head><body><main class="card"><h1>Lavish Editor is running</h1><p>Open the review session URL printed by your agent.</p></main></body></html>`;
+}
+
+function createDeniedHtml({ title, message, workingUrl }) {
+  const safeTitle = escapeHtml(title);
+  const safeMessage = escapeHtml(message);
+  const safeUrl = escapeHtml(workingUrl);
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeTitle} - Lavish Editor</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f4ef;color:#25221f;font:16px/1.5 system-ui,sans-serif}.card{width:min(560px,calc(100% - 40px));padding:32px;border:1px solid #d9d0c5;border-radius:16px;background:#fffdf9;box-shadow:0 12px 40px #25221f18}h1{margin:0 0 12px;font-size:26px}p{margin:0 0 18px}.url{display:block;padding:12px 14px;border-radius:10px;background:#f0ebe4;color:#25221f;overflow-wrap:anywhere}a{color:inherit;font-weight:700}</style></head><body><main class="card"><h1>${safeTitle}</h1><p>${safeMessage}</p><p>Open this working URL:</p><a class="url" href="${safeUrl}">${safeUrl}</a></main></body></html>`;
 }
 
 async function readDesignAsset(asset) {
@@ -1637,25 +1873,19 @@ function encodeRfc5987Value(value) {
   );
 }
 
-// Wildcard bind addresses ("all interfaces") are not connectable hostnames, so
-// they never belong in the Host allowlist - and "0.0.0.0" as a Host is a known
-// loopback-reach trick, so it must stay rejected. Both the bare ("::") and
-// bracketed ("[::]") IPv6 wildcard forms are excluded.
-const WILDCARD_BIND_HOSTS = new Set(["0.0.0.0", "::", "[::]"]);
-
 // The set of Host header hostnames this server answers to: loopback names plus
-// the resolved bind and link host and any explicit LAVISH_AXI_ALLOWED_HOSTS
-// extras, minus wildcard binds and the "*" sentinel. Lowercased for
-// case-insensitive comparison against the incoming Host.
-export function buildAllowedHostnames({ host, linkHost: linkHostName, allowedHosts = [] }) {
+// every concrete listener and the resolved link host. Wildcard bind values and the
+// explicit "*" opt-out never become hostnames. Lowercased for case-insensitive
+// comparison against the incoming Host.
+export function buildAllowedHostnames({ host, hosts = [], linkHost: linkHostName, allowedHosts = [] }) {
   return new Set(
-    [LOOPBACK_HOST, IPV6_LOOPBACK_HOST, "localhost", host, linkHostName, ...allowedHosts]
+    [LOOPBACK_HOST, IPV6_LOOPBACK_HOST, "localhost", host, ...hosts, linkHostName, ...allowedHosts]
       .map((value) =>
         String(value || "")
           .trim()
           .toLowerCase(),
       )
-      .filter((value) => value && value !== "*" && !WILDCARD_BIND_HOSTS.has(value)),
+      .filter((value) => value && value !== "*" && !isWildcardHost(value)),
   );
 }
 

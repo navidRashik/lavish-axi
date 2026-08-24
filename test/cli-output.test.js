@@ -239,6 +239,16 @@ test("open output flags an artifact that never paints its own page surface", () 
   assert.match(clean.next_step, /^Do not respond to the user just yet\./);
 });
 
+test("open output surfaces unavailable Tailscale phone access", () => {
+  const output = createOpenOutput({
+    file: "/tmp/artifact.html",
+    url: "http://127.0.0.1:4387/session/abc123",
+    status: "opened",
+    networkWarning: "Tailscale binding failed; there is no phone access.",
+  });
+  assert.equal(output.network_warning, "Tailscale binding failed; there is no phone access.");
+});
+
 test("export and share outputs flag an unpainted page surface before it reaches a host", () => {
   const exported = createExportOutput({
     source: "/tmp/report.html",
@@ -1726,7 +1736,7 @@ test("poll feedback and the next step are emitted before the bulky DOM snapshot"
     dom_snapshot: "large snapshot",
   };
   const server = createServer((req, res) => {
-    if (req.url === "/health") {
+    if (new URL(req.url || "/", "http://localhost").pathname === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, app: "lavish-axi", version: VERSION }));
       return;
@@ -2692,6 +2702,12 @@ test("shouldRestartServer reuses a server running the same version", () => {
   assert.equal(shouldRestartServer("0.1.4", { ok: true, version: "0.1.4" }), false);
 });
 
+test("shouldRestartServer restarts a same-version server after a Tailscale transition", () => {
+  const health = { ok: true, app: "lavish-axi", version: "0.1.4", network_stale: true };
+  assert.equal(shouldRestartServer("0.1.4", health), true);
+  assert.equal(serverReplacementReason("0.1.4", health), "");
+});
+
 test("shouldRestartServer restarts same-version Lavish servers when forced", () => {
   assert.equal(shouldRestartServer("0.1.4", { ok: true, app: "lavish-axi", version: "0.1.4" }, true), true);
   assert.equal(shouldRestartServer("0.1.4", { ok: true, app: "other", version: "0.1.4" }, true), false);
@@ -2962,7 +2978,7 @@ async function startFakeHtmlApp(requests) {
 async function startShutdownRecorder(version = "0.0.0-previous") {
   const bodies = [];
   const server = createServer((req, res) => {
-    if (req.url === "/health") {
+    if (new URL(req.url || "/", "http://localhost").pathname === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, app: "lavish-axi", version }));
       return;
