@@ -133,8 +133,18 @@ const shareStatus = /** @type {HTMLDivElement} */ (document.getElementById("shar
 const shareResult = /** @type {HTMLDivElement} */ (document.getElementById("shareResult"));
 const shareUrlInput = /** @type {HTMLInputElement} */ (document.getElementById("shareUrl"));
 const shareUpdateKeyInput = /** @type {HTMLInputElement} */ (document.getElementById("shareUpdateKey"));
+const shareGenerateInput = /** @type {HTMLInputElement} */ (document.getElementById("shareGenerate"));
+const sharePasswordResult = /** @type {HTMLLabelElement} */ (document.getElementById("sharePasswordResult"));
+const shareUrlResult = /** @type {HTMLLabelElement} */ (document.getElementById("shareUrlResult"));
+const shareUpdateKeyResult = /** @type {HTMLLabelElement} */ (document.getElementById("shareUpdateKeyResult"));
+const shareUpdateKeyNote = /** @type {HTMLParagraphElement} */ (document.getElementById("shareUpdateKeyNote"));
+const shareSiteIdResult = /** @type {HTMLLabelElement} */ (document.getElementById("shareSiteIdResult"));
+const shareSiteIdInput = /** @type {HTMLInputElement} */ (document.getElementById("shareSiteId"));
+const sharePasswordOutput = /** @type {HTMLInputElement} */ (document.getElementById("sharePasswordOut"));
+const copySharePasswordButton = /** @type {HTMLButtonElement} */ (document.getElementById("copySharePassword"));
 const copyShareUrlButton = /** @type {HTMLButtonElement} */ (document.getElementById("copyShareUrl"));
 const copyUpdateKeyButton = /** @type {HTMLButtonElement} */ (document.getElementById("copyUpdateKey"));
+const copyShareSiteIdButton = /** @type {HTMLButtonElement} */ (document.getElementById("copyShareSiteId"));
 const endButton = /** @type {HTMLButtonElement} */ (document.getElementById("end"));
 const copyPathButton = /** @type {HTMLButtonElement} */ (document.getElementById("copyPath"));
 const copyHint = /** @type {HTMLSpanElement} */ (document.getElementById("copyHint"));
@@ -1898,14 +1908,66 @@ async function exportArtifact() {
   }
 }
 
+// ONE owner for the whole result panel. Every path that renders an outcome - dialog open, a
+// successful publish, a retry after any failure, an indeterminate report, an incomplete 200 -
+// routes through here, because a row shown or hidden by one path and reset by another is how a
+// retry after a failed publish came to display "Published" with the once-only update_key still
+// hidden. Each row is derived from the value it would show, so nothing can be half-rendered.
+function renderShareResult({ url = "", siteId = "", password = "", updateKey = "" } = {}) {
+  shareUrlInput.value = url;
+  shareUrlResult.hidden = !url;
+  // A self-hosted backend may not return one, and an empty box with a copy button is worse than
+  // no row. Never derive it from the URL: that shape belongs to the backend, not Lavish.
+  shareSiteIdInput.value = siteId;
+  shareSiteIdResult.hidden = !siteId;
+  sharePasswordOutput.value = password;
+  sharePasswordResult.hidden = !password;
+  shareUpdateKeyInput.value = updateKey;
+  shareUpdateKeyResult.hidden = !updateKey;
+  // The note's own copy tells the user to republish with `--site <site id> --update-key <key>`,
+  // so it may only appear when BOTH halves of that credential are on screen. An update key with
+  // no usable site id cannot update anything, and the status line says so instead.
+  shareUpdateKeyNote.hidden = !(updateKey && siteId);
+  shareResult.hidden = !(url || siteId || password || updateKey);
+  // Returned so every sentence in the status line is derived from what was actually rendered.
+  // Copy stamped from the request instead has promised rows the panel does not contain.
+  return { url, siteId, password, updateKey };
+}
+
+// Wording shared with the CLI's next_step for the same condition, so the two surfaces cannot
+// drift into describing the same dead end differently.
+const NO_SITE_ID_WARNING =
+  " The host did not return a site id Lavish can use, and --site is half the republish credential, so this page can NEVER be republished or unpublished even though its update key is in hand.";
+
+// What the page is gated behind, said only in terms of what the panel can show. A password the
+// user typed is never echoed by the server, so pointing at a row that was not rendered is the
+// same confidently-wrong sentence this feature exists to avoid.
+function publishedVisibilityText(isPublic, rendered, publicText) {
+  if (isPublic) return publicText;
+  return rendered.password ? "behind the password below" : "behind the password you supplied";
+}
+
 function openShareDialog() {
   closeMenus();
   shareDialog.hidden = false;
   shareStatus.textContent = "";
   shareStatus.classList.remove("error");
-  shareResult.hidden = true;
+  renderShareResult();
+  shareGenerateInput.checked = false;
   sharePasswordInput.value = "";
+  syncSharePasswordInput();
   sharePasswordInput.focus();
+}
+
+// A generated password and a typed one are the same field to the server, so the checkbox owns
+// the input rather than the two racing to decide what gets published.
+function syncSharePasswordInput() {
+  const generating = shareGenerateInput.checked;
+  sharePasswordInput.disabled = generating;
+  sharePasswordInput.placeholder = generating
+    ? "Lavish will generate one when you publish"
+    : "Leave blank for a public page";
+  if (generating) sharePasswordInput.value = "";
 }
 
 function closeShareDialog() {
@@ -1920,24 +1982,83 @@ async function copyToButton(value, button, label) {
   }, 1200);
 }
 
+function reportIndeterminatePublish(data) {
+  const rendered = renderShareResult({ password: data.password || "" });
+  shareStatus.classList.add("error");
+  const reason = data.error ? data.error + " " : "";
+  const visibility = publishedVisibilityText(data.public, rendered, "PUBLIC - anyone with the link could read it");
+  shareStatus.textContent =
+    reason +
+    "ht-ml.app may or may not have published this page, so treat the outcome as unknown. If it did publish, the page is live " +
+    visibility +
+    ", and its URL and update key were lost with the failed response, so it can never be republished or unpublished. Publishing again creates a SECOND page rather than replacing it." +
+    (rendered.password ? " Copy the password now - it is shown once here and Lavish does not store it." : "");
+}
+
+// An incomplete 200 is NOT an unknown outcome: the host answered, so the page landed. Whatever
+// fields did arrive are rendered, because a url with no update_key names a live, public-by-default
+// page whose only write credential is gone - and saying "may or may not" there would throw away
+// the address Lavish is holding.
+function reportIncompletePublish(data) {
+  const rendered = renderShareResult({
+    url: data.url || "",
+    siteId: data.site_id || "",
+    password: data.password || "",
+    updateKey: data.update_key || "",
+  });
+  shareStatus.classList.add("error");
+  const visibility = publishedVisibilityText(data.public, rendered, "PUBLIC - anyone with the link can read it");
+  const updateKeyNote = !rendered.updateKey
+    ? "No update key came back, and ht-ml.app issues one only once and has no delete, so this page can never be republished or unpublished. "
+    : rendered.siteId
+      ? "Copy the update key below - it is issued once. "
+      : "Copy the update key below - it is issued once, though" + NO_SITE_ID_WARNING.slice(1) + " ";
+  shareStatus.textContent =
+    "ht-ml.app accepted this publish, so the page IS live and " +
+    visibility +
+    ", but its response was malformed and Lavish could not read the whole result back. " +
+    (rendered.url ? "Its address is below. " : "The response carried no URL, so Lavish cannot show the address. ") +
+    updateKeyNote +
+    "Publishing again creates a SECOND page rather than replacing it." +
+    (rendered.password ? " Copy the password now - it is shown once here and Lavish does not store it." : "");
+}
+
 async function publishShare(event) {
   event.preventDefault();
   sharePublishButton.disabled = true;
   shareStatus.classList.remove("error");
   shareStatus.textContent = "Publishing to ht-ml.app...";
-  shareResult.hidden = true;
-  const password = sharePasswordInput.value.trim();
-  const passwordProtected = Boolean(password);
+  renderShareResult();
+  const generating = shareGenerateInput.checked;
+  const password = generating ? "" : sharePasswordInput.value.trim();
+  const passwordProtected = generating || Boolean(password);
   try {
     const response = await fetch("/api/" + key + "/share", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(password ? { password } : {}),
+      body: JSON.stringify(generating ? { generate_password: true } : password ? { password } : {}),
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "publish failed");
-    shareUrlInput.value = data.url || "";
-    shareUpdateKeyInput.value = data.update_key || "";
+    if (!response.ok) {
+      // Only a host rejection proves nothing was published. On anything else the page may already
+      // be live, and a password minted for this request is the one thing that could still open it,
+      // so it is shown here rather than dying with the failed response.
+      if (data.outcome === "published-incomplete") {
+        reportIncompletePublish(data);
+        return;
+      }
+      if (data.outcome === "indeterminate") {
+        reportIndeterminatePublish(data);
+        return;
+      }
+      throw new Error(data.error || "publish failed");
+    }
+    const rendered = renderShareResult({
+      url: data.url || "",
+      siteId: data.site_id || "",
+      password: data.password || "",
+      updateKey: data.update_key || "",
+    });
     const unresolvedAssets = Array.isArray(data.unresolved_local_assets) ? data.unresolved_local_assets : [];
     const notices = Array.isArray(data.notices) ? data.notices : [];
     const warningCount = unresolvedAssets.length;
@@ -1951,10 +2072,16 @@ async function publishShare(event) {
           : passwordProtected
             ? "Published. This page is PASSWORD-PROTECTED; viewers also need the password."
             : "Published. Anyone with the link can view this page.";
-    shareResult.hidden = false;
+    if (rendered.updateKey && !rendered.siteId) shareStatus.textContent += NO_SITE_ID_WARNING;
+    if (rendered.password) {
+      shareStatus.textContent += " Copy the password now - it is shown once here and Lavish does not store it.";
+    }
     shareUrlInput.focus();
     shareUrlInput.select();
   } catch (error) {
+    // Deliberately does NOT clear the panel. It is already cleared before the fetch, so the only
+    // thing this could reach is a result the success path already rendered - and wiping that
+    // destroys the once-issued update_key of a page that definitely published.
     shareStatus.classList.add("error");
     shareStatus.textContent = error instanceof Error ? error.message : String(error);
   } finally {
@@ -3087,6 +3214,10 @@ shareDialog.addEventListener("click", (event) => {
 });
 copyShareUrlButton.onclick = () => copyToButton(shareUrlInput.value, copyShareUrlButton, "Copy URL");
 copyUpdateKeyButton.onclick = () => copyToButton(shareUpdateKeyInput.value, copyUpdateKeyButton, "Copy key");
+copySharePasswordButton.onclick = () =>
+  copyToButton(sharePasswordOutput.value, copySharePasswordButton, "Copy password");
+copyShareSiteIdButton.onclick = () => copyToButton(shareSiteIdInput.value, copyShareSiteIdButton, "Copy site ID");
+shareGenerateInput.onchange = syncSharePasswordInput;
 endButton.onclick = () => {
   closeMenus();
   endSession();

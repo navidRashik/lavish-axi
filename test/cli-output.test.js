@@ -26,11 +26,14 @@ import {
   createPlaybookOutput,
   createServerSpawnOptions,
   createShareOutput,
+  createShareUnpublishOutput,
+  createShareUpdateOutput,
   createUserEndedOpenOutput,
   detectInvokingAgent,
   fetchJson,
   getCommandHelp,
   normalizeArgv,
+  resolveShareRequest,
   pollInterruptedText,
   pollWaitBannerText,
   pollWaitTickText,
@@ -38,6 +41,7 @@ import {
   resolveHookHomeDir,
   resolveServerEntry,
   serverReplacementReason,
+  shareCommand,
   shutdownServerOnPort,
   shouldForceRestartForLocalBuild,
   shouldKillProcessOnPort,
@@ -1024,6 +1028,502 @@ test("password-protected share output with unresolved assets still mentions the 
   assert.doesNotMatch(output.next_step, /anyone with the link can view/);
 });
 
+test("share dispatches create, republish, and unpublish to the right host request", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-dispatch-`);
+  const artifact = `${dir}/report.html`;
+  const marker = "SECRET-ARTIFACT-BODY";
+  await writeFile(artifact, `<!doctype html><html><body><h1>${marker}</h1></body></html>`, "utf8");
+
+  const requests = [];
+  const htmlApp = await startFakeHtmlApp(requests);
+  const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${htmlApp.port}`;
+  try {
+    await shareCommand([artifact]);
+    await shareCommand([artifact, "--site", "abc123", "--update-key", "uk_secret"]);
+    await shareCommand([artifact, "--site", "abc123", "--update-key", "uk_secret", "--private"]);
+    await shareCommand(["--unpublish", "--site", "abc123", "--update-key", "uk_secret"]);
+
+    const [create, republish, locked, unpublish] = requests;
+
+    assert.equal(create.method, "POST");
+    assert.equal(create.url, "/v1/sites");
+    assert.match(create.body.html_content, new RegExp(marker));
+    assert.equal("password" in create.body, false, "a plain publish stays public");
+
+    assert.equal(republish.method, "PUT");
+    assert.equal(republish.url, "/v1/sites/abc123");
+    assert.equal(republish.headers.authorization, "Bearer uk_secret");
+    assert.match(republish.body.html_content, new RegExp(marker), "a republish sends the artifact");
+    assert.equal("password" in republish.body, false, "a plain republish must not touch the password");
+
+    assert.equal(locked.method, "PUT");
+    assert.match(String(locked.body.password), /^[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/, "--private rotates");
+
+    assert.equal(unpublish.method, "PUT");
+    assert.equal(unpublish.url, "/v1/sites/abc123");
+    assert.equal(unpublish.headers.authorization, "Bearer uk_secret");
+    // The regression this guards: sending the artifact instead of the placeholder would republish
+    // the very content the user asked to take down.
+    assert.doesNotMatch(unpublish.body.html_content, new RegExp(marker));
+    assert.match(unpublish.body.html_content, /has been unpublished/);
+    assert.ok(unpublish.body.password, "the placeholder must be locked behind a password");
+  } finally {
+    await htmlApp.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function startFailingHtmlApp(status, detail) {
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify({ detail }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  return {
+    port: typeof address === "object" && address ? address.port : 0,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
+const PASSWORD_SHAPE = /[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}/;
+
+// A recovery hint is only recovery if the CLI accepts it. Pull the command Lavish printed out of
+// the text it printed and run it back through the real argument parser, so a hint that drifts into
+// a usage error - `--site`/`--update-key` with no HTML file was one - fails here instead of on the
+// user's next paste.
+function parseSuggestedShareCommand(text) {
+  const match = /`lavish-axi share ([^`]+)`/.exec(String(text));
+  assert.ok(match, `expected a suggested share command in: ${text}`);
+  const argv = match[1].trim().split(/\s+/);
+  const request = resolveShareRequest(argv);
+  // `<html-file>` and `<key>` fail loudly when pasted literally - one is not a file, the other
+  // earns a 401 - but ANY non-empty string is a valid password, so a placeholder that reaches the
+  // parser as a password value would be accepted and would rotate a live page to a secret nobody
+  // was told, which ht-ml.app cannot clear. A suggested command must never carry one.
+  assert.ok(
+    request.generatedPassword || request.password === undefined,
+    `a suggested command must not dictate a password value, got ${request.password} from: ${argv.join(" ")}`,
+  );
+  return request;
+}
+
+test("an indeterminate republish failure reads as unknown, with the generated password only when there is one", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-rotate-fail-`);
+  const artifact = `${dir}/report.html`;
+  await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
+
+  // A 5xx can come back after the origin already committed the PUT, so the rotation may have
+  // landed and a generated password that dies with the error leaves the page gated by a secret
+  // nobody holds.
+  const failing = await startFailingHtmlApp(503, "upstream exploded");
+  const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${failing.port}`;
+  try {
+    await assert.rejects(
+      () => shareCommand([artifact, "--site", "abc123", "--update-key", "uk_secret", "--private"]),
+      (error) => {
+        assert.ok(error instanceof AxiError);
+        assert.match(error.message, /upstream exploded/, "the original failure must survive");
+        const hints = (error.suggestions || []).join(" ");
+        assert.match(hints, PASSWORD_SHAPE, "the generated password must be recoverable");
+        assert.match(hints, /may or may not have applied/i, "the outcome must read as unknown");
+        assert.match(hints, /--private/);
+        const suggested = parseSuggestedShareCommand(hints);
+        assert.equal(suggested.mode, "update", "the suggested recovery command must be a republish");
+        assert.equal(suggested.generatedPassword, true, "it must be the shape that mints a visible password");
+        return true;
+      },
+    );
+
+    // A plain republish mints no password, but the outcome is just as unknown: the page may
+    // already show the new HTML, so reporting a flat failure tells the user the old version is
+    // still up when it may not be. The password hint is the only part that is conditional.
+    await assert.rejects(
+      () => shareCommand([artifact, "--site", "abc123", "--update-key", "uk_secret"]),
+      (error) => {
+        assert.ok(error instanceof AxiError);
+        assert.match(error.message, /upstream exploded/, "the original failure must survive");
+        const hints = (error.suggestions || []).join(" ");
+        assert.match(hints, /may or may not have applied/i, "the outcome must read as unknown");
+        assert.match(hints, /may already show the new content/i);
+        assert.match(hints, /safe and converges/i, "re-running must be described as safe");
+        assert.doesNotMatch(`${error.message} ${hints}`, PASSWORD_SHAPE, "there is no password to hand back");
+        const suggested = parseSuggestedShareCommand(hints);
+        assert.equal(suggested.mode, "update");
+        assert.equal(suggested.generatedPassword, false, "a plain republish must not be told to rotate");
+        assert.equal(suggested.password, undefined);
+        return true;
+      },
+    );
+
+    // An explicit --password republish is the same: no generated secret to recover, but the retry
+    // has to carry the flag or it would converge on a different page state than the one asked for.
+    await assert.rejects(
+      () => shareCommand([artifact, "--site", "abc123", "--update-key", "uk_secret", "--password", "hunter2"]),
+      (error) => {
+        assert.ok(error instanceof AxiError);
+        const hints = (error.suggestions || []).join(" ");
+        assert.match(hints, /may or may not have applied/i);
+        assert.doesNotMatch(hints, /hunter2/, "a password the user chose is never echoed back");
+        // The retry still has to set the same password, but the command may not spell a value:
+        // pasted literally, a `<pw>` placeholder is accepted and locks the page to that string.
+        assert.match(hints, /same --password value you supplied/i);
+        const suggested = parseSuggestedShareCommand(hints);
+        assert.equal(suggested.mode, "update");
+        assert.equal(suggested.generatedPassword, false);
+        assert.equal(suggested.password, undefined, "no password value may appear in the command");
+        return true;
+      },
+    );
+  } finally {
+    await failing.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a republish the host rejected never offers the generated password as if it applied", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-rejected-`);
+  const artifact = `${dir}/report.html`;
+  await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
+
+  // A mistyped update_key is the likeliest failure here. The host wrote nothing, so the generated
+  // password gates nothing, and relaying it would send the user chasing a page that never changed.
+  const rejecting = await startFailingHtmlApp(401, "");
+  const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${rejecting.port}`;
+  try {
+    await assert.rejects(
+      () => shareCommand([artifact, "--site", "abc123", "--update-key", "WRONG", "--private"]),
+      (error) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /unauthorized/i, "the host's reason must survive");
+        const suggestions = error instanceof AxiError ? error.suggestions || [] : [];
+        const reported = `${error.message} ${suggestions.join(" ")}`;
+        assert.doesNotMatch(reported, PASSWORD_SHAPE, "a rejected republish must not surface the password");
+        assert.doesNotMatch(reported, /may or may not have applied/i);
+        return true;
+      },
+    );
+  } finally {
+    await rejecting.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an indeterminate --unpublish failure says the takedown may already have landed", async () => {
+  // Same window as a republish: a 5xx can follow a PUT the origin already committed, so reporting
+  // a flat failure tells the user the old content is still readable when it may already be gone.
+  const failing = await startFailingHtmlApp(503, "upstream exploded");
+  const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${failing.port}`;
+  try {
+    await assert.rejects(
+      () => shareCommand(["--unpublish", "--site", "abc123", "--update-key", "uk_secret"]),
+      (error) => {
+        assert.ok(error instanceof AxiError);
+        assert.match(error.message, /upstream exploded/, "the original failure must survive");
+        const hints = (error.suggestions || []).join(" ");
+        assert.match(hints, /may or may not have applied/i, "the outcome must read as unknown");
+        assert.match(hints, /safe and converges/i, "re-running must be described as safe");
+        // The lock password is discarded by design, so there is nothing to hand back and echoing
+        // one would suggest the user could still open the page.
+        assert.doesNotMatch(hints, PASSWORD_SHAPE);
+        assert.equal(parseSuggestedShareCommand(hints).mode, "unpublish");
+        return true;
+      },
+    );
+  } finally {
+    await failing.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+  }
+});
+
+test("an --unpublish the host rejected reports a plain failure, not an unknown outcome", async () => {
+  const rejecting = await startFailingHtmlApp(401, "");
+  const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${rejecting.port}`;
+  try {
+    await assert.rejects(
+      () => shareCommand(["--unpublish", "--site", "abc123", "--update-key", "WRONG"]),
+      (error) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /unauthorized/i, "the host's reason must survive");
+        const suggestions = error instanceof AxiError ? error.suggestions || [] : [];
+        assert.doesNotMatch(`${error.message} ${suggestions.join(" ")}`, /may or may not have applied/i);
+        return true;
+      },
+    );
+  } finally {
+    await rejecting.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+  }
+});
+
+test("a literal password placeholder would be accepted, which is why no suggestion prints one", () => {
+  // The hazard `parseSuggestedShareCommand` guards against, proven against the real parser: unlike
+  // `<html-file>` and `<key>`, a `<pw>` left literal does not fail - it is a valid password, so it
+  // would reach the host and gate a live page behind that string with no way to clear it.
+  const parsed = resolveShareRequest(["report.html", "--site", "abc123", "--update-key", "k", "--password", "<pw>"]);
+  assert.equal(parsed.password, "<pw>", "a bracketed placeholder is a perfectly valid password value");
+  assert.equal(parsed.generatedPassword, false);
+});
+
+test("an indeterminate create failure says the page may be live and unreclaimable", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-create-fail-`);
+  const artifact = `${dir}/report.html`;
+  await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
+
+  // The worst window in the feature: a 5xx after the origin committed the POST leaves the artifact
+  // publicly hosted while the only copy of its update_key dies with the response, so the page can
+  // never be republished or unpublished. Reporting a flat failure hides a permanent public page.
+  const failing = await startFailingHtmlApp(503, "upstream exploded");
+  const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${failing.port}`;
+  try {
+    await assert.rejects(
+      () => shareCommand([artifact]),
+      (error) => {
+        assert.ok(error instanceof AxiError);
+        assert.equal(error.code, "UNKNOWN");
+        assert.match(error.message, /upstream exploded/, "the original failure must survive");
+        const hints = (error.suggestions || []).join(" ");
+        assert.match(hints, /may or may not have published/i, "the outcome must read as unknown");
+        assert.match(hints, /PUBLICLY/, "a default share that landed is readable by anyone");
+        assert.match(hints, /update_key/, "the lost credential must be named");
+        assert.match(hints, /no recovery/i, "and the absence of a way back stated plainly");
+        assert.match(hints, /SECOND page/, "re-running must not read as a retry that replaces it");
+        return true;
+      },
+    );
+
+    // --private mints a password that also dies with the response, so it is worth handing back.
+    await assert.rejects(
+      () => shareCommand([artifact, "--private"]),
+      (error) => {
+        assert.ok(error instanceof AxiError);
+        const hints = (error.suggestions || []).join(" ");
+        assert.match(hints, PASSWORD_SHAPE, "the generated password must be recoverable");
+        assert.doesNotMatch(hints, /PUBLICLY/, "a --private page that landed is not public");
+        return true;
+      },
+    );
+  } finally {
+    await failing.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function startIncompleteHtmlApp(body) {
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  return {
+    port: typeof address === "object" && address ? address.port : 0,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
+test("a 200 with a malformed body is reported as published, not as an unknown outcome", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-incomplete-`);
+  const artifact = `${dir}/report.html`;
+  await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
+
+  // The host answered 200, so the page definitely landed. Hedging that into "may or may not have
+  // published" throws away the one thing worth saying: here is the live URL, and its write
+  // credential is gone forever.
+  const noKey = await startIncompleteHtmlApp({ site_id: "abc123", url: "https://abc123.ht-ml.app/" });
+  const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${noKey.port}`;
+  try {
+    await assert.rejects(
+      () => shareCommand([artifact]),
+      (error) => {
+        assert.ok(error instanceof AxiError);
+        const hints = (error.suggestions || []).join(" ");
+        assert.doesNotMatch(hints, /may or may not have published/i, "a 200 is not an unknown outcome");
+        assert.match(hints, /the page IS live/i);
+        assert.match(hints, /https:\/\/abc123\.ht-ml\.app\//, "the URL Lavish knows must be handed over");
+        assert.match(hints, /no recovery/i, "the lost update_key has none");
+        assert.match(hints, /SECOND page/);
+        return true;
+      },
+    );
+  } finally {
+    await noKey.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+  }
+
+  // The mirror case: no url came back, but the update_key did, so the page IS still changeable and
+  // saying "no recovery" would be the opposite error.
+  const noUrl = await startIncompleteHtmlApp({ site_id: "abc123", update_key: "uk_secret" });
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${noUrl.port}`;
+  try {
+    await assert.rejects(
+      () => shareCommand([artifact, "--private"]),
+      (error) => {
+        assert.ok(error instanceof AxiError);
+        const hints = (error.suggestions || []).join(" ");
+        assert.match(hints, /uk_secret/, "a surviving update_key must reach the user");
+        assert.match(hints, /carried no url/i);
+        assert.doesNotMatch(hints, /no recovery/i, "the page is still changeable with that key");
+        assert.match(hints, PASSWORD_SHAPE, "the generated password still gates it");
+        return true;
+      },
+    );
+  } finally {
+    await noUrl.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a create whose host returns no usable site_id says the page can never be republished", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-nosite-`);
+  const artifact = `${dir}/report.html`;
+  await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
+
+  // A site_id that fails validation must never be propagated - that is the injection boundary -
+  // but an empty field beside "keep it to republish later" is worse than useless: --site is half
+  // the republish credential, so the user needs to learn now, not when --site rejects the value.
+  const hostile = await startIncompleteHtmlApp({
+    site_id: "abc123 --password evil",
+    url: "https://abc123.ht-ml.app/",
+    update_key: "uk_secret",
+    status: "active",
+  });
+  const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${hostile.port}`;
+  try {
+    const output = await shareCommand([artifact]);
+    const share = /** @type {any} */ (output.share);
+
+    assert.equal("site_id" in share, false, "an unusable id is omitted, never emitted empty");
+    assert.equal(share.update_key, "uk_secret", "the page still published");
+    assert.match(output.next_step, /never be republished or unpublished/i);
+    assert.doesNotMatch(output.next_step, /--password/, "and no flag may ride in through the echo");
+  } finally {
+    await hostile.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a site_id the host echoes cannot inject flags into the suggested republish command", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-echo-`);
+  try {
+    // next_step is text an agent may run. A backend reached through LAVISH_AXI_HTML_APP_API_URL
+    // answering with `abc123 --password evil` would otherwise append a flag that gates the page
+    // behind a value nobody chose, and ht-ml.app cannot clear a password.
+    const hostile = await startIncompleteHtmlApp({
+      site_id: "abc123 --password evil",
+      url: "https://abc123.ht-ml.app/",
+      update_key: "uk_secret",
+      status: "active",
+    });
+    const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+    process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${hostile.port}`;
+    try {
+      const output = await shareCommand(["--unpublish", "--site", "abc123", "--update-key", "uk_secret"]);
+
+      assert.doesNotMatch(output.next_step, /--password/, "no flag may be smuggled in through the echo");
+      const suggested = parseSuggestedShareCommand(output.next_step);
+      assert.equal(suggested.siteId, "abc123", "the command names the id the request was addressed to");
+      assert.equal(suggested.generatedPassword, true, "only --private, whose password Lavish mints and reports");
+    } finally {
+      await hostile.close();
+      if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+      else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a create the host rejected reports a plain failure, not an unknown outcome", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-create-rejected-`);
+  const artifact = `${dir}/report.html`;
+  await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
+
+  // A 400 is an answer: nothing was published, so claiming a page might be live would send the
+  // user hunting for a URL that does not exist.
+  const rejecting = await startFailingHtmlApp(400, "bad request");
+  const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${rejecting.port}`;
+  try {
+    await assert.rejects(
+      () => shareCommand([artifact, "--private"]),
+      (error) => {
+        assert.ok(error instanceof Error);
+        const suggestions = error instanceof AxiError ? error.suggestions || [] : [];
+        const reported = `${error.message} ${suggestions.join(" ")}`;
+        assert.doesNotMatch(reported, /may or may not have published/i);
+        assert.doesNotMatch(reported, PASSWORD_SHAPE, "a rejected create gates nothing");
+        return true;
+      },
+    );
+  } finally {
+    await rejecting.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("share reports a bad --site as a usage error before reading the artifact", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-siteid-`);
+  const artifact = `${dir}/report.html`;
+  await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
+
+  const requests = [];
+  const htmlApp = await startFakeHtmlApp(requests);
+  const previousApiUrl = process.env.LAVISH_AXI_HTML_APP_API_URL;
+  process.env.LAVISH_AXI_HTML_APP_API_URL = `http://127.0.0.1:${htmlApp.port}`;
+  try {
+    // Pasting the share URL is the likeliest mistake here, since the URL is what the user holds.
+    for (const site of ["https://abc123.ht-ml.app/", "not a site id", ".."]) {
+      await assert.rejects(
+        () => shareCommand([artifact, "--site", site, "--update-key", "k"]),
+        (error) => {
+          assert.ok(error instanceof AxiError, `${site} must raise an AxiError`);
+          assert.equal(error.code, "VALIDATION_ERROR", `${site} must read as bad usage`);
+          assert.match(error.message, /site_id/);
+          return true;
+        },
+      );
+    }
+    assert.equal(requests.length, 0, "a rejected site id must never reach the host");
+  } finally {
+    await htmlApp.close();
+    if (previousApiUrl === undefined) delete process.env.LAVISH_AXI_HTML_APP_API_URL;
+    else process.env.LAVISH_AXI_HTML_APP_API_URL = previousApiUrl;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("share command publishes the artifact to ht-ml.app and returns the public url", async () => {
   const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-test-`);
   const artifact = `${dir}/report.html`;
@@ -1076,7 +1576,7 @@ test("share command publishes the artifact to ht-ml.app and returns the public u
   }
 });
 
-test("share command treats a whitespace-only password as public", async () => {
+test("share command refuses a whitespace-only password instead of quietly publishing a public page", async () => {
   const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-test-`);
   const artifact = `${dir}/report.html`;
   await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
@@ -1107,12 +1607,13 @@ test("share command treats a whitespace-only password as public", async () => {
     });
     const code = await new Promise((resolve) => child.on("close", resolve));
 
-    assert.equal(code, 0, stderr);
-    assert.match(stdout, /PUBLIC/);
-    assert.match(stdout, /anyone with the link can view/);
-    assert.doesNotMatch(stdout, /PASSWORD-PROTECTED/);
-    assert.equal(requests.length, 1);
-    assert.equal("password" in requests[0].body, false);
+    // Asking for a password and getting an unprotected page is the surprise worth refusing: the
+    // user meant to gate the artifact, and nothing downstream can tell that intent was dropped.
+    assert.notEqual(code, 0);
+    const output = `${stdout}${stderr}`;
+    assert.match(output, /--password was given an empty value/);
+    assert.match(output, /--private/);
+    assert.equal(requests.length, 0, "nothing may be published when the arguments are refused");
   } finally {
     await htmlApp.close();
     await rm(dir, { force: true, recursive: true });
@@ -1149,15 +1650,52 @@ test("share help distinguishes public default from password-protected shares", (
   const homeShareHelp = home.help.find((item) => item.includes("lavish-axi share <html-file>"));
 
   assert.match(help, /PUBLIC by default/);
-  assert.match(help, /Pass --password to publish a PRIVATE password-protected page/);
-  assert.match(help, /viewers must supply the password to view/);
+  assert.match(help, /Pass --private to publish a PRIVATE page behind a generated password/);
+  assert.match(help, /--password <pw> instead when the user chose the password/);
+  assert.match(help, /shared secret/);
   assert.match(help, /not blocked by CSP on ht-ml\.app/);
   assert.match(help, /load over the viewer's network/);
   assert.doesNotMatch(help, /EVERYTHING PUBLISHED IS PUBLIC/);
   assert.doesNotMatch(help, /load fine/);
   assert.match(homeShareHelp, /PUBLIC by default/);
-  assert.match(homeShareHelp, /Pass --password to publish a PRIVATE password-protected page/);
+  assert.match(homeShareHelp, /Pass --private to publish a PRIVATE page behind a password Lavish generates/);
+  assert.match(homeShareHelp, /shared secret/);
   assert.doesNotMatch(homeShareHelp, /Everything published is public/);
+});
+
+test("share help announces that an empty password value is refused rather than published public", () => {
+  // Deliberate behavior change: `--password "$PW"` with an unset $PW used to publish a PUBLIC page.
+  // The help is where an agent or user learns that before hitting the error.
+  const help = getCommandHelp("share");
+  assert.match(help, /empty or whitespace-only value is REFUSED/);
+  assert.match(help, /PUBLIC page/);
+
+  assert.throws(
+    () => resolveShareRequest(["report.html", "--password", ""]),
+    (error) => {
+      assert.ok(error instanceof AxiError);
+      assert.equal(error.code, "VALIDATION_ERROR");
+      assert.match(error.message, /PUBLIC page/, "the error must name what it prevented");
+      assert.match((error.suggestions || []).join(" "), /--private/, "and how to get a generated password");
+      return true;
+    },
+  );
+});
+
+test("home share guidance defers republish and unpublish mechanics to share --help", () => {
+  // Home output is paid on every no-argument invocation, so it may name the update_key and point
+  // at the command that owns it, but must not restate that command's flag mechanics.
+  const help = getCommandHelp("share");
+  const home = createHomeOutput({ bin: "lavish-axi", sessions: [] });
+  const homeShareHelp = home.help.find((item) => item.includes("lavish-axi share <html-file>"));
+
+  assert.match(homeShareHelp, /run `lavish-axi share --help` before using it/);
+  assert.doesNotMatch(homeShareHelp, /--site/);
+  assert.doesNotMatch(homeShareHelp, /--update-key/);
+  assert.doesNotMatch(homeShareHelp, /--unpublish/);
+  assert.match(help, /--site <site_id> with --update-key <key> republishes an existing page in place/);
+  assert.match(help, /--unpublish takes the same credentials and no file/);
+  assert.match(help, /NO delete endpoint/);
 });
 
 test("feedback next step keeps the next poll completion observable", () => {
@@ -2399,7 +2937,7 @@ async function startFakeHtmlApp(requests) {
       raw += chunk;
     });
     req.on("end", () => {
-      requests.push({ method: req.method, url: req.url, body: raw ? JSON.parse(raw) : null });
+      requests.push({ method: req.method, url: req.url, headers: req.headers, body: raw ? JSON.parse(raw) : null });
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
@@ -2523,4 +3061,254 @@ test("opening an artifact names that session as the one to reload across a versi
     recorder.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("resolveShareRequest publishes a public page by default", () => {
+  const request = resolveShareRequest(["report.html"]);
+
+  assert.equal(request.mode, "create");
+  assert.equal(request.file, "report.html");
+  assert.equal(request.password, undefined);
+  assert.equal(request.generatedPassword, false);
+});
+
+test("resolveShareRequest --private mints a password instead of asking the agent for one", () => {
+  const request = resolveShareRequest(["report.html", "--private"]);
+
+  assert.equal(request.mode, "create");
+  assert.equal(request.generatedPassword, true);
+  assert.match(String(request.password), /^[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/);
+});
+
+test("resolveShareRequest keeps an explicit password verbatim and refuses to also generate one", () => {
+  assert.equal(resolveShareRequest(["report.html", "--password", "hunter2"]).password, "hunter2");
+  assert.throws(() => resolveShareRequest(["report.html", "--password", "hunter2", "--private"]), /--private/);
+});
+
+test("resolveShareRequest reads the file path even when a password flag precedes it", () => {
+  assert.equal(resolveShareRequest(["--password", "hunter2", "report.html"]).file, "report.html");
+  assert.equal(resolveShareRequest(["--private", "report.html"]).file, "report.html");
+});
+
+test("resolveShareRequest requires both halves of the republish credential", () => {
+  const request = resolveShareRequest(["report.html", "--site", "abc123", "--update-key", "uk_secret"]);
+
+  assert.equal(request.mode, "update");
+  assert.equal(request.siteId, "abc123");
+  assert.equal(request.updateKey, "uk_secret");
+  assert.equal(request.password, undefined, "an omitted password preserves the page's current one");
+  assert.throws(() => resolveShareRequest(["report.html", "--site", "abc123"]), /--update-key/);
+  assert.throws(() => resolveShareRequest(["report.html", "--update-key", "uk_secret"]), /--site/);
+  assert.throws(() => resolveShareRequest(["--site", "abc123", "--update-key", "uk_secret"]), /HTML file/);
+});
+
+test("resolveShareRequest never asks the host to clear a password it silently ignores", () => {
+  // The live host answers 200 to an empty password and leaves the page gated, so no argument
+  // shape may produce one - a "" here would report a still-private page as public.
+  for (const args of [
+    ["report.html"],
+    ["report.html", "--site", "abc123", "--update-key", "uk_secret"],
+    ["report.html", "--private"],
+    ["report.html", "--password", "hunter2"],
+  ]) {
+    assert.notEqual(resolveShareRequest(args).password, "", `${args.join(" ")} must not clear the password`);
+  }
+});
+
+test("resolveShareRequest treats unpublish as a credentialed republish with no file", () => {
+  const request = resolveShareRequest(["--unpublish", "--site", "abc123", "--update-key", "uk_secret"]);
+
+  assert.equal(request.mode, "unpublish");
+  assert.equal(request.siteId, "abc123");
+  assert.equal(request.file, null);
+  assert.throws(() => resolveShareRequest(["--unpublish", "--site", "abc123"]), /--update-key/);
+  assert.throws(
+    () => resolveShareRequest(["report.html", "--unpublish", "--site", "abc123", "--update-key", "uk"]),
+    /--unpublish/,
+  );
+});
+
+test("resolveShareRequest refuses a value flag that swallowed the next flag", () => {
+  // An empty unquoted $PW in `share r.html --password $PW --site abc --update-key k` used to make
+  // "--site" the password and silently ROTATE a live page to a literal nobody could recover.
+  assert.throws(
+    () => resolveShareRequest(["r.html", "--password", "--site", "abc", "--update-key", "k"]),
+    /--password was given no value.*--site/s,
+  );
+  assert.throws(() => resolveShareRequest(["r.html", "--site", "--update-key", "k"]), /--site was given no value/);
+  assert.throws(
+    () => resolveShareRequest(["r.html", "--site", "abc", "--update-key", "--private"]),
+    /--update-key was given no value/,
+  );
+  assert.throws(() => resolveShareRequest(["r.html", "--token", "--private"]), /--token was given no value/);
+});
+
+test("resolveShareRequest refuses an explicitly empty value flag", () => {
+  for (const args of [
+    ["r.html", "--password", ""],
+    ["r.html", "--password="],
+    ["r.html", "--password"],
+    ["r.html", "--password", "   "],
+  ]) {
+    assert.throws(() => resolveShareRequest(args), /--password was given an empty value/, args.join(" "));
+  }
+  assert.throws(() => resolveShareRequest(["r.html", "--site=", "--update-key", "k"]), /--site was given an empty/);
+});
+
+test("resolveShareRequest still accepts a value that legitimately starts with dashes via the = form", () => {
+  // The = form cannot swallow a following token, so it stays the escape hatch for such a value.
+  assert.equal(resolveShareRequest(["r.html", "--password=--dashes--"]).password, "--dashes--");
+});
+
+test("resolveShareRequest rejects a bearer token on a republish or unpublish", () => {
+  assert.equal(resolveShareRequest(["report.html", "--token", "tok_123"]).token, "tok_123");
+  assert.throws(
+    () => resolveShareRequest(["report.html", "--site", "abc123", "--update-key", "uk_secret", "--token", "tok_123"]),
+    /--token only applies when creating a page/,
+  );
+  assert.throws(
+    () => resolveShareRequest(["--unpublish", "--site", "abc123", "--update-key", "uk_secret", "--token", "tok_123"]),
+    /--token only applies when creating a page/,
+  );
+});
+
+test("createShareOutput hands back a generated password and tells the agent it is a shared secret", () => {
+  const output = createShareOutput({
+    source: "/tmp/report.html",
+    site: { url: "https://x.ht-ml.app/", site_id: "x", update_key: "uk_secret", status: "active" },
+    warnings: [],
+    passwordProtected: true,
+    password: "xk4t-9rmb-2wqz",
+  });
+
+  assert.equal(output.share.password, "xk4t-9rmb-2wqz");
+  assert.equal(output.share.visibility, "private");
+  assert.match(output.next_step, /xk4t-9rmb-2wqz/);
+  assert.match(output.next_step, /shared secret/i);
+});
+
+test("createShareOutput never echoes a password the caller chose", () => {
+  const output = createShareOutput({
+    source: "/tmp/report.html",
+    site: { url: "https://x.ht-ml.app/", site_id: "x", update_key: "uk_secret", status: "active" },
+    warnings: [],
+    passwordProtected: true,
+  });
+
+  assert.equal(output.share.password, undefined);
+});
+
+test("createShareUpdateOutput reports what a plain republish did, not a password state it cannot know", () => {
+  // Lavish persists no site state, so a republish of a page created without a password would be
+  // misreported by any claim that "the password was left unchanged".
+  const output = createShareUpdateOutput({
+    source: "/tmp/report.html",
+    site: { url: "https://x.ht-ml.app/", site_id: "x", status: "active" },
+    warnings: [],
+  });
+
+  assert.equal(output.share.url, "https://x.ht-ml.app/");
+  assert.equal(output.share.visibility, "unchanged");
+  assert.equal(output.share.password, undefined);
+  assert.match(output.next_step, /same URL/i);
+  assert.match(output.next_step, /did not touch the page's password/i);
+  assert.match(output.next_step, /cannot tell you whether that is a password or none/i);
+  assert.doesNotMatch(output.next_step, /password was left unchanged/i);
+  assert.doesNotMatch(output.next_step, /it is password-protected/i);
+});
+
+test("createShareUpdateOutput surfaces a rotated password and never claims a page went public", () => {
+  const rotated = createShareUpdateOutput({
+    source: "/tmp/report.html",
+    site: { url: "https://x.ht-ml.app/", site_id: "x", status: "active" },
+    warnings: [],
+    password: "xk4t-9rmb-2wqz",
+    passwordProtected: true,
+  });
+  assert.equal(rotated.share.password, "xk4t-9rmb-2wqz");
+  assert.equal(rotated.share.visibility, "private");
+
+  const untouched = createShareUpdateOutput({
+    source: "/tmp/report.html",
+    site: { url: "https://x.ht-ml.app/", site_id: "x", status: "active" },
+    warnings: [],
+  });
+  assert.equal(untouched.share.visibility, "unchanged");
+  assert.doesNotMatch(untouched.next_step, /CLEARED|now public|is PUBLIC/i);
+});
+
+test("createShareUpdateOutput does not present a newly set password as an instant gate", () => {
+  // Probed live: locking a page that was public left it answering uncredentialed CDN requests for
+  // minutes, and Lavish persists no site state, so it cannot know the page was not public.
+  const locked = createShareUpdateOutput({
+    source: "/tmp/report.html",
+    site: { url: "https://x.ht-ml.app/", site_id: "x", status: "active" },
+    warnings: [],
+    password: "xk4t-9rmb-2wqz",
+    passwordProtected: true,
+  });
+
+  assert.match(locked.next_step, /NOT instant/i);
+  assert.match(locked.next_step, /cach/i);
+  assert.match(locked.next_step, /already private/i);
+
+  // A plain republish sets no password, so it must not raise the caveat at all.
+  const untouched = createShareUpdateOutput({
+    source: "/tmp/report.html",
+    site: { url: "https://x.ht-ml.app/", site_id: "x", status: "active" },
+    warnings: [],
+  });
+  assert.doesNotMatch(untouched.next_step, /NOT instant/i);
+});
+
+test("createShareUpdateOutput says the host reported no URL rather than naming one", () => {
+  const output = createShareUpdateOutput({
+    source: "/tmp/report.html",
+    site: { url: "", site_id: "abc123", status: "active" },
+    warnings: [],
+  });
+
+  assert.equal(output.share.url, "");
+  assert.match(output.next_step, /did not report a URL/i);
+  assert.match(output.next_step, /abc123/);
+  assert.doesNotMatch(JSON.stringify(output), /ht-ml\.app/);
+});
+
+test("createShareUnpublishOutput says the host reported no URL rather than naming one", () => {
+  const output = createShareUnpublishOutput({ site: { url: "", site_id: "abc123", status: "active" } });
+
+  assert.equal(output.share.url, "");
+  assert.match(output.next_step, /did not report a URL/i);
+  assert.doesNotMatch(output.next_step, /Replaced the page at /);
+});
+
+test("createShareUnpublishOutput says the page still exists and how to bring it back", () => {
+  const output = createShareUnpublishOutput({
+    site: { url: "https://x.ht-ml.app/", site_id: "x", status: "active" },
+  });
+
+  assert.equal(output.share.site_id, "x");
+  assert.equal(output.share.unpublished, true);
+  assert.match(output.next_step, /not deleted|no delete/i);
+  assert.match(output.next_step, /update_key/);
+  // The recovery instruction has to be one the host actually honors: clearing is ignored.
+  assert.doesNotMatch(output.next_step, /--clear-password/);
+  assert.match(output.next_step, /--private/);
+  assert.equal(parseSuggestedShareCommand(output.next_step).mode, "update");
+  assert.doesNotMatch(JSON.stringify(output), /[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}/);
+});
+
+test("createShareUnpublishOutput separates the immediate content swap from the lagging lock", () => {
+  // Probed live: the PUT invalidated the CDN copy and the edge then served the NEW placeholder to
+  // uncredentialed requests for minutes. So the old content is gone at once and what lingers is an
+  // unlocked placeholder. Saying "no visitor can read the old content" while also saying the CDN
+  // kept answering was self-contradictory, and the report may not imply the old page stays up.
+  const output = createShareUnpublishOutput({
+    site: { url: "https://x.ht-ml.app/", site_id: "x", status: "active" },
+  });
+
+  assert.match(output.next_step, /previous content is gone/i, "the swap must read as immediate");
+  assert.match(output.next_step, /cach/i, "the lagging lock must still be disclosed");
+  assert.match(output.next_step, /readable without the password/i);
+  assert.doesNotMatch(output.next_step, /no visitor can read the old content/i);
 });
