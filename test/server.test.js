@@ -4948,6 +4948,129 @@ test("immediate poll delivery leaves presence working and preserves the next sen
   }
 });
 
+test("overlapping poll cleanup preserves working presence after one poll delivers feedback", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  const stateFile = path.join(dir, "state.json");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const originalTakeFeedback = SessionStore.prototype.takeFeedback;
+  let takeCount = 0;
+  /** @type {(() => void) | null} */
+  let takeCountWaiter = null;
+  let releaseSecondResponse = () => {};
+  const secondResponseReleased = new Promise((resolve) => {
+    releaseSecondResponse = () => resolve();
+  });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+
+    // Hold the second response's take until the first poll has delivered and cleaned up. This
+    // makes the overlap deterministic: the first cleanup runs while one poll is still active.
+    SessionStore.prototype.takeFeedback = async function (sessionKey) {
+      takeCount += 1;
+      takeCountWaiter?.();
+      takeCountWaiter = null;
+      if (sessionKey === key && takeCount === 4) await secondResponseReleased;
+      return originalTakeFeedback.call(this, sessionKey);
+    };
+    const waitForTakeCount = async (expected) => {
+      while (takeCount < expected) {
+        await new Promise((resolve) => {
+          takeCountWaiter = () => resolve();
+        });
+      }
+    };
+
+    const presence = await startPresenceStream(base, key);
+    try {
+      assert.equal(await presence.next(), "waiting");
+      const firstPoll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=1000`);
+      await waitForTakeCount(1);
+      assert.equal(await presence.next(), "listening");
+      const secondPoll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=1000`);
+      await waitForTakeCount(2);
+
+      const submitted = await fetch(`${base}/api/${key}/prompts`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: base },
+        body: JSON.stringify({ prompts: [{ prompt: "late feedback", tag: "message" }] }),
+      });
+      assert.equal(submitted.status, 200);
+
+      const delivered = await firstPoll.then((response) => response.json());
+      assert.equal(delivered.status, "feedback");
+      assert.deepEqual(
+        delivered.prompts.map((prompt) => prompt.prompt),
+        ["late feedback"],
+      );
+
+      releaseSecondResponse();
+      const stillListening = await secondPoll.then((response) => response.json());
+      assert.equal(stillListening.status, "waiting");
+
+      // The second poll's cleanup must not erase the first poll's delivered-feedback marker.
+      assert.equal(await presence.next(), "working");
+    } finally {
+      await presence.close();
+    }
+  } finally {
+    releaseSecondResponse();
+    SessionStore.prototype.takeFeedback = originalTakeFeedback;
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a fresh poll attaching alone retires the previous round's working presence", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+
+    await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({ prompts: [{ prompt: "hello", tag: "message" }] }),
+    });
+    const delivered = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
+    assert.equal((await delivered.json()).status, "feedback");
+
+    const presence = await startPresenceStream(base, key);
+    try {
+      assert.equal(await presence.next(), "working");
+
+      // The agent came back and attached with no other poll in flight: that starts a new round,
+      // so the poll ending without feedback has to leave presence waiting - not stuck on
+      // "working", which hides the "your agent is not listening" banner while nothing is attached.
+      const next = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=1`);
+      assert.deepEqual(await next.json(), { status: "waiting" });
+
+      assert.equal(await presence.next(), "listening");
+      assert.equal(await presence.next(), "waiting");
+    } finally {
+      await presence.close();
+    }
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("a disconnect during immediate feedback take requeues the batch without working presence", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");

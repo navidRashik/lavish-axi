@@ -1262,7 +1262,6 @@ async function submitQueuedOnce() {
     markSessionEnded();
     return;
   }
-  if (agentPresence === "listening") setAgentPresence("working");
 }
 
 function normalizeLayoutFindings(value) {
