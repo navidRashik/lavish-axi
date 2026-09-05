@@ -103,6 +103,7 @@ const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WHITEBOARD_CHANNEL_TOKEN_TTL_MS = 5 * 60_000;
 const NETWORK_RECONCILE_CACHE_MS = 1_000;
 const TAILSCALE_BIND_RETRY_DELAYS_MS = [100, 250, 500];
+const WEBSOCKET_CLOSE_GRACE_MS = 250;
 // An escaped popup can navigate to an artifact-owned HTML or SVG asset on the
 // server origin. Keep every artifact response sandboxed at the response layer
 // so active documents stay opaque-origin even when they are top-level.
@@ -234,7 +235,7 @@ export function isValidWhiteboardChannelToken(token, secret, sessionKey, now = D
   return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
-// A detached server should not live forever. When no browser chrome (SSE) and no agent poll
+// A detached server should not live forever. When no browser chrome or agent poll
 // are connected for this long, the server shuts itself down so it stops dangling. The next
 // `lavish-axi <file>` invocation re-spawns a fresh server and adopts resumable sessions from
 // state.json. Browser-ended sessions still require the explicit --reopen opt-in. Set
@@ -268,6 +269,8 @@ export async function serve({
   lookupHost,
   whiteboardAssetsDir = defaultWhiteboardAssetsDir(),
 } = {}) {
+  // Keep the transport dependency off fast metadata paths such as `--version`.
+  const { WebSocket, WebSocketServer } = await import("ws");
   const extraHosts = allowedHosts ?? extraAllowedHosts(env);
   const envHost = env.LAVISH_AXI_HOST?.trim();
   const autoTailscale = !envHost;
@@ -290,8 +293,9 @@ export async function serve({
   const activePolls = new Map();
   const deliveredFeedback = new Set();
   // Keyed by session so a version-driven shutdown can reload the one chrome whose artifact is
-  // being reopened and leave every other open review page on screen.
-  const sseClients = new Map();
+  // being reopened and leave every other open review page on screen. Current chromes use a
+  // WebSocket, while the legacy SSE route remains available during rolling local upgrades.
+  const liveEventClients = new Map();
   const whiteboardChannelSecret = crypto.randomBytes(32);
   // Sessions with at least one warning the user queued that has not been re-checked yet.
   const outstandingRepairBatches = new Set();
@@ -306,6 +310,47 @@ export async function serve({
   let cachedNetworkStale = false;
   /** @type {Promise<boolean> | null} */
   let networkReconcilePromise = null;
+
+  function broadcastLiveEvent(type, key, data = {}) {
+    for (const [client, clientKey] of liveEventClients) {
+      if (clientKey === key) client.sendEvent(type, data);
+    }
+  }
+
+  // One listener per event scales independently of the number of open review tabs and avoids the
+  // EventEmitter listener warning the former one-listener-per-SSE-client design reached at only a
+  // few boards.
+  events.on("reload", (key) => broadcastLiveEvent("reload", key));
+  events.on("agent-reply", (key, text) => broadcastLiveEvent("agent-reply", key, { text }));
+  events.on("agent-presence", (key, state) => broadcastLiveEvent("agent-presence", key, { state }));
+  events.on("layout-warnings", (key, warnings) => broadcastLiveEvent("layout-warnings", key, { warnings }));
+  events.on("ended", (key, endedBy) => broadcastLiveEvent("ended", key, { ended_by: endedBy || null }));
+
+  function attachLiveEventClient(client, key, onClose) {
+    liveEventClients.set(client, key);
+    refreshIdleTimer();
+    let cleanedUp = false;
+    const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      liveEventClients.delete(client);
+      refreshIdleTimer();
+    };
+    onClose(cleanup);
+    return cleanup;
+  }
+
+  async function sendInitialLiveEventState(client, key, cleanup) {
+    const session = await store.findByKey(key);
+    if (client.isClosed()) {
+      cleanup();
+      return;
+    }
+    client.sendEvent("chat-sync", { chat: session?.chat || [] });
+    client.sendEvent("agent-presence", { state: computePresence(key, activePolls, deliveredFeedback) });
+    // A connection that attaches after the live end event still needs the terminal snapshot.
+    if (session?.status === "ended") client.sendEvent("ended", { ended_by: session.ended_by || null });
+  }
 
   async function reconcileTailscaleNetwork() {
     if (Date.now() - networkReconcileCheckedAt < NETWORK_RECONCILE_CACHE_MS) return cachedNetworkStale;
@@ -743,7 +788,7 @@ export async function serve({
       }
       // The session was already ended by someone else before this batch arrived - no agent will
       // ever poll it again, so a 200 here would be a lie. Nothing was persisted; the chrome keeps
-      // its queue and goes read-only itself in case it missed the SSE `ended` event.
+      // its queue and goes read-only itself in case it missed the live `ended` event.
       if (result.ended) {
         res.status(409).json({ status: "ended", error: "session already ended", ended_by: result.ended_by });
         return;
@@ -1179,85 +1224,13 @@ export async function serve({
     }
   });
 
-  app.get("/events/:key", async (req, res, next) => {
-    let cleanup = () => {};
-    try {
-      res.writeHead(200, {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      });
-      sseClients.set(res, String(req.params.key || ""));
-      refreshIdleTimer();
-      const sendReload = (key) => {
-        if (key === req.params.key) {
-          res.write("event: reload\ndata: {}\n\n");
-        }
-      };
-      const sendAgentReply = (key, text) => {
-        if (key === req.params.key) {
-          res.write(`event: agent-reply\ndata: ${JSON.stringify({ text })}\n\n`);
-        }
-      };
-      const sendPresence = (key, state) => {
-        if (key === req.params.key) {
-          res.write(`event: agent-presence\ndata: ${JSON.stringify({ state })}\n\n`);
-        }
-      };
-      // Warning-inbox state lives on the server, so every attached chrome - including one that
-      // just reconnected after a browser refresh - converges on the same list.
-      const sendLayoutWarnings = (key, warnings) => {
-        if (key === req.params.key) {
-          res.write(`event: layout-warnings\ndata: ${JSON.stringify({ warnings })}\n\n`);
-        }
-      };
-      // A session end (`lavish-axi end` or the browser's own End/Send & End) must reach every
-      // attached chrome, not just a poll waiter - otherwise a tab left open keeps accepting Sends
-      // nobody will ever poll (#171).
-      const sendEnded = (key, endedBy) => {
-        if (key === req.params.key) {
-          res.write(`event: ended\ndata: ${JSON.stringify({ ended_by: endedBy || null })}\n\n`);
-        }
-      };
-      // Listeners must be registered BEFORE the read below: an end that lands during that await
-      // would otherwise fire "ended" while nothing here is listening yet, and this connection
-      // would never learn the session ended (#171).
-      events.on("reload", sendReload);
-      events.on("agent-reply", sendAgentReply);
-      events.on("agent-presence", sendPresence);
-      events.on("layout-warnings", sendLayoutWarnings);
-      events.on("ended", sendEnded);
-      let cleanedUp = false;
-      cleanup = () => {
-        if (cleanedUp) return;
-        cleanedUp = true;
-        req.off("close", cleanup);
-        sseClients.delete(res);
-        events.off("reload", sendReload);
-        events.off("agent-reply", sendAgentReply);
-        events.off("agent-presence", sendPresence);
-        events.off("layout-warnings", sendLayoutWarnings);
-        events.off("ended", sendEnded);
-        refreshIdleTimer();
-      };
-      req.once("close", cleanup);
-      const session = await store.findByKey(req.params.key);
-      if (req.destroyed || res.writableEnded) {
-        cleanup();
-        return;
-      }
-      res.write(`event: chat-sync\ndata: ${JSON.stringify({ chat: session?.chat || [] })}\n\n`);
-      res.write(
-        `event: agent-presence\ndata: ${JSON.stringify({ state: computePresence(req.params.key, activePolls, deliveredFeedback) })}\n\n`,
-      );
-      // A connection that attaches (or reconnects) to a session already ended - including one
-      // that misses the live "ended" event entirely by connecting after it fired - still needs to
-      // learn that on its own; `markSessionEnded()` is idempotent, so a duplicate is harmless.
-      if (session?.status === "ended") sendEnded(req.params.key, session.ended_by);
-    } catch (error) {
-      cleanup();
-      next(error);
-    }
+  app.get("/events/:key", (_req, res) => {
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "close",
+    });
+    res.end(`event: chrome-reload\ndata: ${JSON.stringify({ reason: "server-restarted" })}\n\n`);
   });
 
   app.get("/chrome-client.js", async (req, res, next) => {
@@ -1576,6 +1549,76 @@ export async function serve({
     res.status(status).json({ error: error instanceof Error ? error.message : String(error) });
   });
 
+  const eventWebSocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 });
+
+  function rejectEventUpgrade(socket, status, message) {
+    const body = `${message}\n`;
+    socket.end(
+      `HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+    );
+  }
+
+  function handleEventUpgrade(req, socket, head) {
+    let pathname;
+    try {
+      pathname = new URL(String(req.url || ""), "http://lavish.local").pathname;
+    } catch {
+      rejectEventUpgrade(socket, 400, "Bad Request");
+      return;
+    }
+    const match = pathname.match(/^\/events\/([^/]+)$/);
+    if (!match) {
+      rejectEventUpgrade(socket, 404, "Not Found");
+      return;
+    }
+
+    const hostAllowed = allowAnyHostname
+      ? parseHostAuthority(req.headers.host) !== null
+      : isAllowedRequestHost(
+          { host: req.headers.host, forwardedHost: req.headers["x-forwarded-host"] },
+          allowedHostnames,
+        );
+    // WebSocket reads are not protected by CORS. Require the chrome page's exact Origin as well
+    // as the normal Host allowlist so a foreign site cannot read a known session's live events.
+    if (!hostAllowed || !req.headers.origin || !isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
+      rejectEventUpgrade(socket, 403, "Forbidden");
+      return;
+    }
+
+    let key;
+    try {
+      key = decodeURIComponent(match[1]);
+    } catch {
+      rejectEventUpgrade(socket, 400, "Bad Request");
+      return;
+    }
+    eventWebSocketServer.handleUpgrade(req, socket, head, (webSocket) => {
+      const client = {
+        sendEvent(type, data) {
+          if (webSocket.readyState === WebSocket.OPEN) webSocket.send(JSON.stringify({ type, data }));
+        },
+        close(code = 1001, reason = "Lavish server shutdown") {
+          webSocket.close(code, reason);
+          const terminateTimer = setTimeout(() => {
+            if (webSocket.readyState !== WebSocket.CLOSED) webSocket.terminate();
+          }, WEBSOCKET_CLOSE_GRACE_MS);
+          terminateTimer.unref?.();
+          webSocket.once("close", () => clearTimeout(terminateTimer));
+        },
+        isClosed() {
+          return webSocket.readyState === WebSocket.CLOSING || webSocket.readyState === WebSocket.CLOSED;
+        },
+      };
+      webSocket.on("error", () => {});
+      const cleanup = attachLiveEventClient(client, key, (remove) => webSocket.once("close", remove));
+      sendInitialLiveEventState(client, key, cleanup).catch((error) => {
+        client.close(1011, "Failed to initialize live events");
+        cleanup();
+        logEvent?.(`event WebSocket initialization failed session=${key}: ${error?.message || error}`);
+      });
+    });
+  }
+
   const httpServers = [];
   const boundHosts = [];
   let boundPort = port;
@@ -1585,6 +1628,7 @@ export async function serve({
     while (true) {
       try {
         const httpServer = await listenHttp(app, boundPort, listenHost);
+        httpServer.on("upgrade", handleEventUpgrade);
         if (boundPort === 0) boundPort = httpServer.address().port;
         httpServers.push(httpServer);
         boundHosts.push(listenHost);
@@ -1642,20 +1686,20 @@ export async function serve({
     // page the user is reading or writing in is exactly what this avoids.
     // Both events carry the same reason: the reloaded page can end up showing a line from it too,
     // and two pages describing one shutdown differently is how a false claim gets in.
-    const shutdownData = JSON.stringify({ reason });
-    for (const [res, clientKey] of sseClients) {
+    const shutdownData = { reason };
+    for (const [client, clientKey] of liveEventClients) {
       try {
         if (reloadKey && clientKey === reloadKey) {
-          res.write(`event: chrome-reload\ndata: ${shutdownData}\n\n`);
+          client.sendEvent("chrome-reload", shutdownData);
         } else {
-          res.write(`event: chrome-outdated\ndata: ${shutdownData}\n\n`);
+          client.sendEvent("chrome-outdated", shutdownData);
         }
-        res.end();
+        client.close();
       } catch {
         // best effort
       }
     }
-    sseClients.clear();
+    liveEventClients.clear();
     for (const w of watchers.values()) {
       w.close().catch(() => {});
     }
@@ -1667,14 +1711,14 @@ export async function serve({
     };
     for (const httpServer of httpServers) {
       httpServer.close(closed);
-      // Force-close keep-alive sockets so SSE / long-polls don't keep us alive.
+      // Force-close keep-alive sockets so legacy SSE / long-polls don't keep us alive.
       if (typeof httpServer.closeAllConnections === "function") {
         httpServer.closeAllConnections();
       }
     }
   }
 
-  // Idle self-shutdown: the timer only runs while nothing is connected. Any live SSE chrome or
+  // Idle self-shutdown: the timer only runs while nothing is connected. Any live event chrome or
   // active long-poll cancels it; losing the last connection (re)arms it.
   let idleTimer = null;
   function refreshIdleTimer() {
@@ -1683,10 +1727,10 @@ export async function serve({
       idleTimer = null;
     }
     if (shuttingDown || idleTimeoutMs == null) return;
-    if (sseClients.size > 0 || activePolls.size > 0) return;
+    if (liveEventClients.size > 0 || activePolls.size > 0) return;
     idleTimer = setTimeout(() => {
       idleTimer = null;
-      if (!shuttingDown && sseClients.size === 0 && activePolls.size === 0) {
+      if (!shuttingDown && liveEventClients.size === 0 && activePolls.size === 0) {
         logEvent?.(`idle for ${idleTimeoutMs}ms with no connections, shutting down`);
         shutdown();
       }
@@ -1700,7 +1744,7 @@ export async function serve({
   // idle timer reap it once those connections drop. Best-effort: never let a read failure
   // block the end response.
   async function shutdownIfNoLiveSessions() {
-    if (sseClients.size > 0 || activePolls.size > 0) return;
+    if (liveEventClients.size > 0 || activePolls.size > 0) return;
     try {
       const sessions = await store.listSessions();
       if (sessions.every((session) => session.status === "ended")) {
@@ -1973,9 +2017,9 @@ function isSameOriginRequest(req, allowedHostnames, allowAnyHostname = false) {
   const host = parseHostAuthority(req.headers.host);
   if (!host) return false;
 
-  let protocol = req.protocol;
+  let protocol = req.protocol || "http";
   let authority = host;
-  const forwardedHost = String(req.get("x-forwarded-host") || "")
+  const forwardedHost = String(req.headers["x-forwarded-host"] || "")
     .split(",")
     .pop()
     .trim();
@@ -1987,7 +2031,7 @@ function isSameOriginRequest(req, allowedHostnames, allowAnyHostname = false) {
         (!allowedHostnames.has(host.hostname) || !allowedHostnames.has(forwardedAuthority.hostname)))
     )
       return false;
-    protocol = String(req.get("x-forwarded-proto") || req.protocol)
+    protocol = String(req.headers["x-forwarded-proto"] || protocol)
       .split(",")
       .pop()
       .trim()
@@ -1997,11 +2041,11 @@ function isSameOriginRequest(req, allowedHostnames, allowAnyHostname = false) {
   }
   const expectedOrigin = normalizeOrigin(`${protocol}://${authority.authority}`);
   if (!expectedOrigin) return false;
-  const origin = req.get("origin");
+  const origin = req.headers.origin;
   if (origin) {
     return normalizeOrigin(origin) === expectedOrigin;
   }
-  const referer = req.get("referer");
+  const referer = req.headers.referer;
   return Boolean(referer) && normalizeOrigin(referer) === expectedOrigin;
 }
 
@@ -2376,7 +2420,7 @@ export function createChromeHtml(
   const sessionJson = jsonScript({
     key: session.key,
     file: session.file,
-    // A page loaded (or reloaded) after the session already ended has no future SSE `ended`
+    // A page loaded (or reloaded) after the session already ended has no future live `ended`
     // event to wait for - it must start read-only instead of looking live until the user tries
     // to send and gets refused (#171).
     initialEnded: session.status === "ended",
