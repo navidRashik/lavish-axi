@@ -7,12 +7,15 @@
 
 // `session.chat` lives in state.json, which is rewritten wholesale on every store operation, so
 // an entry keeps only what the chrome shows, plus the bounded per-submission identity the chrome
-// uses to settle a queued note exactly once. Magnitude-style extras stay out.
+// uses to settle a queued note exactly once. Magnitude-style extras stay out. The array itself is
+// also bounded: keep the newest suffix whose JSON fits in MAX_CHAT_STORED_BYTES, and move evicted
+// user `prompt_id`s onto the compact ack list so settlement/dedup still holds.
 const EXCERPT_MAX = 120;
 const SELECTOR_MAX = 512;
 const LABEL_MAX = 40;
 export const PROMPT_ID_MAX = 128;
 const PROMPT_ID_RE = /^[A-Za-z0-9_-]+$/;
+export const MAX_CHAT_STORED_BYTES = 5_242_880;
 
 // The chrome mints this at queue time and the server echoes it on the transcript entry. A value
 // that cannot be a compact identity is dropped rather than stored: state.json is rewritten
@@ -493,4 +496,59 @@ export function serializeChat(chat) {
     serialized.push(entry);
   }
   return serialized;
+}
+
+export function storedChatBytes(chat) {
+  return Buffer.byteLength(JSON.stringify(Array.isArray(chat) ? chat : []), "utf8");
+}
+
+// Keep the newest suffix of `session.chat` whose JSON fits `maxBytes`.
+export function boundStoredChat(chat, maxBytes = MAX_CHAT_STORED_BYTES) {
+  const entries = Array.isArray(chat) ? chat.filter((entry) => entry && typeof entry === "object") : [];
+  if (entries.length === 0) return { chat: [], evicted: [] };
+  const limit = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : MAX_CHAT_STORED_BYTES;
+  let storedBytes = 2;
+  let cut = entries.length;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const serialized = JSON.stringify(entries[index]);
+    const entryBytes = Buffer.byteLength(serialized === undefined ? "null" : serialized, "utf8");
+    const nextBytes = storedBytes + entryBytes + (cut < entries.length ? 1 : 0);
+    if (nextBytes > limit) break;
+    storedBytes = nextBytes;
+    cut = index;
+  }
+  return { chat: entries.slice(cut), evicted: entries.slice(0, cut) };
+}
+
+export function serializeChatAckIds(ids) {
+  const ackIds = [];
+  const seen = new Set();
+  for (const value of Array.isArray(ids) ? ids : []) {
+    const id = normalizePromptId(value);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ackIds.push(id);
+  }
+  return ackIds;
+}
+
+export function collectChatAckIds(evicted, existing = []) {
+  const ackIds = serializeChatAckIds(existing);
+  const seen = new Set(ackIds);
+  for (const entry of Array.isArray(evicted) ? evicted : []) {
+    const id = normalizePromptId(entry?.prompt_id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ackIds.push(id);
+  }
+  return ackIds;
+}
+
+export function serializeChatSync(session) {
+  const revision = Number(session?.chat_revision);
+  return {
+    chat: serializeChat(session?.chat || []),
+    ack_ids: serializeChatAckIds(session?.chat_ack_ids),
+    chat_revision: Number.isSafeInteger(revision) && revision >= 0 ? revision : 0,
+  };
 }

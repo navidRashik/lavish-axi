@@ -23,6 +23,8 @@ const promptIdentityField = "prompt_id";
 const PROMPT_IDENTITY_MAX = 128;
 const PROMPT_IDENTITY_RE = /^[A-Za-z0-9_-]+$/;
 const initialChat = Array.isArray(sessionData.initialChat) ? sessionData.initialChat : [];
+const initialChatAckIds = Array.isArray(sessionData.initialChatAckIds) ? sessionData.initialChatAckIds : [];
+const initialChatRevision = parseChatRevision(sessionData.initialChatRevision) || 0;
 const MODE_TOGGLE_HOTKEY_KEY = String(sessionData.modeToggleHotkeyKey || "").toLowerCase();
 const attachmentMaxBytes = Number(sessionData.attachmentMaxBytes) || 0;
 const attachmentMaxCount = Number(sessionData.attachmentMaxCount) || 4;
@@ -222,6 +224,7 @@ let nextSnapshotRequestId = 0;
 let nextSendOperationOrder = 0;
 let workingBubble = null;
 let displayedChat = initialChat.slice();
+let chatRevision = initialChatRevision;
 // Settlement is by per-submission identity, not displayed content: two tabs can queue notes
 // whose chat projection is identical (same selected text under one container, different range
 // boundaries) without settling each other, and a reload after a lost POST response still
@@ -392,6 +395,15 @@ function isPromptIdentity(value) {
 function promptIdentity(value) {
   return isPromptIdentity(value?.[promptIdentityField]) ? value[promptIdentityField] : "";
 }
+
+const chatAckIds = new Set();
+function rememberChatAckIds(ids) {
+  if (!Array.isArray(ids)) return;
+  for (const value of ids) {
+    if (isPromptIdentity(value)) chatAckIds.add(value);
+  }
+}
+rememberChatAckIds(initialChatAckIds);
 
 function createPromptIdentity() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -849,13 +861,26 @@ function chatEntriesMatch(left, right) {
   return !leftAt || !rightAt || leftAt === rightAt;
 }
 
+function parseChatRevision(value) {
+  const revision = Number(value);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+}
+
 function chatContainsEntries(candidate, entries) {
-  if (candidate.length < entries.length) return false;
-  let matched = 0;
-  for (const entry of candidate) {
-    if (matched < entries.length && chatEntriesMatch(entry, entries[matched])) matched += 1;
+  if (!Array.isArray(candidate) || !Array.isArray(entries)) return false;
+  if (entries.length === 0) return true;
+  // A size-bound transcript may drop a prefix of what this tab already showed. The remaining
+  // displayed suffix must still appear in order; a stale sync that is missing a newer tail
+  // (including an empty wipe) is rejected.
+  for (let start = 0; start < entries.length; start += 1) {
+    const suffix = entries.slice(start);
+    let matched = 0;
+    for (const entry of candidate) {
+      if (matched < suffix.length && chatEntriesMatch(entry, suffix[matched])) matched += 1;
+    }
+    if (matched === suffix.length) return true;
   }
-  return matched === entries.length;
+  return false;
 }
 
 function chatStartsWith(candidate, prefix) {
@@ -868,10 +893,18 @@ function chatStartsWith(candidate, prefix) {
 }
 
 function mergeAcceptedChat(accepted, chatAtRequest) {
-  if (!chatStartsWith(accepted, chatAtRequest) || !chatStartsWith(displayedChat, chatAtRequest)) return null;
+  if (!Array.isArray(accepted) || !Array.isArray(chatAtRequest)) return null;
+  if (!chatStartsWith(displayedChat, chatAtRequest)) return null;
+  let requestOffset = chatAtRequest.length;
+  for (let i = 0; i <= chatAtRequest.length; i += 1) {
+    if (chatStartsWith(accepted, chatAtRequest.slice(i))) {
+      requestOffset = i;
+      break;
+    }
+  }
   const displayedTail = displayedChat.slice(chatAtRequest.length);
   const unmatchedDisplayed = [];
-  let acceptedIndex = chatAtRequest.length;
+  let acceptedIndex = chatAtRequest.length - requestOffset;
   for (const displayedEntry of displayedTail) {
     while (acceptedIndex < accepted.length && !chatEntriesMatch(accepted[acceptedIndex], displayedEntry)) {
       acceptedIndex += 1;
@@ -892,7 +925,9 @@ function queuedPromptMatchesEntry(prompt, entry) {
 
 function promptAcknowledgedInChat(prompt, chat) {
   const id = promptIdentity(prompt);
-  if (!id || !Array.isArray(chat)) return false;
+  if (!id) return false;
+  if (chatAckIds.has(id)) return true;
+  if (!Array.isArray(chat)) return false;
   return chat.some((entry) => queuedPromptMatchesEntry(prompt, entry));
 }
 
@@ -916,10 +951,15 @@ function settleQueuedFromTranscript(chat, shouldRender = true) {
   return true;
 }
 
-function syncChat(chat) {
+function syncChat(chat, revision) {
   const nextChat = Array.isArray(chat) ? chat : [];
   settleQueuedFromTranscript(nextChat);
-  if (!chatContainsEntries(nextChat, displayedChat)) return false;
+  const nextRevision = parseChatRevision(revision);
+  if (nextRevision !== null && nextRevision < chatRevision) return false;
+  if (nextRevision === null || nextRevision === chatRevision) {
+    if (!chatContainsEntries(nextChat, displayedChat)) return false;
+  }
+  if (nextRevision !== null) chatRevision = nextRevision;
   displayedChat = nextChat.slice();
   for (const el of [...chatLog.querySelectorAll(".bubble.user,.bubble.agent:not(.agent-working)")]) {
     el.remove();
@@ -1850,17 +1890,23 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
     throw new Error("failed to submit queued prompts");
   }
   const accepted = typeof response.json === "function" ? await response.json().catch(() => null) : null;
-  const reconciledChat = Array.isArray(accepted?.chat)
-    ? mergeAcceptedChat(accepted.chat, submission.chatAtRequest)
+  rememberChatAckIds(accepted?.ack_ids);
+  const acceptedChat = Array.isArray(accepted?.chat) ? accepted.chat : null;
+  if (acceptedChat) settleQueuedFromTranscript(acceptedChat);
+  const acceptedRevision = parseChatRevision(accepted?.chat_revision);
+  const reconciledChat = acceptedChat
+    ? acceptedRevision !== null && acceptedRevision > chatRevision
+      ? acceptedChat
+      : mergeAcceptedChat(acceptedChat, submission.chatAtRequest)
     : null;
-  if (!Array.isArray(accepted?.chat) || reconciledChat) {
+  if (!acceptedChat || reconciledChat) {
     for (const prompt of prompts) {
       deliveredPrompts.add(prompt);
       const index = queued.indexOf(prompt);
       if (index !== -1) queued.splice(index, 1);
     }
     persistQueuedPrompts();
-    if (reconciledChat) syncChat(reconciledChat);
+    if (reconciledChat) syncChat(reconciledChat, acceptedRevision);
   }
   render();
   settleAcknowledgementGuidance(submission, preserveFailureState);
@@ -3987,7 +4033,10 @@ events.set("agent-reply", (data) => {
   if (addChat(entry)) displayedChat.push(entry);
   noteAgentReply(entry.text);
 });
-events.set("chat-sync", (data) => syncChat(data.chat || []));
+events.set("chat-sync", (data) => {
+  rememberChatAckIds(data.ack_ids);
+  syncChat(data.chat || [], data.chat_revision);
+});
 events.set("agent-presence", (data) => setAgentPresence(data.state));
 events.set("layout-warnings", (data) => setLayoutWarnings(data.warnings || []));
 events.set("ended", () => markSessionEnded());

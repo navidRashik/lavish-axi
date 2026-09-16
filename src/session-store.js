@@ -15,7 +15,7 @@ import {
   serializeLayoutWarnings,
 } from "./layout-warnings.js";
 import { AsyncMutex } from "./async-mutex.js";
-import { chatEntryForPrompt, normalizePromptId } from "./chat-messages.js";
+import { boundStoredChat, chatEntryForPrompt, collectChatAckIds, normalizePromptId } from "./chat-messages.js";
 import { normalizeMermaidNodeTarget } from "./mermaid-node.js";
 import { EXCALIDRAW_SCENE_TARGET_TYPE, normalizeExcalidrawSceneTarget } from "./whiteboard-core.js";
 
@@ -114,6 +114,10 @@ export class SessionStore {
       delivered_attachments: Array.isArray(existing.delivered_attachments) ? existing.delivered_attachments : [],
       dom_snapshot: existing.dom_snapshot || "",
       chat: existing.chat || [],
+      chat_revision: normalizeRevision(existing.chat_revision),
+      // Compact prompt_id acks for bubbles evicted by the stored-chat byte bound. Reopening
+      // must keep them: they are the settlement/dedup source once the visible entry is gone.
+      chat_ack_ids: Array.isArray(existing.chat_ack_ids) ? existing.chat_ack_ids : [],
       updated_at: new Date().toISOString(),
     };
     state.sessions[key] = session;
@@ -165,7 +169,10 @@ export class SessionStore {
     let normalized = prompts.map(normalizePrompt);
     if (!restoring) {
       const acknowledgedIds = new Set(
-        (session.chat || []).map((entry) => normalizePromptId(entry?.prompt_id)).filter(Boolean),
+        [
+          ...(session.chat || []).map((entry) => normalizePromptId(entry?.prompt_id)),
+          ...(session.chat_ack_ids || []).map((id) => normalizePromptId(id)),
+        ].filter(Boolean),
       );
       normalized = normalized.filter(({ prompt }) => {
         const promptId = normalizePromptId(prompt.prompt_id);
@@ -256,6 +263,8 @@ export class SessionStore {
     const storedPrompts = restoring ? acceptedPrompts : acceptedPrompts.map(agentFacingPrompt);
     session.prompts = restoring ? [...storedPrompts, ...existingPrompts] : [...existingPrompts, ...storedPrompts];
     session.chat = [...(session.chat || []), ...userMessages];
+    applyTranscriptBound(session);
+    if (userMessages.length > 0) session.chat_revision = normalizeRevision(session.chat_revision) + 1;
     if (restoring) {
       const restoredFailures = Array.isArray(payload.artifact_failures)
         ? JSON.parse(JSON.stringify(payload.artifact_failures))
@@ -633,11 +642,11 @@ export class SessionStore {
       if (!session) {
         return null;
       }
-      session.chat = [
-        ...(session.chat || []),
-        { role: "agent", text: String(text || ""), at: new Date().toISOString() },
-      ];
-      session.updated_at = new Date().toISOString();
+      const at = new Date().toISOString();
+      session.chat = [...(session.chat || []), { role: "agent", text: String(text || ""), at }];
+      applyTranscriptBound(session);
+      session.chat_revision = normalizeRevision(session.chat_revision) + 1;
+      session.updated_at = at;
       await this.writeState(state);
       return session;
     });
@@ -684,7 +693,15 @@ export class SessionStore {
     try {
       const raw = await readFile(this.file, "utf8");
       const parsed = JSON.parse(raw);
-      return { sessions: parsed.sessions || {} };
+      const state = { sessions: parsed.sessions || {} };
+      let changed = false;
+      for (const session of Object.values(state.sessions)) {
+        if (!session || typeof session !== "object" || !applyTranscriptBound(session)) continue;
+        session.chat_revision = normalizeRevision(session.chat_revision) + 1;
+        changed = true;
+      }
+      if (changed) await this.writeState(state);
+      return state;
     } catch (error) {
       if (error && error.code === "ENOENT") {
         return { sessions: {} };
@@ -705,6 +722,20 @@ export async function canonicalFile(file) {
 
 export function sessionKey(file) {
   return crypto.createHash("sha256").update(file).digest("hex").slice(0, 16);
+}
+
+function applyTranscriptBound(session) {
+  const originalChat = Array.isArray(session.chat) ? session.chat : [];
+  const { chat, evicted } = boundStoredChat(session.chat);
+  const chatChanged =
+    !Array.isArray(session.chat) ||
+    chat.length !== originalChat.length ||
+    chat.some((entry, index) => entry !== originalChat[index]);
+  session.chat = chat;
+  if (evicted.length === 0) return chatChanged;
+  const existingAckCount = Array.isArray(session.chat_ack_ids) ? session.chat_ack_ids.length : 0;
+  session.chat_ack_ids = collectChatAckIds(evicted, session.chat_ack_ids);
+  return chatChanged || session.chat_ack_ids.length !== existingAckCount;
 }
 
 // Returns `{ prompt, malformed }`: `malformed` is non-empty when the payload's
