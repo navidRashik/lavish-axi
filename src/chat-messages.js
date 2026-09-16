@@ -6,10 +6,23 @@
 // only for agent entries: a reviewer's own words are never parsed.
 
 // `session.chat` lives in state.json, which is rewritten wholesale on every store operation, so
-// an entry keeps only what the chrome shows, bounded.
+// an entry keeps only what the chrome shows, plus the bounded per-submission identity the chrome
+// uses to settle a queued note exactly once. Magnitude-style extras stay out.
 const EXCERPT_MAX = 120;
 const SELECTOR_MAX = 512;
 const LABEL_MAX = 40;
+export const PROMPT_ID_MAX = 128;
+const PROMPT_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+// The chrome mints this at queue time and the server echoes it on the transcript entry. A value
+// that cannot be a compact identity is dropped rather than stored: state.json is rewritten
+// wholesale, and a crafted unbounded string would ride along forever.
+export function normalizePromptId(value) {
+  if (typeof value !== "string") return "";
+  const id = value.trim();
+  if (!id || id.length > PROMPT_ID_MAX || !PROMPT_ID_RE.test(id)) return "";
+  return id;
+}
 
 const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
 const BLOCK_START = /^(?:```|~~~|#{1,6}\s|\s*(?:[-*+]|\d+[.)])\s+)/;
@@ -425,7 +438,8 @@ function promptAnchor(prompt, kind) {
 // What an accepted prompt becomes in `session.chat`. Every kind of prompt enters the transcript,
 // so the conversation shows what the reviewer said and not only what the agent answered. Only the
 // client-visible attachment fields are kept: the resolved path, mime, and size stay in the prompt.
-// A prompt with neither text nor images has nothing to show and makes no entry.
+// An accepted prompt keeps its identity even when its only displayable content is an anchor, so
+// the transcript remains the authoritative acknowledgement source after a lost response.
 export function chatEntryForPrompt(prompt, at) {
   if (!prompt || typeof prompt !== "object") return null;
   const text = String(prompt.prompt || "");
@@ -438,7 +452,6 @@ export function chatEntryForPrompt(prompt, at) {
             : { id: String(attachment.id) },
         )
     : [];
-  if (!text && attachments.length === 0) return null;
   const tag = String(prompt.tag || "");
   const kind =
     tag === "message"
@@ -448,8 +461,11 @@ export function chatEntryForPrompt(prompt, at) {
         : tag === "layout-warnings"
           ? "layout-warnings"
           : "annotation";
-  const entry = { role: "user", kind, text, at: String(at || new Date().toISOString()) };
+  const promptId = normalizePromptId(prompt.prompt_id);
   const anchor = promptAnchor(prompt, kind);
+  if (!text && attachments.length === 0 && !promptId && !anchor) return null;
+  const entry = { role: "user", kind, text, at: String(at || new Date().toISOString()) };
+  if (promptId) entry.prompt_id = promptId;
   if (anchor) entry.anchor = anchor;
   if (attachments.length) entry.attachments = attachments;
   return entry;

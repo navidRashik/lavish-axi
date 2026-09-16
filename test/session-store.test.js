@@ -486,6 +486,49 @@ test("queueing a warning produces one ordinary prompt and leaves the warning unr
   }
 });
 
+test("an acknowledged layout prompt retry bypasses a later recurring-warning conflict", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Hello</h1>");
+
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    const firstLoad = await beginArtifactLoad(store, session.key);
+    const finding = { selector: "p", kind: "clipped-text", axis: "vertical", overflowPx: 27, severity: "error" };
+    const recorded = await store.recordLayoutDiagnostics(
+      session.key,
+      diagnosticPayload(firstLoad, 1, { complete: true, viewport_width: 1440, findings: [finding] }),
+    );
+    const prepared = await store.prepareLayoutWarningFixes(session.key, [recorded.warnings[0].id]);
+    const prompt = {
+      ...prepared.prompt,
+      uid: "",
+      selector: "",
+      tag: "layout-warnings",
+      prompt_id: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
+    };
+    await store.queuePrompts(session.key, { prompts: [prompt] });
+    assert.equal((await store.takeFeedback(session.key)).status, "feedback");
+
+    const secondLoad = await beginArtifactLoad(store, session.key);
+    const recurring = await store.recordLayoutDiagnostics(
+      session.key,
+      diagnosticPayload(secondLoad, 1, { complete: true, viewport_width: 1440, findings: [finding] }),
+    );
+    assert.equal(recurring.warnings[0].status, "recurring");
+
+    const retry = await store.queuePrompts(session.key, { prompts: [prompt] });
+    assert.equal(retry.conflict, undefined);
+    assert.equal(retry.fresh_feedback, false);
+    assert.equal(retry.chat.length, 1);
+    assert.equal(retry.prompts.length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("a prepared layout prompt conflicts when its warning changes before sending", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
   try {
@@ -2147,6 +2190,48 @@ test("every accepted prompt enters the chat history with its anchor, in batch or
         { role: "user", kind: "message", text: "Keep the table" },
       ],
     );
+  });
+});
+
+test("queuePrompts stores the prompt identity on the transcript and not on the agent-facing prompt", async () => {
+  await withStore(async ({ store, session }) => {
+    const promptId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    await store.queuePrompts(session.key, {
+      prompts: [
+        {
+          uid: "",
+          prompt: "Rename this",
+          selector: "h2#phase-1",
+          tag: "h2",
+          text: "Phase 1: Inventory",
+          prompt_id: promptId,
+        },
+      ],
+    });
+    const updated = await store.findByKey(session.key);
+    assert.equal(updated.chat[0].prompt_id, promptId);
+    assert.equal(updated.prompts[0].prompt_id, undefined);
+    assert.equal(updated.prompts[0].prompt, "Rename this");
+  });
+});
+
+test("queuePrompts does not duplicate chat or pending prompts for an already-accepted identity", async () => {
+  await withStore(async ({ store, session }) => {
+    const promptId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    const prompt = {
+      uid: "",
+      prompt: "Keep this note",
+      selector: "",
+      tag: "message",
+      text: "Freeform message",
+      prompt_id: promptId,
+    };
+    await store.queuePrompts(session.key, { prompts: [prompt] });
+    await store.queuePrompts(session.key, { prompts: [prompt] });
+    const updated = await store.findByKey(session.key);
+    assert.equal(updated.chat.length, 1);
+    assert.equal(updated.prompts.length, 1);
+    assert.equal(updated.chat[0].prompt_id, promptId);
   });
 });
 

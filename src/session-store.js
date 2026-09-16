@@ -15,7 +15,7 @@ import {
   serializeLayoutWarnings,
 } from "./layout-warnings.js";
 import { AsyncMutex } from "./async-mutex.js";
-import { chatEntryForPrompt } from "./chat-messages.js";
+import { chatEntryForPrompt, normalizePromptId } from "./chat-messages.js";
 import { normalizeMermaidNodeTarget } from "./mermaid-node.js";
 import { EXCALIDRAW_SCENE_TARGET_TYPE, normalizeExcalidrawSceneTarget } from "./whiteboard-core.js";
 
@@ -162,7 +162,19 @@ export class SessionStore {
     if (alreadyEnded && !restoring) {
       return { ended: true, ended_by: session.ended_by };
     }
-    const normalized = prompts.map(normalizePrompt);
+    let normalized = prompts.map(normalizePrompt);
+    if (!restoring) {
+      const acknowledgedIds = new Set(
+        (session.chat || []).map((entry) => normalizePromptId(entry?.prompt_id)).filter(Boolean),
+      );
+      normalized = normalized.filter(({ prompt }) => {
+        const promptId = normalizePromptId(prompt.prompt_id);
+        if (!promptId) return true;
+        if (acknowledgedIds.has(promptId)) return false;
+        acknowledgedIds.add(promptId);
+        return true;
+      });
+    }
     const normalizedPrompts = normalized.map((entry) => entry.prompt);
     // Resolve every attachment BEFORE mutating anything. If any prompt's images
     // can't be fully honored - malformed, an unknown id, or over the per-prompt
@@ -241,7 +253,8 @@ export class SessionStore {
       ? []
       : acceptedPrompts.map((prompt) => chatEntryForPrompt(prompt, at)).filter(Boolean);
     const existingPrompts = Array.isArray(session.prompts) ? session.prompts : [];
-    session.prompts = restoring ? [...acceptedPrompts, ...existingPrompts] : [...existingPrompts, ...acceptedPrompts];
+    const storedPrompts = restoring ? acceptedPrompts : acceptedPrompts.map(agentFacingPrompt);
+    session.prompts = restoring ? [...storedPrompts, ...existingPrompts] : [...existingPrompts, ...storedPrompts];
     session.chat = [...(session.chat || []), ...userMessages];
     if (restoring) {
       const restoredFailures = Array.isArray(payload.artifact_failures)
@@ -265,7 +278,7 @@ export class SessionStore {
     if (shouldEndSession) session.ended_by = "user";
     session.updated_at = new Date().toISOString();
     await this.writeState(state);
-    return session;
+    return { ...session, fresh_feedback: !restoring && acceptedPrompts.length > 0 };
   }
 
   async issueReviewerHandoff(key) {
@@ -705,11 +718,22 @@ function normalizePrompt(prompt) {
     tag: String(prompt.tag || ""),
     text: String(prompt.text || ""),
   };
+  const promptId = normalizePromptId(prompt.prompt_id);
+  if (promptId) normalized.prompt_id = promptId;
   const target = normalizeTarget(prompt.target);
   if (target) normalized.target = target;
   const { refs, malformed } = normalizeAttachmentRefs(prompt.attachments);
   if (refs.length > 0) normalized.attachments = refs;
   return { prompt: normalized, malformed };
+}
+
+// Settlement identity is transcript-owned. The agent-facing prompt list must not carry it:
+// poll output stays the reviewer's words, and a restore replay never re-appends chat.
+function agentFacingPrompt(prompt) {
+  if (!prompt || typeof prompt !== "object" || prompt.prompt_id === undefined) return prompt;
+  const rest = { ...prompt };
+  delete rest.prompt_id;
+  return rest;
 }
 
 function layoutWarningPromptIds(prompt) {
