@@ -101,7 +101,7 @@ function isModeToggleHotkeyEvent(event) {
 
 const frame = /** @type {HTMLIFrameElement} */ (document.getElementById("artifact"));
 const panelScroll = /** @type {HTMLDivElement} */ (document.getElementById("panelScroll"));
-const annotationPills = /** @type {HTMLDivElement} */ (document.getElementById("annotationPills"));
+const queuedLog = /** @type {HTMLDivElement} */ (document.getElementById("queuedLog"));
 const chatLog = /** @type {HTMLDivElement} */ (document.getElementById("chatLog"));
 const chatComposer = /** @type {HTMLDivElement} */ (document.getElementById("chatComposer"));
 const chatInput = /** @type {HTMLTextAreaElement} */ (document.getElementById("chatInput"));
@@ -213,14 +213,22 @@ const selectedWarningIds = new Set(loadJsonState(warningSelectionStorageKey, [])
 let warningsDrawerOpen = false;
 /** @typedef {{ done: Promise<boolean>, finish: (succeeded: boolean) => void }} FeedbackPreparation */
 /** @typedef {{ prompts: any[], inFlight: boolean, order: number }} TerminalSubmission */
-/** @type {Map<string, { action: "copy" | "submit", prompts?: any[], endAfter?: boolean, terminal?: TerminalSubmission | null, acknowledgement?: object, order?: number, timeout?: ReturnType<typeof setTimeout> }>} */
+/** @type {Map<string, { action: "copy" | "submit", prompts?: any[], chatAtRequest?: any[], endAfter?: boolean, terminal?: TerminalSubmission | null, acknowledgement?: object, order?: number, timeout?: ReturnType<typeof setTimeout> }>} */
 const snapshotRequests = new Map();
 let nextSnapshotRequestId = 0;
 let nextSendOperationOrder = 0;
 let workingBubble = null;
+let displayedChat = initialChat.slice();
+// If /prompts persisted a note but its response and chat-sync were lost, reload restores it as
+// queued and it can be re-sent as duplicate feedback. Durable settlement across reloads is tracked
+// by follow-up lavish-chat-panel-annotation-settle-durability-r1.
+const queuedTranscriptFloors = new WeakMap(queued.map((prompt) => [prompt, initialChat.length]));
 let submitQueuedPromise = null;
 const pendingSubmissions = [];
+/** @type {{ prompts?: any[] } | null} */
+let activeSubmission = null;
 const deliveredPrompts = new WeakSet();
+const attemptedPrompts = new WeakSet();
 const pendingAcknowledgements = new Set();
 /** @type {Set<FeedbackPreparation>} */
 const feedbackPreparations = new Set();
@@ -412,51 +420,150 @@ function persistTerminalReservation(reserved) {
   }
 }
 
-function promptTargetLabel(prompt) {
-  if (prompt?.target?.type === "table-cell") {
-    const semantic = [prompt.target.rowLabel, prompt.target.columnLabel].filter(Boolean).join(" → ");
-    if (semantic) return semantic;
+const REMOVE_ICON_SVG =
+  '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+const ANCHOR_EXCERPT_MAX = 120;
+const ANCHOR_SELECTOR_MAX = 512;
+const ANCHOR_LABEL_MAX = 40;
+
+function boundAnchorText(value, max) {
+  const text = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1) + "\u2026";
+}
+
+// What a queued note is attached to, in the annotation card's own words. This is the same rule
+// as the server's `chatEntryForPrompt` (src/chat-messages.js), which derives the anchor for the
+// note once it is sent: a queued prompt has not reached the server yet and this file cannot
+// import modules, so the rule is duplicated here and test/chrome-client-queue.test.js pins the
+// two against the same fixtures. A bubble must not change its anchor when it settles.
+function promptAnchor(prompt) {
+  const tag = String(prompt?.tag || "");
+  if (tag === "message") return null;
+  const target = prompt?.target && typeof prompt.target === "object" ? prompt.target : null;
+  const selector = boundAnchorText(prompt?.selector, ANCHOR_SELECTOR_MAX);
+  const withSelector = (anchor) => (selector ? { ...anchor, selector } : anchor);
+  if (tag === "whiteboard") {
+    const index = Number(target?.diagramIndex);
+    const excerpt = Number.isInteger(index) && index >= 0 ? "Diagram " + (index + 1) : prompt.text;
+    return { kind: "whiteboard", label: "whiteboard", excerpt: boundAnchorText(excerpt, ANCHOR_EXCERPT_MAX) };
   }
-  return String(prompt?.selector || "");
+  if (tag === "layout-warnings") {
+    const count = Array.isArray(target?.warnings) ? target.warnings.length : 0;
+    const excerpt = count > 0 ? count + (count === 1 ? " issue" : " issues") : prompt.text;
+    return { kind: "layout", label: "layout", excerpt: boundAnchorText(excerpt, ANCHOR_EXCERPT_MAX) };
+  }
+  const type = String(target?.type || "");
+  if (type === "text-range") {
+    return withSelector({
+      kind: "text",
+      label: "text",
+      excerpt: boundAnchorText(target.text || prompt.text, ANCHOR_EXCERPT_MAX),
+    });
+  }
+  if (type === "table-cell") {
+    const semantic = [target.rowLabel, target.columnLabel]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .join(" \u2192 ");
+    if (semantic)
+      return withSelector({ kind: "cell", label: "cell", excerpt: boundAnchorText(semantic, ANCHOR_EXCERPT_MAX) });
+  }
+  if (type === "mermaid-node") {
+    return withSelector({
+      kind: "node",
+      label: "node",
+      excerpt: boundAnchorText(target.label || prompt.text, ANCHOR_EXCERPT_MAX),
+    });
+  }
+  const elementTag = tag.trim();
+  if (!elementTag) return null;
+  return withSelector({
+    kind: "element",
+    label: boundAnchorText("<" + elementTag + ">", ANCHOR_LABEL_MAX),
+    excerpt: boundAnchorText(prompt.text, ANCHOR_EXCERPT_MAX),
+  });
+}
+
+// The anchor line: a mono chip naming the kind (`<h2>`, `text`, `cell`, ...) and a quoted
+// excerpt, with the full excerpt and selector on hover.
+function anchorHtml(anchor) {
+  if (!anchor || typeof anchor !== "object") return "";
+  const excerpt = String(anchor.excerpt || "");
+  const title = [excerpt, anchor.selector].filter(Boolean).join("\n");
+  return (
+    '<div class="anchor" title="' +
+    escapeHtml(title) +
+    '"><span class="anchor-kind">' +
+    escapeHtml(anchor.label || "") +
+    "</span>" +
+    (excerpt
+      ? '<span class="anchor-excerpt' +
+        (anchor.kind === "text" ? " text" : "") +
+        '">\u201C' +
+        escapeHtml(excerpt) +
+        "\u201D</span>"
+      : "") +
+    "</div>"
+  );
+}
+
+// What a note with images and no words says for itself. A queued prompt keeps its words in
+// `prompt` (`text` is the element's excerpt); a transcript entry keeps them in `text`.
+function attachmentOnlyText(entry) {
+  if (!attachmentCount(entry)) return "";
+  return entry.tag === "message" || entry.kind === "message" ? "Image message" : "Image annotation";
+}
+
+// A queued note is the user bubble in its not-yet-sent state: dashed, labelled Queued (Sending
+// while its batch is in flight), and removable until then. It settles in place as a sent bubble
+// once the server's transcript carries it, so nothing moves between regions.
+function queuedBubbleHtml(prompt, index) {
+  const sending = isPromptSending(prompt);
+  return (
+    '<div class="bubble user queued"><small>' +
+    (sending ? "Sending\u2026" : "Queued") +
+    ' <button class="queued-remove" type="button" aria-label="Remove queued prompt" data-index="' +
+    index +
+    '">' +
+    REMOVE_ICON_SVG +
+    "</button></small>" +
+    anchorHtml(promptAnchor(prompt)) +
+    '<div class="bubble-text">' +
+    escapeHtml(prompt.prompt || attachmentOnlyText(prompt)) +
+    "</div>" +
+    bubbleAttachmentsHtml(prompt) +
+    "</div>"
+  );
+}
+
+// Whether a queued prompt is committed to a send that has not been answered yet: waiting for its
+// snapshot, queued behind another submission, in flight, or held by the terminal reservation.
+// Derived from the existing send bookkeeping rather than tracked separately, so no failure path
+// can strand a note labelled Sending with its remove control disabled.
+function isPromptSending(prompt) {
+  if (terminalSubmission?.inFlight && terminalSubmission.prompts.includes(prompt)) return true;
+  for (const request of snapshotRequests.values()) {
+    if (request.action === "submit" && Array.isArray(request.prompts) && request.prompts.includes(prompt)) return true;
+  }
+  for (const submission of pendingSubmissions) {
+    if (Array.isArray(submission.prompts) && submission.prompts.includes(prompt)) return true;
+  }
+  return Boolean(
+    activeSubmission && Array.isArray(activeSubmission.prompts) && activeSubmission.prompts.includes(prompt),
+  );
 }
 
 function render() {
-  annotationPills.innerHTML = queued
-    .map((prompt, index) => {
-      const targetLabel = promptTargetLabel(prompt);
-      const showLocator = targetLabel && prompt.selector && targetLabel !== prompt.selector;
-      return (
-        '<div class="pill-wrap"><div class="pill"><span class="pill-preview">' +
-        escapeHtml(
-          prompt.prompt ||
-            (attachmentCount(prompt) ? (prompt.tag === "message" ? "Image message" : "Image annotation") : ""),
-        ) +
-        "</span>" +
-        pillAttachmentsHtml(prompt) +
-        '<button class="pill-close" type="button" aria-label="Remove queued prompt" data-index="' +
-        index +
-        '"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></div><div class="pill-tooltip">' +
-        (targetLabel
-          ? '<div class="tooltip-label">Target</div><div class="pill-tooltip-target">' +
-            escapeHtml(targetLabel) +
-            "</div>"
-          : "") +
-        (showLocator
-          ? '<div class="tooltip-label">Locator</div><div class="pill-tooltip-target">' +
-            escapeHtml(prompt.selector) +
-            "</div>"
-          : "") +
-        '<div class="tooltip-label">Prompt</div><div class="pill-tooltip-prompt">' +
-        escapeHtml(prompt.prompt) +
-        "</div></div></div>"
-      );
-    })
-    .join("");
+  queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
 
-  for (const button of annotationPills.querySelectorAll(".pill-close")) {
-    const closeButton = /** @type {HTMLButtonElement} */ (button);
-    closeButton.disabled = terminalSubmission !== null;
-    closeButton.addEventListener("click", (event) => removeQueuedPrompt(Number(closeButton.dataset.index), event));
+  for (const button of queuedLog.querySelectorAll(".queued-remove")) {
+    const removeButton = /** @type {HTMLButtonElement} */ (button);
+    const prompt = queued[Number(removeButton.dataset.index)];
+    removeButton.disabled = terminalSubmission !== null || isPromptSending(prompt);
+    removeButton.addEventListener("click", (event) => removeQueuedPrompt(Number(removeButton.dataset.index), event));
   }
   updateSendState();
   scrollPanelToBottom();
@@ -482,27 +589,26 @@ function attachmentCount(prompt) {
   return Array.isArray(prompt.attachments) ? prompt.attachments.length : 0;
 }
 
-// How many thumbnails the compact pill shows before the rest collapse into a badge.
-const PILL_THUMBNAIL_LIMIT = 4;
+// How many thumbnails a bubble shows before the rest collapse into a badge.
+const BUBBLE_THUMBNAIL_LIMIT = 4;
 
-// Thumbnails for a queued prompt's images, served straight from the same-origin
-// attachment endpoint (the ids are already server-vetted at upload time). The pill
-// has room for only a few, but the per-prompt cap is configurable
-// (LAVISH_AXI_MAX_ATTACHMENTS_PER_PROMPT), so a prompt can legitimately carry more
-// than fit: the remainder collapses into a +N badge rather than being dropped from
-// the preview, which would make the queue look like it lost the extra images (W-A).
-function pillAttachmentsHtml(prompt) {
-  const count = attachmentCount(prompt);
+// Thumbnails for a note's images, served straight from the same-origin attachment endpoint (the
+// ids are already server-vetted at upload time). The bubble has room for only a few, but the
+// per-prompt cap is configurable (LAVISH_AXI_MAX_ATTACHMENTS_PER_PROMPT), so a note can
+// legitimately carry more than fit: the remainder collapses into a +N badge rather than being
+// dropped from the preview, which would make the queue look like it lost the extra images (W-A).
+function bubbleAttachmentsHtml(entry) {
+  const count = attachmentCount(entry);
   if (!count) return "";
-  const hidden = count - PILL_THUMBNAIL_LIMIT;
+  const hidden = count - BUBBLE_THUMBNAIL_LIMIT;
   return (
-    '<span class="pill-attachments">' +
-    prompt.attachments
-      .slice(0, PILL_THUMBNAIL_LIMIT)
+    '<span class="bubble-attachments">' +
+    entry.attachments
+      .slice(0, BUBBLE_THUMBNAIL_LIMIT)
       .map((attachment) => {
         const alt = escapeHtml(attachment.name || "image");
         return (
-          '<img class="pill-attachment" src="/api/' +
+          '<img class="bubble-attachment" src="/api/' +
           encodeURIComponent(key) +
           "/attachments/" +
           encodeURIComponent(attachment.id) +
@@ -515,7 +621,7 @@ function pillAttachmentsHtml(prompt) {
       })
       .join("") +
     (hidden > 0
-      ? '<span class="pill-attachment-more" title="' +
+      ? '<span class="bubble-attachment-more" title="' +
         hidden +
         " more image" +
         (hidden === 1 ? "" : "s") +
@@ -526,6 +632,24 @@ function pillAttachmentsHtml(prompt) {
     "</span>"
   );
 }
+
+function replaceExpiredThumbnail(event) {
+  const image = event.target;
+  if (
+    String(image?.tagName || "").toUpperCase() !== "IMG" ||
+    !String(image.className || "")
+      .split(/\s+/)
+      .includes("bubble-attachment")
+  )
+    return;
+  const expired = document.createElement("span");
+  expired.className = "bubble-attachment bubble-attachment-expired";
+  expired.textContent = "Image expired";
+  expired.title = String(image.alt || "image");
+  image.replaceWith(expired);
+}
+
+chatLog.addEventListener("error", replaceExpiredThumbnail, true);
 
 const DEFAULT_SEND_HINT = "Write a message or annotate an element first.";
 
@@ -635,24 +759,158 @@ async function copyText(text) {
   return true;
 }
 
-function addChat(role, text, shouldScroll = true) {
-  if (!text) return;
+// One transcript entry, as the server serialized it (src/chat-messages.js). An agent entry's
+// `html` is the server's rendering of the agent's text and is the only html ever set here; a
+// user entry is always escaped text, with its anchor line and thumbnails when it carries them.
+function chatBubbleHtml(entry) {
+  if (entry.role === "agent") {
+    return (
+      "<small>Agent</small>" +
+      (typeof entry.html === "string" && entry.html
+        ? '<div class="chat-md">' + entry.html + "</div>"
+        : '<div class="bubble-text">' + escapeHtml(entry.text) + "</div>")
+    );
+  }
+  return (
+    "<small>You</small>" +
+    anchorHtml(entry.anchor) +
+    '<div class="bubble-text">' +
+    escapeHtml(entry.text || attachmentOnlyText(entry)) +
+    "</div>" +
+    bubbleAttachmentsHtml(entry)
+  );
+}
+
+function addChat(entry, shouldScroll = true) {
+  if (!entry || typeof entry !== "object") return;
+  const role = entry.role === "agent" ? "agent" : "user";
+  const text = String(entry.text || "");
+  if (!text && !(role === "agent" ? entry.html : attachmentCount(entry))) return;
 
   const el = document.createElement("div");
   el.className = "bubble " + role;
-  el.innerHTML = "<small>" + (role === "agent" ? "Agent" : "You") + "</small><div>" + escapeHtml(text) + "</div>";
+  el.innerHTML = chatBubbleHtml({ ...entry, role, text });
   chatLog.appendChild(el);
   if (shouldScroll) scrollElementIntoView(el);
   return el;
 }
 
+function chatEntryDisplayKey(entry) {
+  return JSON.stringify({
+    role: entry?.role === "agent" ? "agent" : "user",
+    kind: entry?.kind,
+    text: String(entry?.text || ""),
+    anchor: entry?.anchor,
+    attachments: Array.isArray(entry?.attachments) ? entry.attachments.map((item) => String(item?.id || "")) : [],
+  });
+}
+
+function chatEntriesMatch(left, right) {
+  if (chatEntryDisplayKey(left) !== chatEntryDisplayKey(right)) return false;
+  const leftAt = String(left?.at || "");
+  const rightAt = String(right?.at || "");
+  return !leftAt || !rightAt || leftAt === rightAt;
+}
+
+function chatContainsEntries(candidate, entries) {
+  if (candidate.length < entries.length) return false;
+  let matched = 0;
+  for (const entry of candidate) {
+    if (matched < entries.length && chatEntriesMatch(entry, entries[matched])) matched += 1;
+  }
+  return matched === entries.length;
+}
+
+function chatStartsWith(candidate, prefix) {
+  return (
+    Array.isArray(candidate) &&
+    Array.isArray(prefix) &&
+    candidate.length >= prefix.length &&
+    prefix.every((entry, index) => chatEntriesMatch(candidate[index], entry))
+  );
+}
+
+function mergeAcceptedChat(accepted, chatAtRequest) {
+  if (!chatStartsWith(accepted, chatAtRequest) || !chatStartsWith(displayedChat, chatAtRequest)) return null;
+  const displayedTail = displayedChat.slice(chatAtRequest.length);
+  const unmatchedDisplayed = [];
+  let acceptedIndex = chatAtRequest.length;
+  for (const displayedEntry of displayedTail) {
+    while (acceptedIndex < accepted.length && !chatEntriesMatch(accepted[acceptedIndex], displayedEntry)) {
+      acceptedIndex += 1;
+    }
+    if (acceptedIndex < accepted.length) {
+      acceptedIndex += 1;
+    } else {
+      unmatchedDisplayed.push(displayedEntry);
+    }
+  }
+  return accepted.concat(unmatchedDisplayed);
+}
+
+function queuedPromptKind(prompt) {
+  const tag = String(prompt?.tag || "");
+  if (tag === "message" || tag === "whiteboard" || tag === "layout-warnings") return tag;
+  return "annotation";
+}
+
+function queuedPromptMatchesEntry(prompt, entry) {
+  if (entry?.role !== "user") return false;
+  if (queuedPromptKind(prompt) !== String(entry.kind || "message")) return false;
+  if (String(prompt?.prompt || "") !== String(entry.text || "")) return false;
+  if (JSON.stringify(promptAnchor(prompt)) !== JSON.stringify(entry.anchor || null)) return false;
+  const promptAttachments = Array.isArray(prompt?.attachments)
+    ? prompt.attachments.map((item) => String(item?.id || ""))
+    : [];
+  const entryAttachments = Array.isArray(entry.attachments)
+    ? entry.attachments.map((item) => String(item?.id || ""))
+    : [];
+  return JSON.stringify(promptAttachments) === JSON.stringify(entryAttachments);
+}
+
+function settleQueuedFromTranscript(chat, shouldRender = true) {
+  if (!Array.isArray(chat) || !queued.length) return false;
+  // Distinct feedback can be dropped only when multiple tabs send notes with the same chat
+  // projection but different range boundaries. Durable identity is tracked by follow-up
+  // lavish-chat-panel-annotation-settle-durability-r1.
+  const matchedEntries = new Set();
+  const settledPrompts = new Set();
+  for (const prompt of queued) {
+    if (!attemptedPrompts.has(prompt)) continue;
+    const floor = Math.min(queuedTranscriptFloors.get(prompt) || 0, chat.length);
+    const entryIndex = chat.findIndex(
+      (entry, index) => index >= floor && !matchedEntries.has(index) && queuedPromptMatchesEntry(prompt, entry),
+    );
+    if (entryIndex === -1) continue;
+    matchedEntries.add(entryIndex);
+    settledPrompts.add(prompt);
+    deliveredPrompts.add(prompt);
+  }
+  for (const prompt of queued) {
+    if (!settledPrompts.has(prompt)) {
+      queuedTranscriptFloors.set(prompt, Math.max(queuedTranscriptFloors.get(prompt) || 0, chat.length));
+    }
+  }
+  if (!settledPrompts.size) return false;
+  for (let i = queued.length - 1; i >= 0; i -= 1) {
+    if (settledPrompts.has(queued[i])) queued.splice(i, 1);
+  }
+  persistQueuedPrompts();
+  if (shouldRender) render();
+  return true;
+}
+
 function syncChat(chat) {
+  const nextChat = Array.isArray(chat) ? chat : [];
+  if (!chatContainsEntries(nextChat, displayedChat)) return false;
+  settleQueuedFromTranscript(nextChat);
+  displayedChat = nextChat.slice();
   for (const el of [...chatLog.querySelectorAll(".bubble.user,.bubble.agent:not(.agent-working)")]) {
     el.remove();
   }
 
   let lastChatBubble = null;
-  for (const item of chat) lastChatBubble = addChat(item.role, item.text, false) || lastChatBubble;
+  for (const item of nextChat) lastChatBubble = addChat(item, false) || lastChatBubble;
   if (workingBubble) chatLog.appendChild(workingBubble);
   // Handed-back drafts were written at the end of the conversation, and a rebuild re-appends the
   // whole transcript - so without this they end up above it, where the scroll below would leave
@@ -660,6 +918,7 @@ function syncChat(chat) {
   for (const note of retiredDraftNodes) chatLog.appendChild(note);
   const anchor = retiredDraftNodes[retiredDraftNodes.length - 1] || workingBubble || lastChatBubble;
   if (anchor) scrollElementIntoView(anchor);
+  return true;
 }
 
 function setAgentPresence(state) {
@@ -1006,7 +1265,7 @@ function scrollElementIntoView(el) {
 
 function removeQueuedPrompt(index, event) {
   if (event) event.stopPropagation();
-  if (terminalSubmission) return;
+  if (terminalSubmission || isPromptSending(queued[index])) return;
   queued.splice(index, 1);
   persistQueuedPrompts();
   if (!queued.length) {
@@ -1054,6 +1313,7 @@ function enqueuePrompt(rawPrompt, /** @type {FeedbackPreparation | null} */ prep
   } else {
     queued.push(prompt);
   }
+  queuedTranscriptFloors.set(prompt, displayedChat.length);
 
   persistQueuedPrompts();
   render();
@@ -1075,10 +1335,18 @@ function requestSnapshot(action, prompts = [], endAfter = false, terminal = null
   const requestId = "snapshot-" + ++nextSnapshotRequestId;
   const request =
     action === "submit"
-      ? { action, prompts, endAfter, terminal, order: terminal?.order || ++nextSendOperationOrder }
+      ? {
+          action,
+          prompts,
+          chatAtRequest: displayedChat.slice(),
+          endAfter,
+          terminal,
+          order: terminal?.order || ++nextSendOperationOrder,
+        }
       : { action };
   snapshotRequests.set(requestId, request);
   if (action === "submit") {
+    for (const prompt of prompts) attemptedPrompts.add(prompt);
     request.acknowledgement = {};
     pendingAcknowledgements.add(request.acknowledgement);
     armSendAcknowledgementWarning();
@@ -1105,6 +1373,7 @@ function completeSnapshotRequest(requestId, snapshot) {
 
   submitQueued({
     prompts: request.prompts || [],
+    chatAtRequest: request.chatAtRequest || [],
     domSnapshot: snapshot || "",
     endAfter: request.endAfter === true,
     terminal: request.terminal || null,
@@ -1334,11 +1603,12 @@ function sendQueued(endAfter) {
       const prompt = { uid: "", prompt: text, selector: "", tag: "message", text: "Freeform message" };
       if (attachments.length) prompt.attachments = attachments;
       queued.push(prompt);
+      queuedTranscriptFloors.set(prompt, displayedChat.length);
       persistQueuedPrompts();
-      // Render the durable queue pill before clearing the editor. If anything after this point
-      // fails, the user's words are already both stored and visibly recoverable in the tab.
+      // Render the durable queued bubble before clearing the editor. If anything after this point
+      // fails, the user's words are already both stored and visibly recoverable in the tab. It
+      // becomes a sent bubble only when the server's transcript carries it (see submitQueuedOnce).
       render();
-      addChat("user", text || "Image message");
       chatInput.value = "";
       chatAttachmentController.reset();
     }
@@ -1362,6 +1632,7 @@ function sendQueued(endAfter) {
     return;
   }
   requestSnapshot("submit", queued.slice(), false, null);
+  render();
 }
 
 function finishTerminalPreparation(terminal, preparations) {
@@ -1403,6 +1674,7 @@ function completeTerminalPreparation(terminal, results) {
   // an incomplete terminal submission.
   persistTerminalReservation(true);
   requestSnapshot("submit", terminal.prompts, true, terminal);
+  render();
 }
 
 function retryTerminalSubmission() {
@@ -1410,6 +1682,7 @@ function retryTerminalSubmission() {
   terminalSubmission.inFlight = true;
   updateSendState();
   requestSnapshot("submit", terminalSubmission.prompts, true, terminalSubmission);
+  render();
 }
 
 function markTerminalSubmissionFailed(submission) {
@@ -1426,6 +1699,8 @@ function releaseTerminalSubmission(terminal) {
 }
 
 async function submitQueued(submission) {
+  if (!Array.isArray(submission.chatAtRequest)) submission.chatAtRequest = displayedChat.slice();
+  for (const prompt of submission.prompts) attemptedPrompts.add(prompt);
   pendingSubmissions.push(submission);
   if (submitQueuedPromise) {
     return submitQueuedPromise;
@@ -1437,6 +1712,7 @@ async function submitQueued(submission) {
     while (pendingSubmissions.length && !ended) {
       const next = pendingSubmissions.shift();
       if (!next) continue;
+      activeSubmission = next;
       try {
         const result = await submitQueuedOnce(next, firstError !== null);
         if (result === false) markTerminalSubmissionFailed(next);
@@ -1445,6 +1721,10 @@ async function submitQueued(submission) {
         if (firstError === null) firstError = error;
       } finally {
         if (next.acknowledgement) pendingAcknowledgements.delete(next.acknowledgement);
+        activeSubmission = null;
+        // Whatever happened, the batch is no longer in flight: a failed note reads Queued again
+        // with its remove control back.
+        render();
       }
     }
     if (firstError !== null) throw firstError;
@@ -1457,6 +1737,7 @@ async function submitQueued(submission) {
 }
 
 async function submitQueuedOnce(submission, preserveFailureState = false) {
+  settleQueuedFromTranscript(displayedChat);
   const prompts = submission.prompts.filter((prompt) => !deliveredPrompts.has(prompt));
   const shouldEndSession = submission.endAfter;
   if (!prompts.length) {
@@ -1553,12 +1834,19 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
     }
     throw new Error("failed to submit queued prompts");
   }
-  for (const prompt of prompts) {
-    deliveredPrompts.add(prompt);
-    const index = queued.indexOf(prompt);
-    if (index !== -1) queued.splice(index, 1);
+  const accepted = typeof response.json === "function" ? await response.json().catch(() => null) : null;
+  const reconciledChat = Array.isArray(accepted?.chat)
+    ? mergeAcceptedChat(accepted.chat, submission.chatAtRequest)
+    : null;
+  if (!Array.isArray(accepted?.chat) || reconciledChat) {
+    for (const prompt of prompts) {
+      deliveredPrompts.add(prompt);
+      const index = queued.indexOf(prompt);
+      if (index !== -1) queued.splice(index, 1);
+    }
+    persistQueuedPrompts();
+    if (reconciledChat) syncChat(reconciledChat);
   }
-  persistQueuedPrompts();
   render();
   settleAcknowledgementGuidance(submission, preserveFailureState);
   if (shouldEndSession) {
@@ -3674,9 +3962,15 @@ events.set("chrome-reload", (data) => reloadAfterServerRestart(String(data.reaso
 // The replacement server serves a different artifact's review. This page keeps working against
 // it; it is only running the previous version of the chrome, which is the user's to act on.
 events.set("chrome-outdated", (data) => setChromeOutdated(true, String(data.reason || "")));
-events.set("agent-reply", ({ text }) => {
-  addChat("agent", text);
-  noteAgentReply(text);
+events.set("agent-reply", (data) => {
+  const entry = {
+    ...data,
+    role: "agent",
+    text: String(data.text || ""),
+    ...(data.at ? { at: String(data.at) } : {}),
+  };
+  if (addChat(entry)) displayedChat.push(entry);
+  noteAgentReply(entry.text);
 });
 events.set("chat-sync", (data) => syncChat(data.chat || []));
 events.set("agent-presence", (data) => setAgentPresence(data.state));
@@ -3689,7 +3983,7 @@ render();
 setChromeOutdated(false);
 setWarningsDrawerOpen(false);
 renderWarnings();
-initialChat.forEach((item) => addChat(item.role, item.text));
+initialChat.forEach((item) => addChat(item));
 retiredDrafts.forEach((text) => renderRetiredDraft(text));
 setAgentPresence("waiting");
 // The session already ended before this page (re)loaded, so there is no future live `ended` event
