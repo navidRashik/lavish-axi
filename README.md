@@ -266,7 +266,7 @@ pnpm link
 | `lavish-axi setup plugin`       | Register the installed package as an [Agent Plugin](https://agent-plugins.org) in VS Code, Cursor, and GitHub Copilot CLI; opt-in, idempotent, no marketplace involved. Reload each client afterward.                                                                                                                                                     |
 | `lavish-axi server`             | Run the local Lavish Editor server.                                                                                                                                                                                                                                                                                                                       |
 
-Known playbook IDs: `diagram`, `table`, `comparison`, `plan`, `code`, `input`, `slides`.
+Known playbook IDs: `diagram`, `table`, `comparison`, `plan`, `code`, `input`, `explanation`, `slides`.
 One artifact often combines several playbooks, such as a plan that includes a comparison and a diagram, so agents must match against each `use_when` trigger and open every matching playbook before writing HTML.
 For flows, architecture, state, or sequence diagrams, open the diagram playbook for the recommended tooling and SVG guidance.
 
