@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.72](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.71...lavish-axi-v0.1.72) (2026-09-17)
+
+
+### Features
+
+* **playbooks:** add explanation playbook for existing systems ([#347](https://github.com/kunchenguid/lavish-axi/issues/347)) ([a3504db](https://github.com/kunchenguid/lavish-axi/commit/a3504db27f00aef1a8d6413a7a3db637833bf603))
+
 ## [0.1.71](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.70...lavish-axi-v0.1.71) (2026-09-16)
 
 
