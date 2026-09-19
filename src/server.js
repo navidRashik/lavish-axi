@@ -53,6 +53,8 @@ import {
 } from "./export-bundle.js";
 import { hostRejectedShareWrite, publishedDespiteError, publishToHtmlApp } from "./html-app.js";
 import { serializeChat, serializeChatAckIds, serializeChatSync } from "./chat-messages.js";
+import { isLocalAddressPresent } from "./local-address.js";
+import { formatServerLogLine, serverStdioIsTimestamped } from "./server-log.js";
 import { injectLavishSdk } from "./html-transform.js";
 import {
   bindHost,
@@ -103,8 +105,16 @@ const designAssetUrls = {
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WHITEBOARD_CHANNEL_TOKEN_TTL_MS = 5 * 60_000;
 const NETWORK_RECONCILE_CACHE_MS = 1_000;
-const TAILSCALE_BIND_RETRY_DELAYS_MS = [100, 250, 500];
+// Every concrete address gets this retry budget, not just the Tailscale one: an interface that is
+// still coming up fails the same way whichever host names it, and the single-pinned-host case has
+// no second listener to fall back on.
+const BIND_RETRY_DELAYS_MS = [100, 250, 500];
 const WEBSOCKET_CLOSE_GRACE_MS = 250;
+// A half-open socket (a slept laptop, a dropped tailnet path) never emits `close`, so without an
+// application-level ping the server keeps counting a reviewer who is gone - which silently
+// suppresses idle shutdown and makes presence wrong. Reaped on the next heartbeat after one
+// unanswered ping.
+const LIVE_EVENT_HEARTBEAT_MS = 30_000;
 const BROWSER_DISCONNECT_GRACE_MS = 10_000;
 // An escaped popup can navigate to an artifact-owned HTML or SVG asset on the
 // server origin. Keep every artifact response sandboxed at the response layer
@@ -262,6 +272,7 @@ export async function serve({
   debug = false,
   log = null,
   pollHeartbeatMs = 15_000,
+  liveEventHeartbeatMs = LIVE_EVENT_HEARTBEAT_MS,
   browserDisconnectGraceMs = BROWSER_DISCONNECT_GRACE_MS,
   idleTimeoutMs = resolveIdleTimeoutMs(),
   host = bindHost(env),
@@ -287,6 +298,7 @@ export async function serve({
   });
   const activeTailscaleNetwork = tailscaleNetworkKey(tailscale);
   let tailscalePhoneReady = false;
+  const absentRequestedHosts = [];
   let networkWarning = typeof tailscale?.warning === "string" ? tailscale.warning : "";
   let resolvedLinkHost = linkHostName ?? resolveLinkHost({ env, tailscale, fallbackHost: host });
   const app = express();
@@ -305,7 +317,12 @@ export async function serve({
   const outstandingRepairBatches = new Set();
   const diagnosticViewportClasses = resolveDiagnosticViewportClasses();
   const verbose = debug || env.LAVISH_AXI_DEBUG === "1";
-  const writeLog = typeof log === "function" ? log : (line) => process.stderr.write(`${line}\n`);
+  // The detached server's stderr is appended to server.log across restarts, where an untimestamped
+  // line cannot be dated or correlated with an outage. An injected logger formats its own lines.
+  const writeLog =
+    typeof log === "function"
+      ? log
+      : (line) => process.stderr.write(`${serverStdioIsTimestamped() ? line : formatServerLogLine(line)}\n`);
   const logEvent = verbose ? (line) => writeLog(`[lavish] ${line}`) : null;
   if (networkWarning) writeLog(`[lavish] WARNING: ${networkWarning}`);
   let publicPort = port;
@@ -385,6 +402,16 @@ export async function serve({
     client.sendEvent("agent-presence", { state: computePresence(key, activePolls, deliveredFeedback) });
     // A connection that attaches after the live end event still needs the terminal snapshot.
     if (session?.status === "ended") client.sendEvent("ended", { ended_by: session.ended_by || null });
+  }
+
+  function requestedBindIsRecoverable() {
+    return absentRequestedHosts.some((listenHost) => isLocalAddressPresent(listenHost));
+  }
+
+  async function reconcileNetwork() {
+    if (requestedBindIsRecoverable()) return true;
+    if (!(autoTailscale && typeof detect === "function")) return false;
+    return reconcileTailscaleNetwork();
   }
 
   async function reconcileTailscaleNetwork() {
@@ -613,10 +640,7 @@ export async function serve({
       res.status(503).json({ ok: false, app: "lavish-axi", version });
       return;
     }
-    const networkStale =
-      req.query.reconcile_network === "1" && autoTailscale && typeof detect === "function"
-        ? await reconcileTailscaleNetwork()
-        : false;
+    const networkStale = req.query.reconcile_network === "1" ? await reconcileNetwork() : false;
     res.json({
       ok: true,
       app: "lavish-axi",
@@ -640,7 +664,7 @@ export async function serve({
     const reason = SHUTDOWN_REASONS.has(String(req.body?.reason || "")) ? String(req.body.reason) : "";
     res.json({ status: "shutting-down" });
     // Defer until after the response flushes so the client gets confirmation.
-    setImmediate(() => shutdown(reloadKey, reason));
+    setImmediate(() => shutdown(reloadKey, reason, "shutdown-request"));
   });
 
   app.post("/api/sessions", async (req, res, next) => {
@@ -1668,6 +1692,31 @@ export async function serve({
         },
       };
       webSocket.on("error", () => {});
+      // Liveness, not latency: a reviewer whose machine slept leaves a socket that never emits
+      // `close`, so only an unanswered ping proves they are gone. `terminate()` emits `close`,
+      // which runs the same cleanup a graceful disconnect does - dropping the client from
+      // liveEventClients and re-arming the idle timer.
+      if (liveEventHeartbeatMs != null && liveEventHeartbeatMs > 0) {
+        let awaitingPong = false;
+        const heartbeat = setInterval(() => {
+          if (awaitingPong) {
+            logEvent?.(`event WebSocket heartbeat missed session=${key}, terminating`);
+            webSocket.terminate();
+            return;
+          }
+          awaitingPong = true;
+          try {
+            webSocket.ping();
+          } catch {
+            webSocket.terminate();
+          }
+        }, liveEventHeartbeatMs);
+        heartbeat.unref?.();
+        webSocket.on("pong", () => {
+          awaitingPong = false;
+        });
+        webSocket.once("close", () => clearInterval(heartbeat));
+      }
       const cleanup = attachLiveEventClient(client, key, (remove) => webSocket.once("close", remove));
       sendInitialLiveEventState(client, key, cleanup).catch((error) => {
         client.close(1011, "Failed to initialize live events");
@@ -1680,8 +1729,13 @@ export async function serve({
   const httpServers = [];
   const boundHosts = [];
   let boundPort = port;
-  for (const listenHost of listenHosts) {
-    const retryDelays = listenHost === tailscale?.ipv4 ? TAILSCALE_BIND_RETRY_DELAYS_MS : [];
+  let lastBindError = null;
+
+  // Bind one address, retrying a transient failure. Whether anything else has bound yet is
+  // deliberately NOT consulted here: that check used to run before the retry, which made both the
+  // retry and the loopback fallback unreachable whenever the first (or only) host failed - exactly
+  // the single pinned-host case, where the process then exited with no listener at all.
+  async function bindListener(listenHost) {
     let retryIndex = 0;
     while (true) {
       try {
@@ -1690,26 +1744,74 @@ export async function serve({
         if (boundPort === 0) boundPort = httpServer.address().port;
         httpServers.push(httpServer);
         boundHosts.push(listenHost);
-        break;
+        return null;
       } catch (error) {
-        if (httpServers.length === 0) throw error;
-        if (retryIndex < retryDelays.length) {
-          await new Promise((resolve) => setTimeout(resolve, retryDelays[retryIndex]));
+        if (retryIndex < BIND_RETRY_DELAYS_MS.length) {
+          await new Promise((resolve) => setTimeout(resolve, BIND_RETRY_DELAYS_MS[retryIndex]));
           retryIndex += 1;
           continue;
         }
-        if (listenHost === tailscale?.ipv4) {
-          networkWarning = "Tailscale binding failed; there is no phone access. Lavish remains available on loopback.";
-          writeLog(`[lavish] WARNING: ${networkWarning} Address: ${listenHost}:${boundPort}.`);
-        } else {
-          logEvent?.(`failed to bind ${listenHost}:${boundPort}: ${error instanceof Error ? error.message : error}`);
-        }
-        break;
+        return error instanceof Error ? error : new Error(String(error));
       }
     }
   }
+
+  for (const listenHost of listenHosts) {
+    const error = await bindListener(listenHost);
+    if (!error) continue;
+    lastBindError = error;
+    if (isAddressAbsentBindError(error)) absentRequestedHosts.push(listenHost);
+    if (listenHost === tailscale?.ipv4) {
+      networkWarning = "Tailscale binding failed; there is no phone access. Lavish remains available on loopback.";
+      writeLog(`[lavish] WARNING: ${networkWarning} Address: ${listenHost}:${boundPort}.`);
+    } else {
+      logEvent?.(`failed to bind ${listenHost}:${boundPort}: ${error.message}`);
+    }
+  }
+
+  // Loopback floor. A server that cannot reach its requested address is still far more useful on
+  // loopback than absent: the local agent CLI keeps working, and the next invocation finds THIS
+  // server instead of spawning a duplicate beside it. Only reached when nothing else bound, so a
+  // healthy multi-listener startup is untouched.
+  let loopbackFallback = false;
+  if (httpServers.length === 0 && !listenHosts.includes(LOOPBACK_HOST)) {
+    const error = await bindListener(LOOPBACK_HOST);
+    if (error) {
+      lastBindError = error;
+    } else {
+      loopbackFallback = true;
+      networkWarning = `Could not bind ${listenHosts.join(", ")}; Lavish fell back to loopback and is not reachable at that address.`;
+      writeLog(`[lavish] WARNING: ${networkWarning} Address: ${listenHosts[0]}:${boundPort}.`);
+    }
+  }
   if (httpServers.length === 0) {
-    throw new Error("Lavish server failed to bind any address");
+    throw new Error(
+      `Lavish server failed to bind any address${lastBindError ? `: ${lastBindError.message}` : ""}`,
+      lastBindError ? { cause: lastBindError } : undefined,
+    );
+  }
+  // The CLI control channel only probes the primary requested host and loopback. A process that
+  // bound neither is alive and unreachable, so close every listener already taken in this call.
+  if (!boundHosts.includes(LOOPBACK_HOST) && !boundHosts.includes(listenHosts[0])) {
+    const error = new Error(
+      `Lavish server failed to bind a control-channel address${lastBindError ? `: ${lastBindError.message}` : ""}`,
+      lastBindError ? { cause: lastBindError } : undefined,
+    );
+    await Promise.all(
+      httpServers.splice(0).map(
+        (httpServer) =>
+          new Promise((resolve) => {
+            httpServer.close(() => resolve(undefined));
+          }),
+      ),
+    );
+    boundHosts.length = 0;
+    throw error;
+  }
+  // Session URLs must name somewhere that is actually listening, so a fallback moves the link host
+  // to loopback unless the operator named one explicitly.
+  if (loopbackFallback) {
+    resolvedLinkHost = linkHostName ?? resolveLinkHost({ env, tailscale: null, fallbackHost: LOOPBACK_HOST });
   }
   tailscalePhoneReady = Boolean(tailscale?.ipv4 && boundHosts.includes(tailscale.ipv4));
   if (tailscale?.ipv4 && !tailscalePhoneReady) {
@@ -1726,9 +1828,13 @@ export async function serve({
   publicPort = httpServers[0].address().port;
   serverReady = true;
 
-  function shutdown(reloadKey = "", reason = "") {
+  // `cause` is log-only and never reaches a chrome: `reason` is the user-facing SHUTDOWN_REASONS
+  // value, and widening it here would let an internal cause render as a banner line that claims
+  // something untrue. Without the log line, server.log records an exit with no explanation at all.
+  function shutdown(reloadKey = "", reason = "", cause = "requested") {
     if (shuttingDown) return;
     shuttingDown = true;
+    writeLog(`[lavish] shutting down: ${cause}${reason ? ` (reason=${reason})` : ""}`);
     if (idleTimer) {
       clearTimeout(idleTimer);
       idleTimer = null;
@@ -1790,8 +1896,7 @@ export async function serve({
     idleTimer = setTimeout(() => {
       idleTimer = null;
       if (!shuttingDown && liveEventClients.size === 0 && activePolls.size === 0) {
-        logEvent?.(`idle for ${idleTimeoutMs}ms with no connections, shutting down`);
-        shutdown();
+        shutdown("", "", `idle-timeout after ${idleTimeoutMs}ms with no connections`);
       }
     }, idleTimeoutMs);
     idleTimer.unref?.();
@@ -1807,8 +1912,7 @@ export async function serve({
     try {
       const sessions = await store.listSessions();
       if (sessions.every((session) => session.status === "ended")) {
-        logEvent?.("last open session ended with no live connections, shutting down");
-        setImmediate(shutdown);
+        setImmediate(() => shutdown("", "", "last open session ended with no live connections"));
       }
     } catch {
       // ignore - the idle timer remains as a backstop
@@ -1877,7 +1981,7 @@ export async function serve({
     hosts: boundHosts,
     addresses: httpServers.map((server) => server.address()),
     close: async () => {
-      shutdown();
+      shutdown("", "", "close() called");
       await done;
     },
     done,
@@ -1914,6 +2018,10 @@ function tailscaleNetworkKey(tailscale) {
   if (tailscale.warning) return "incomplete";
   if (!tailscale.ipv4 || !tailscale.magicDnsName) return "incomplete";
   return `up\n${tailscale.ipv4}\n${tailscale.magicDnsName}`;
+}
+
+function isAddressAbsentBindError(error) {
+  return error instanceof Error && "code" in error && error.code === "EADDRNOTAVAIL";
 }
 
 function wantsHtml(req) {

@@ -31,7 +31,15 @@ import {
   publishToHtmlApp,
   updateHtmlApp,
 } from "./html-app.js";
-import { clientHost, defaultPort, ensureStateDir, hostForUrl, serverLogFile, stateFile } from "./paths.js";
+import {
+  clientHost,
+  defaultPort,
+  ensureStateDir,
+  hostForUrl,
+  LOOPBACK_HOST,
+  serverLogFile,
+  stateFile,
+} from "./paths.js";
 import {
   computeVsCodePluginLocationsUpdate,
   linkCursorLocalPlugin,
@@ -1106,7 +1114,9 @@ function generatedPasswordNote(password) {
 // session), this stops the background process so it stops dangling between sessions.
 export async function stopCommand(args) {
   const port = Number(flagValue(args, "--port") || defaultPort());
-  const baseUrl = `http://${hostForUrl(clientHost())}:${port}`;
+  // A server that fell back to loopback answers there rather than at the requested bind host, and
+  // a `stop` that only dials the requested host reports "not-running" while leaving it running.
+  const { baseUrl } = await findRunningServer(port);
   return shutdownServerOnPort(port, { baseUrl, currentVersion: VERSION });
 }
 
@@ -1537,12 +1547,57 @@ function isHtmlPath(file) {
   return file.toLowerCase().endsWith(".html") || file.toLowerCase().endsWith(".htm");
 }
 
+// A server that could not bind its requested address falls back to loopback (see `serve()`), so
+// the control channel has to look there too. Without this the CLI reports "did not start" for a
+// server that IS running, and the next invocation spawns a duplicate daemon beside it.
+function serverBaseUrls(port) {
+  const urls = [`http://${hostForUrl(clientHost())}:${port}`];
+  const loopback = `http://${hostForUrl(LOOPBACK_HOST)}:${port}`;
+  if (!urls.includes(loopback)) urls.push(loopback);
+  return urls;
+}
+
+const HEALTH_PROBE_TIMEOUT_MS = 500;
+
+// Returns where a Lavish server actually answered. Each candidate probe is bounded so a hanging
+// requested address cannot mask loopback, and a response whose app is lavish-axi wins over a
+// foreign /health. When nothing answers, the primary URL is still returned so callers have
+// something to spawn against and report.
+async function findRunningServer(port, { reconcileNetwork = false } = {}) {
+  const candidates = serverBaseUrls(port);
+  let foreign = null;
+  for (const baseUrl of candidates) {
+    const health = await probeHealth(baseUrl, { reconcileNetwork, timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
+    if (!health) continue;
+    if (health.app === "lavish-axi") return { baseUrl, health };
+    if (!foreign) foreign = { baseUrl, health };
+  }
+  return foreign ?? { baseUrl: candidates[0], health: null };
+}
+
+async function probeHealth(baseUrl, { reconcileNetwork, timeoutMs }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const health = await Promise.race([
+      Promise.resolve()
+        .then(() => fetchHealth(baseUrl, { reconcileNetwork, timeoutMs, signal: controller.signal }))
+        .catch(() => null),
+      new Promise((resolve) => {
+        controller.signal.addEventListener("abort", () => resolve(null), { once: true });
+      }),
+    ]);
+    return health && typeof health === "object" ? health : null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // `reloadKey` names the session this invocation is about to open. A version-driven replacement
 // reloads that chrome only; every other open review page is told it is outdated and left alone.
 async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
   const port = defaultPort();
-  const baseUrl = `http://${hostForUrl(clientHost())}:${port}`;
-  const existing = await fetchHealth(baseUrl, { reconcileNetwork: true });
+  const { baseUrl, health: existing } = await findRunningServer(port, { reconcileNetwork: true });
   if (existing && !shouldRestartServer(VERSION, existing, forceRestart)) {
     return baseUrl;
   }
@@ -1567,15 +1622,22 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
     }
   }
   await startServer(port);
-  let networkRestarted = false;
+  const replacedForNetwork =
+    Boolean(existing) &&
+    existing.app === "lavish-axi" &&
+    existing.network_stale === true &&
+    !forceRestart &&
+    typeof existing.version === "string" &&
+    existing.version === VERSION;
+  let networkRestarted = replacedForNetwork;
   let deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
-    const health = await fetchHealth(baseUrl, { reconcileNetwork: true });
-    if (health && !shouldRestartServer(VERSION, health)) return baseUrl;
+    const { baseUrl: liveUrl, health } = await findRunningServer(port, { reconcileNetwork: true });
+    if (health && !shouldRestartServer(VERSION, health)) return liveUrl;
     if (health?.network_stale === true && health.app === "lavish-axi") {
-      if (networkRestarted) return baseUrl;
-      await requestShutdown(baseUrl, { reloadKey, reason: "" });
-      if (!(await waitForPortFree(baseUrl, 3000))) break;
+      if (networkRestarted) return liveUrl;
+      await requestShutdown(liveUrl, { reloadKey, reason: "" });
+      if (!(await waitForPortFree(liveUrl, 3000))) break;
       await startServer(port);
       networkRestarted = true;
       deadline = Date.now() + 5000;
@@ -1635,10 +1697,15 @@ async function canControlServerOnPort(port, healthBody, processMatchesLavish) {
   return processMatchesLavish(port);
 }
 
-async function fetchHealth(baseUrl, { reconcileNetwork = false } = {}) {
+/**
+ * @param {string} baseUrl
+ * @param {{ reconcileNetwork?: boolean, timeoutMs?: number, signal?: AbortSignal }} [options]
+ */
+async function fetchHealth(baseUrl, { reconcileNetwork = false, timeoutMs, signal } = {}) {
   try {
     const suffix = reconcileNetwork ? "?reconcile_network=1" : "";
-    const response = await fetch(`${baseUrl}/health${suffix}`);
+    const abortSignal = signal ?? (timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined);
+    const response = await fetch(`${baseUrl}/health${suffix}`, abortSignal ? { signal: abortSignal } : {});
     if (!response.ok) return null;
     return await response.json();
   } catch {
@@ -1730,14 +1797,14 @@ async function startServer(port) {
   }
 }
 
-// The detached server child must point at a node-executable entry that actually invokes
-// run(). In source layout that's `../bin/lavish-axi.js` (which calls run on import). In the
-// published bundle, only `dist/cli.mjs` ships and it self-invokes via the bundled bin
-// wrapper. Pick whichever exists.
-export function resolveServerEntry() {
-  const binEntry = fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url));
-  if (existsSync(binEntry)) return binEntry;
-  return fileURLToPath(import.meta.url);
+// The detached server child must stamp stdio before evaluating the CLI. In source layout that
+// is `../bin/lavish-axi-server.js`. In the published bundle only `dist/` ships, so the sibling
+// `server.mjs` bootstrap is the entry. Ordinary user-facing commands still use `bin/lavish-axi.js`
+// / `dist/cli.mjs`.
+function resolveServerEntry() {
+  const sourceEntry = fileURLToPath(new URL("../bin/lavish-axi-server.js", import.meta.url));
+  if (existsSync(sourceEntry)) return sourceEntry;
+  return fileURLToPath(new URL("./server.mjs", import.meta.url));
 }
 
 /**
