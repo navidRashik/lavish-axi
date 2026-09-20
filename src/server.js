@@ -70,6 +70,7 @@ import {
 } from "./paths.js";
 import { detectTailscale } from "./tailscale.js";
 import { canonicalFile, SessionStore, sessionKey } from "./session-store.js";
+import { AsyncMutex } from "./async-mutex.js";
 import { generateSharePassword } from "./share-password.js";
 import {
   ACCEPTED_IMAGE_MIME,
@@ -129,6 +130,7 @@ const ATTACHMENT_SWEEP_INTERVAL_MS = 60 * 60_000;
 // in the chrome's outdated banner, so an unknown value is dropped rather than passed through to
 // text the user would read as a fact.
 const SHUTDOWN_REASONS = new Set(["upgrade", "local-build", "stop"]);
+const AGENT_LISTENER_LABEL = "agent-listener";
 
 // Live-reload coalescing. A normal save is one reload after a short debounce. While a queued
 // layout-warning batch is outstanding, the agent is applying several related edits, so widen the
@@ -307,11 +309,13 @@ export async function serve({
   const watchers = new Map();
   const activePolls = new Map();
   const deliveredFeedback = new Set();
+  const pollOwnershipLock = new AsyncMutex();
   // Keyed by session so a version-driven shutdown can reload the one chrome whose artifact is
   // being reopened and leave every other open review page on screen. Current chromes use a
   // WebSocket, while the legacy SSE route remains available during rolling local upgrades.
   const liveEventClients = new Map();
   const browserDisconnectTimers = new Map();
+  const browserDisconnectPending = new Set();
   const whiteboardChannelSecret = crypto.randomBytes(32);
   // Sessions with at least one warning the user queued that has not been re-checked yet.
   const outstandingRepairBatches = new Set();
@@ -347,7 +351,9 @@ export async function serve({
   // with its rendered html, user entries ship as text with their anchor, never as html.
   events.on("agent-reply", (key, entry) => broadcastLiveEvent("agent-reply", key, entry));
   events.on("chat-sync", (key, session) => broadcastLiveEvent("chat-sync", key, serializeChatSync(session)));
-  events.on("agent-presence", (key, state) => broadcastLiveEvent("agent-presence", key, { state }));
+  events.on("agent-presence", (key, state) =>
+    broadcastLiveEvent("agent-presence", key, presenceEventData(key, state, activePolls, deliveredFeedback)),
+  );
   events.on("layout-warnings", (key, warnings) => broadcastLiveEvent("layout-warnings", key, { warnings }));
   events.on("ended", (key, endedBy) => broadcastLiveEvent("ended", key, { ended_by: endedBy || null }));
 
@@ -370,7 +376,10 @@ export async function serve({
     if (shuttingDown || hasLiveEventClient(key) || !activePolls.has(key)) return;
     const timer = setTimeout(() => {
       browserDisconnectTimers.delete(key);
-      if (!hasLiveEventClient(key) && activePolls.has(key)) events.emit("browser-disconnected", key);
+      if (!hasLiveEventClient(key) && activePolls.has(key)) {
+        browserDisconnectPending.add(key);
+        events.emit("browser-disconnected", key);
+      }
     }, browserDisconnectGraceMs);
     timer.unref?.();
     browserDisconnectTimers.set(key, timer);
@@ -378,6 +387,7 @@ export async function serve({
 
   function attachLiveEventClient(client, key, onClose) {
     clearBrowserDisconnectTimer(key);
+    browserDisconnectPending.delete(key);
     liveEventClients.set(client, key);
     refreshIdleTimer();
     let cleanedUp = false;
@@ -399,7 +409,8 @@ export async function serve({
       return;
     }
     client.sendEvent("chat-sync", serializeChatSync(session));
-    client.sendEvent("agent-presence", { state: computePresence(key, activePolls, deliveredFeedback) });
+    const presence = computePresence(key, activePolls, deliveredFeedback);
+    client.sendEvent("agent-presence", presenceEventData(key, presence, activePolls, deliveredFeedback));
     // A connection that attaches after the live end event still needs the terminal snapshot.
     if (session?.status === "ended") client.sendEvent("ended", { ended_by: session.ended_by || null });
   }
@@ -440,10 +451,6 @@ export async function serve({
   function finishFeedbackDelivery(key, result) {
     if (result.status !== "feedback") return;
     markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
-    // A batch flagged `session_ended` is the last one this session will ever deliver, so no
-    // later poll or agent reply can retire the working state markFeedbackDelivered just set:
-    // release it here or presence reports an agent still working on a session that is over.
-    if (result.session_ended) clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
   }
 
   // `takeFeedback` is destructive: it clears the batch from `state.json` before anything is
@@ -647,6 +654,10 @@ export async function serve({
       version,
       ...(networkStale ? { network_stale: true } : {}),
       ...(networkWarning ? { network_warning: networkWarning } : {}),
+      listeners: [...activePolls].map(([key, holder]) => ({
+        key,
+        label: listenerLabel(holder),
+      })),
     });
   });
 
@@ -710,37 +721,146 @@ export async function serve({
     }
   });
 
-  app.get("/api/poll", async (req, res, next) => {
+  async function publishAgentReply(key, text) {
+    const session = await store.addAgentReply(key, text);
+    if (!session) return null;
+    const lastEntry = session.chat?.at(-1);
+    const entry = serializeChat([
+      lastEntry?.role === "agent" ? lastEntry : { role: "agent", text, at: session.updated_at },
+    ])[0];
+    events.emit("agent-reply", key, entry);
+    events.emit("chat-sync", key, session);
+    // The reply concludes the delivered-feedback "working" state. Human sends remain available
+    // while working because the server queues them for the next poll.
+    clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
+    return session;
+  }
+
+  const handlePoll = async (req, res, next) => {
+    const takeover = req.query.takeover === "1";
+    const agentReply =
+      req.method === "POST" && req.body?.agent_reply !== undefined ? String(req.body.agent_reply) : null;
+    if (takeover && req.method !== "POST") {
+      res.status(405).json({ error: "poll takeover requires POST" });
+      return;
+    }
+    if (req.method === "POST" && (agentReply === null ? !takeover : !agentReply.trim())) {
+      res.status(405).json({ error: "POST /api/poll requires agent_reply or takeover=1" });
+      return;
+    }
     // `close` is subscribed before the first `await` and re-checked after the listeners are armed,
     // because a client that disconnects while `takeFeedback` is in flight would otherwise arrive
     // too late for its own cleanup: the handler marks the poll active afterwards and nothing left
     // would clear it, leaving presence stuck on "listening" for an agent that is already gone.
-    let requestClosed = Boolean(req.destroyed);
+    let requestClosed = Boolean(req.aborted || (req.method !== "POST" && req.destroyed));
     let cleanupPoll = null;
+    let claimedHolder = null;
     const onRequestClose = () => {
+      // A POST request emits `close` when its JSON body stream ends, before the long-poll
+      // response has been written. `aborted` distinguishes that normal parser lifecycle from a
+      // client that actually went away.
+      if (req.method === "POST" && !req.aborted) return;
       requestClosed = true;
       cleanupPoll?.();
     };
+    const onResponseClose = () => {
+      // Once the body has been parsed, a POST request's close event is no longer useful: the
+      // response socket is the authoritative signal for a client that aborts its long-poll.
+      if (req.method === "POST" && !res.writableEnded) {
+        requestClosed = true;
+        cleanupPoll?.();
+      }
+    };
+    res.on("close", onResponseClose);
     const detachRequestClose = () => req.off("close", onRequestClose);
     req.on("close", onRequestClose);
     try {
       const file = await canonicalFile(String(req.query.file || ""));
       const key = sessionKey(file);
+      const ownerValue = typeof req.query.owner === "string" ? req.query.owner.trim() : "";
+      if (ownerValue.toLowerCase() === "none" || ownerValue.startsWith("-")) {
+        detachRequestClose();
+        res.status(400).json({
+          status: "error",
+          code: "VALIDATION_ERROR",
+          error: "--owner none is reserved; pass a different listener label",
+        });
+        return;
+      }
+      const owner = ownerValue || null;
+      if (hasPresentOriginOrReferer(req) && !isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
+        detachRequestClose();
+        res.status(403).json({ error: "cross-origin poll takeover rejected" });
+        return;
+      }
+      const { holder, previousPresence, conflict, missing } = await pollOwnershipLock.runExclusive(async () => {
+        const currentHolder = activePolls.get(key);
+        if (currentHolder && !takeover) return { conflict: listenerConflict(currentHolder, "LISTENER_ACTIVE") };
+        const nextHolder = { key, owner, startedAt: Date.now(), replaced: false, replace: null };
+        claimedHolder = nextHolder;
+        const priorPresence = presenceSignature(key, activePolls, deliveredFeedback);
+        if (currentHolder) {
+          // Install the successor before releasing the old response so its cleanup cannot emit a
+          // transient "waiting" state or clear the successor's listener ownership.
+          currentHolder.replaced = true;
+          activePolls.set(key, nextHolder);
+          currentHolder.replace?.();
+        } else {
+          activePolls.set(key, nextHolder);
+        }
+        // Attaching a fresh round retires the prior delivery marker; releasing a poll never does.
+        deliveredFeedback.delete(key);
+        if (agentReply !== null) {
+          const session = await publishAgentReply(key, agentReply);
+          if (!session) {
+            activePolls.delete(key);
+            return { missing: true };
+          }
+        }
+        return { holder: nextHolder, previousPresence: priorPresence };
+      });
+      if (conflict) {
+        detachRequestClose();
+        res.status(409).json(conflict);
+        return;
+      }
+      if (missing) {
+        detachRequestClose();
+        res.status(404).json({ error: "session not found" });
+        return;
+      }
       const timeoutMs =
         req.query.timeoutMs === undefined ? null : Math.max(0, Math.min(Number(req.query.timeoutMs || 0), 2147483647));
       const immediate = await store.takeFeedback(key);
       if (immediate.status !== "waiting") {
-        if (requestClosed || req.destroyed || res.writableEnded) {
+        if (holder.replaced) {
           await restoreClosedFeedback(key, immediate);
+          detachRequestClose();
+          res.json(listenerConflict(holder, "LISTENER_REPLACED"));
+          releasePollListener(holder, activePolls, deliveredFeedback, events);
+          return;
+        }
+        if (requestClosed || res.writableEnded) {
+          await restoreClosedFeedback(key, immediate);
+          releasePollListener(holder, activePolls, deliveredFeedback, events);
           detachRequestClose();
           return;
         }
         finishFeedbackDelivery(key, immediate);
+        releasePollListener(holder, activePolls, deliveredFeedback, events);
+        if (immediate.session_ended) clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
         detachRequestClose();
         res.json(immediate);
         return;
       }
-      if (requestClosed || req.destroyed || res.writableEnded) {
+      if (holder.replaced) {
+        detachRequestClose();
+        res.json(listenerConflict(holder, "LISTENER_REPLACED"));
+        releasePollListener(holder, activePolls, deliveredFeedback, events);
+        return;
+      }
+      if (requestClosed || res.writableEnded) {
+        releasePollListener(holder, activePolls, deliveredFeedback, events);
         detachRequestClose();
         return;
       }
@@ -754,7 +874,6 @@ export async function serve({
         }, pollHeartbeatMs);
         heartbeat.unref?.();
       }
-      setPollActive(key, activePolls, deliveredFeedback, events, true);
       refreshIdleTimer();
       let timer = null;
       let cleaned = false;
@@ -767,21 +886,47 @@ export async function serve({
         events.off("feedback", onFeedback);
         events.off("ended", onFeedback);
         events.off("browser-disconnected", onBrowserDisconnected);
-        setPollActive(key, activePolls, deliveredFeedback, events, false);
-        if (!activePolls.has(key)) clearBrowserDisconnectTimer(key);
+        releasePollListener(holder, activePolls, deliveredFeedback, events);
+        if (!activePolls.has(key)) {
+          clearBrowserDisconnectTimer(key);
+          browserDisconnectPending.delete(key);
+        }
         refreshIdleTimer();
         cleanupPoll = null;
         detachRequestClose();
+        res.off("close", onResponseClose);
       };
+      const respondReplacement = () => {
+        if (responding || res.writableEnded) return;
+        responding = true;
+        try {
+          const replacement = listenerConflict(holder, "LISTENER_REPLACED");
+          if (streamHeartbeat) res.end(JSON.stringify(replacement));
+          else res.json(replacement);
+        } finally {
+          cleanup();
+        }
+      };
+      holder.replace = respondReplacement;
       const respond = async (forcedResult = null) => {
         if (responding || res.writableEnded) return;
         responding = true;
+        let finalSessionEnded = false;
         try {
           const result = await store.takeFeedback(key);
           // Feedback or an explicit end that raced the grace timer wins. The disconnect result
           // is only the non-terminal replacement for a poll that would otherwise keep waiting.
           const responseResult = forcedResult && result.status === "waiting" ? forcedResult : result;
-          if (requestClosed || req.destroyed || res.writableEnded) {
+          finalSessionEnded = responseResult?.session_ended === true;
+          if (holder.replaced) {
+            if (responseResult.status !== "waiting") await restoreClosedFeedback(key, responseResult);
+            if (!requestClosed && !res.writableEnded) {
+              if (streamHeartbeat) res.end(JSON.stringify(listenerConflict(holder, "LISTENER_REPLACED")));
+              else res.json(listenerConflict(holder, "LISTENER_REPLACED"));
+            }
+            return;
+          }
+          if (requestClosed || res.writableEnded) {
             await restoreClosedFeedback(key, responseResult);
             return;
           }
@@ -793,6 +938,7 @@ export async function serve({
           }
         } finally {
           cleanup();
+          if (finalSessionEnded) clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
         }
       };
       function handleRespondError(error) {
@@ -817,17 +963,35 @@ export async function serve({
       events.on("ended", onFeedback);
       events.on("browser-disconnected", onBrowserDisconnected);
       cleanupPoll = cleanup;
-      if (requestClosed || req.destroyed || res.writableEnded) {
+      if (holder.replaced) {
+        respondReplacement();
+        return;
+      }
+      if (requestClosed || res.writableEnded) {
         cleanup();
         return;
+      }
+      // A browser can disappear while the initial take is in flight. The disconnect timer may
+      // have fired before this request installed its event listeners, so reconcile that state now.
+      if (browserDisconnectPending.has(key)) {
+        browserDisconnectPending.delete(key);
+        onBrowserDisconnected(key);
+        return;
+      }
+      const nextPresence = presenceSignature(key, activePolls, deliveredFeedback);
+      if (nextPresence !== previousPresence) {
+        events.emit("agent-presence", key, computePresence(key, activePolls, deliveredFeedback));
       }
       timer = timeoutMs === null ? null : setTimeout(() => respond().catch(handleRespondError), timeoutMs);
     } catch (error) {
       cleanupPoll?.();
+      if (claimedHolder) releasePollListener(claimedHolder, activePolls, deliveredFeedback, events);
       detachRequestClose();
       next(error);
     }
-  });
+  };
+  app.get("/api/poll", handlePoll);
+  app.post("/api/poll", handlePoll);
 
   // The one route that puts words in the reviewer's mouth: whatever lands here
   // reaches the agent as the user's own instructions. The session key is derived
@@ -1011,22 +1175,11 @@ export async function serve({
 
   app.post("/api/:key/agent-reply", async (req, res, next) => {
     try {
-      const text = String(req.body?.text || "");
-      const session = await store.addAgentReply(req.params.key, text);
+      const session = await publishAgentReply(req.params.key, String(req.body?.text || ""));
       if (!session) {
         res.status(404).json({ error: "session not found" });
         return;
       }
-      const entry = serializeChat([
-        session.chat?.at(-1)?.role === "agent" ? session.chat.at(-1) : { role: "agent", text, at: session.updated_at },
-      ])[0];
-      events.emit("agent-reply", req.params.key, entry);
-      events.emit("chat-sync", req.params.key, session);
-      // The reply concludes the delivered-feedback "working" state. Without this, a poll that
-      // drains feedback and then releases leaves presence stuck on "working" even after the agent
-      // answers. Human sends remain available while working because the server queues them for the
-      // next poll. See "SSE agent-presence returns to waiting after an agent reply".
-      clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, events);
       res.json({ status: "sent" });
     } catch (error) {
       next(error);
@@ -2336,25 +2489,28 @@ export function hasLiveReloadRootOptIn(html) {
   return /<meta\b(?=[^>]*name=["']lavish-live-reload["'])(?=[^>]*content=["']root["'])[^>]*>/i.test(searchableHtml);
 }
 
-function setPollActive(key, activePolls, deliveredFeedback, events, active) {
-  const previousPresence = computePresence(key, activePolls, deliveredFeedback);
-  const count = activePolls.get(key) || 0;
-  const nextCount = active ? count + 1 : Math.max(0, count - 1);
-  if (nextCount === count) return;
-  if (nextCount === 0) {
-    activePolls.delete(key);
-  } else {
-    activePolls.set(key, nextCount);
-  }
-  // A poll that attaches with nothing else in flight is the agent starting a new round, and that
-  // is the ONLY transition here allowed to retire the previous round's delivery. Releasing a poll
-  // never is: with two polls open, the second one's cleanup would erase the marker the first one
-  // just set and report an agent that is working as merely waiting. Neither is a poll attaching
-  // beside an existing one, which is the same erasure of a sibling's delivery from the other side.
-  // Everything else that retires delivery is an explicit conclusion, through clearFeedbackDelivery.
-  if (active && count === 0) deliveredFeedback.delete(key);
-  const nextPresence = computePresence(key, activePolls, deliveredFeedback);
-  if (nextPresence !== previousPresence) events.emit("agent-presence", key, nextPresence);
+function releasePollListener(holder, activePolls, deliveredFeedback, events) {
+  if (activePolls.get(holder.key) !== holder) return;
+  const previousPresence = computePresence(holder.key, activePolls, deliveredFeedback);
+  activePolls.delete(holder.key);
+  const nextPresence = computePresence(holder.key, activePolls, deliveredFeedback);
+  if (nextPresence !== previousPresence) events.emit("agent-presence", holder.key, nextPresence);
+}
+
+function listenerLabel(holder) {
+  return holder.owner || AGENT_LISTENER_LABEL;
+}
+
+function listenerConflict(holder, code) {
+  return {
+    status: "error",
+    code,
+    error:
+      code === "LISTENER_ACTIVE"
+        ? "Lavish Editor already has an active poll listener"
+        : "Lavish Editor poll listener was replaced",
+    holder: { label: listenerLabel(holder), age_ms: Math.max(0, Date.now() - holder.startedAt) },
+  };
 }
 
 function markFeedbackDelivered(key, activePolls, deliveredFeedback, events) {
@@ -2376,9 +2532,27 @@ function clearFeedbackDelivery(key, activePolls, deliveredFeedback, events) {
 }
 
 export function computePresence(key, activePolls, deliveredFeedback) {
-  if (activePolls.has(key)) return "listening";
   if (deliveredFeedback.has(key)) return "working";
-  return "waiting";
+  return activePolls.has(key) ? "listening" : "waiting";
+}
+
+function presenceSignature(key, activePolls, deliveredFeedback) {
+  return `${computePresence(key, activePolls, deliveredFeedback)}:${presenceMode(key, activePolls, deliveredFeedback)}`;
+}
+
+export function presenceMode(key, activePolls, deliveredFeedback) {
+  if (deliveredFeedback.has(key)) return "agent-busy";
+  const holder = activePolls.get(key);
+  if (!holder) return "waiting-on-captain";
+  // --owner is used by a supervisor process listening on behalf of a worker. A bare poll is the
+  // agent's own waiting round; an identified holder must not make the composer invite captain
+  // input while the owning worker is busy elsewhere.
+  return holder.owner ? "external-listener" : "agent-listener";
+}
+
+function presenceEventData(key, state, activePolls, deliveredFeedback) {
+  const mode = presenceMode(key, activePolls, deliveredFeedback);
+  return mode === "waiting-on-captain" ? { state } : { state, mode };
 }
 
 function chromeIcon(paths, size = 16, strokeWidth = 1.7) {
