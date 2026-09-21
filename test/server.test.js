@@ -637,7 +637,8 @@ test("artifact SDK injects every shared mermaid node helper as a same-scope cons
 test("shared SDK helper modules export only functions so serializeModuleHelpers can ship them", async () => {
   const mermaid = await import("../src/mermaid-node.js");
   const table = await import("../src/table-cell.js");
-  for (const [name, value] of [...Object.entries(mermaid), ...Object.entries(table)]) {
+  const revisions = await import("../src/artifact-revisions.js");
+  for (const [name, value] of [...Object.entries(mermaid), ...Object.entries(table), ...Object.entries(revisions)]) {
     assert.equal(typeof value, "function", `${name} must be a function`);
   }
 });
@@ -1920,6 +1921,47 @@ test("wildcard hosts accept proxied prompts but still reject malformed authoriti
       delivered.prompts.map((prompt) => prompt.prompt),
       ["wildcard proxied feedback"],
     );
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// VISION: the artifact stays the author's - serving it adds one script tag and
+// nothing else. The revision legend reads its registry from the artifact, so
+// this guards that reading it never became rewriting it: a parse-and-reserialize
+// pass would silently reflow the whitespace inside <pre>, changing what the
+// reviewer sees versus opening the saved file directly.
+test("serving an artifact with a revision registry adds one script tag and changes nothing else", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  const source = [
+    "<!doctype html>",
+    "<html><head><title>t</title></head><body>",
+    '<script type="application/json" data-lavish-revisions>',
+    '[{"id":"r1","label":"First pass","summary":"Tightened the pricing copy"}]',
+    "</script>",
+    '<section data-lavish-revision="r1" id="pricing">Pricing</section>',
+    "<pre>  indented\n\tand   spaced\n</pre>",
+    "</body></html>",
+  ].join("\n");
+  await writeFile(artifact, source);
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const { key } = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((res) => res.json());
+
+    const load = await beginArtifactLoad(base, key);
+    const served = await fetch(artifactLoadUrl(base, key, load)).then((res) => res.text());
+
+    const injected = served.match(/<script src="\/sdk\.js\?[^"]*"><\/script>/g);
+    assert.equal(injected?.length, 1);
+    assert.equal(served.replace(injected[0], ""), source);
+    assert.ok(served.includes("<pre>  indented\n\tand   spaced\n</pre>"));
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });

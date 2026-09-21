@@ -1,5 +1,6 @@
 /* global CSS, Element, MutationObserver, ResizeObserver, document, getComputedStyle, parent, window */
 
+import { readArtifactRevisions } from "./artifact-revisions.js";
 import * as mermaidHelpers from "./mermaid-node.js";
 import { tableCellTarget } from "./table-cell.js";
 
@@ -2612,4 +2613,24 @@ export function createArtifactSdk(
   }
   const mermaidObserver = new MutationObserver(() => scheduleMermaidEnhance());
   mermaidObserver.observe(document.documentElement, { childList: true, subtree: true });
+
+  // Report the agent-declared revision registry so the chrome can offer its
+  // legend. Read-only: the SDK never marks up the page for it, because a
+  // highlight painted here would make the served artifact differ from the file
+  // opened without Lavish. The message is sent even when the artifact declares
+  // nothing, so a reload that removed the registry clears a stale legend.
+  function reportArtifactRevisions() {
+    let payload = { revisions: [], marks: [] };
+    try {
+      payload = readArtifactRevisions(document);
+    } catch {
+      // A malformed registry costs the reader a legend, never the review.
+    }
+    postArtifactMessage("lavish:revisions", payload);
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", reportArtifactRevisions, { once: true });
+  } else {
+    reportArtifactRevisions();
+  }
 }

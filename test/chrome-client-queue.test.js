@@ -17,7 +17,7 @@ const servedChromeIds = new Set(
   ),
 );
 
-/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null }} HarnessSessionData */
+/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, revisionPalette?: { hex: string, borderStyle: string, pattern: string }[] }} HarnessSessionData */
 /** @type {HarnessSessionData} */
 const defaultSessionData = {
   key: "abc",
@@ -303,6 +303,7 @@ async function createChromeHarness({
   element("shareDialog").hidden = true;
   element("moreMenu").hidden = true;
   element("warningsDrawer").hidden = true;
+  element("revisionsDrawer").hidden = true;
   const whiteboardFrame = element("whiteboardFrame");
   whiteboardFrame.contentWindow = {
     postMessage(message) {
@@ -8196,4 +8197,146 @@ test("a reconnect does not retire the banner a server replacement raised", async
   recoverLiveStream(chrome);
   assert.equal(banner.hidden, false);
   assert.match(chrome.element("outdatedText").textContent, /Lavish was updated/);
+});
+
+// ---------------------------------------------------------------------------
+// Revision legend
+//
+// The payload arrives over postMessage from a sandboxed frame rendering author
+// content, so the chrome re-validates it even though its own SDK built it.
+// These drive that revalidation through the real client.
+
+const REVISION_PALETTE_FIXTURE = [
+  { hex: "#0072b2", borderStyle: "solid", pattern: "none" },
+  { hex: "#d55e00", borderStyle: "dashed", pattern: "diagonal" },
+];
+
+async function revisionHarness() {
+  return createChromeHarness({
+    sessionData: { ...defaultSessionData, revisionPalette: REVISION_PALETTE_FIXTURE },
+  });
+}
+
+function sendRevisions(chrome, payload) {
+  chrome.sendFrameMessage({
+    type: "lavish:revisions",
+    artifact_load_token: chrome.artifactLoadToken(),
+    ...payload,
+  });
+}
+
+function revisionRows(chrome) {
+  return chrome.element("revisionsList").querySelectorAll(".revision-row");
+}
+
+test("an artifact that declares revisions gets a legend; one that declares none gets no button", async () => {
+  const chrome = await revisionHarness();
+
+  sendRevisions(chrome, { revisions: [], marks: [] });
+  assert.equal(chrome.element("revisionsWrap").hidden, true);
+
+  sendRevisions(chrome, {
+    revisions: [{ id: "r1", label: "Round 1", summary: "Tightened the pricing copy" }],
+    marks: [{ revision_id: "r1", selector: "#pricing", tag: "section", excerpt: "Pricing" }],
+  });
+
+  assert.equal(chrome.element("revisionsWrap").hidden, false);
+  assert.equal(chrome.element("revisionsCount").textContent, "1");
+  assert.equal(chrome.element("revisionsSummary").textContent, "1 revision · 1 marked block");
+  assert.equal(revisionRows(chrome).length, 1);
+});
+
+test("a reload that removed the registry clears the legend instead of leaving it standing", async () => {
+  const chrome = await revisionHarness();
+
+  sendRevisions(chrome, { revisions: [{ id: "r1", label: "Round 1" }], marks: [] });
+  assert.equal(chrome.element("revisionsWrap").hidden, false);
+
+  sendRevisions(chrome, { revisions: [], marks: [] });
+  assert.equal(chrome.element("revisionsWrap").hidden, true);
+  assert.equal(revisionRows(chrome).length, 0);
+});
+
+// Regression: the chrome rendered `raw.color` and `raw.border_style` after
+// checking only their shape, so an artifact could give every round the same
+// swatch and erase the one signal that separates them.
+test("swatches come from the server palette, not from what the artifact sent", async () => {
+  const chrome = await revisionHarness();
+
+  sendRevisions(chrome, {
+    revisions: [
+      { id: "r1", label: "Round 1", color: "#ff0000", border_style: "dotted", pattern: "dots" },
+      { id: "r2", label: "Round 2", color: "#ff0000", border_style: "dotted", pattern: "dots" },
+    ],
+    marks: [],
+  });
+
+  const swatches = revisionRows(chrome).map((row) => row.querySelectorAll(".revision-swatch")[0].style);
+  assert.deepEqual(
+    swatches.map((style) => [style.color, style.borderStyle]),
+    [
+      ["#0072b2", "solid"],
+      ["#d55e00", "dashed"],
+    ],
+  );
+});
+
+// Regression: identity fields were truncated to their budget before being
+// compared, so two distinct overlong ids collapsed into one legend row and an
+// overlong selector became a different valid selector pointing elsewhere.
+test("overlong ids and selectors are refused rather than shortened into the wrong thing", async () => {
+  const chrome = await revisionHarness();
+  const prefix = "r".repeat(60);
+
+  sendRevisions(chrome, {
+    revisions: [
+      { id: `${prefix}1`, label: "one" },
+      { id: `${prefix}2`, label: "two" },
+      { id: "ok", label: "kept" },
+    ],
+    marks: [
+      { revision_id: "ok", selector: `#${"a".repeat(400)}`, tag: "p", excerpt: "too long" },
+      { revision_id: "ok", selector: "#kept", tag: "p", excerpt: "fine" },
+    ],
+  });
+
+  assert.deepEqual(
+    revisionRows(chrome).map((row) => row.querySelectorAll(".revision-label")[0].textContent),
+    ["kept"],
+  );
+  assert.equal(chrome.element("revisionsSummary").textContent, "1 revision · 1 marked block");
+});
+
+test("Reveal walks the marked blocks one at a time through the existing reveal path", async () => {
+  const chrome = await revisionHarness();
+
+  sendRevisions(chrome, {
+    revisions: [{ id: "r1", label: "Round 1" }],
+    marks: [
+      { revision_id: "r1", selector: "#first", tag: "p", excerpt: "one" },
+      { revision_id: "r1", selector: "#second", tag: "p", excerpt: "two" },
+    ],
+  });
+
+  const revealed = () => chrome.postedToFrame.filter((message) => message.type === "lavish:revealElement");
+  const button = () => revisionRows(chrome)[0].querySelectorAll(".revision-reveal")[0];
+
+  assert.equal(button().textContent, "Reveal 1/2");
+  button().click();
+  assert.deepEqual(revealed().at(-1).selector, "#first");
+  assert.equal(button().textContent, "Reveal 2/2");
+  button().click();
+  assert.deepEqual(revealed().at(-1).selector, "#second");
+  assert.equal(button().textContent, "Reveal 1/2");
+});
+
+test("a mark naming an undeclared revision never reaches the legend", async () => {
+  const chrome = await revisionHarness();
+
+  sendRevisions(chrome, {
+    revisions: [{ id: "r1", label: "Round 1" }],
+    marks: [{ revision_id: "ghost", selector: "#somewhere", tag: "p", excerpt: "orphan" }],
+  });
+
+  assert.equal(chrome.element("revisionsSummary").textContent, "1 revision · 0 marked blocks");
 });
