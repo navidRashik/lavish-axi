@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.77](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.76...lavish-axi-v0.1.77) (2026-09-22)
+
+
+### Bug Fixes
+
+* clarify HTML file output in the Lavish skill ([#344](https://github.com/kunchenguid/lavish-axi/issues/344)) ([a3b3987](https://github.com/kunchenguid/lavish-axi/commit/a3b3987062bb77441bbe6bd0cf40cc431f18888e))
+
 ## [0.1.76](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.75...lavish-axi-v0.1.76) (2026-09-21)
 
 
