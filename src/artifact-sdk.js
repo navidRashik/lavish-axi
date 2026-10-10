@@ -472,7 +472,10 @@ export function createArtifactSdk(
   function postArtifactMessage(type, payload = {}) {
     parent.postMessage({ type, ...payload, artifact_load_token: String(artifactLoadToken || "") }, "*");
   }
-  let annotationMode = true;
+  // Only an explicit "off" declaration on the root opts out; absent or unknown
+  // values keep the artifact annotatable by default.
+  const initialAnnotationMode = document.documentElement.getAttribute("data-lavish-annotate") !== "off";
+  let annotationMode = initialAnnotationMode;
   let hovered = null;
   let selected = null;
   let ignoreNextClick = false;
@@ -2234,6 +2237,7 @@ export function createArtifactSdk(
   }
 
   function closeCard() {
+    const hadCard = activeCardContext !== null;
     activeCardContext = null;
     if (activeAttachments) {
       activeAttachments.destroy();
@@ -2247,7 +2251,10 @@ export function createArtifactSdk(
     hovered = null;
     clearTextHighlight();
     selected = null;
-    scheduleReviewStateReport();
+    // Only a card that was open has state to retire. Reporting `card: null` with nothing open
+    // (a page declaring data-lavish-annotate="off" closes at boot) would overwrite a stored
+    // draft the chrome has not replayed yet, because that replay waits for the frame's load event.
+    if (hadCard) scheduleReviewStateReport();
   }
 
   function showAnnotationCard(target, options = {}) {
@@ -2635,6 +2642,8 @@ export function createArtifactSdk(
   );
 
   setAnnotationMode(annotationMode);
+  // Report the page default once; subsequent mode changes belong to the chrome.
+  postArtifactMessage("lavish:annotationMode", { enabled: initialAnnotationMode });
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", startLayoutAudit, { once: true });
   } else {
