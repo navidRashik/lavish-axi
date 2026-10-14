@@ -45,6 +45,16 @@ function el(tag, attrs = {}, children = [], props = {}) {
       node.children.push(child);
       return child;
     },
+    get nextElementSibling() {
+      const siblings = node.parentElement ? node.parentElement.children : [];
+      return siblings[siblings.indexOf(node) + 1] || null;
+    },
+    insertAdjacentElement(position, other) {
+      const parent = node.parentElement;
+      other.parentElement = parent;
+      parent.children.splice(parent.children.indexOf(node) + 1, 0, other);
+      return other;
+    },
     remove() {
       const parent = node.parentElement;
       if (parent) parent.children = parent.children.filter((child) => child !== node);
@@ -229,4 +239,18 @@ test("a question's answer is its checked choices and filled fields", () => {
   const submit = el("input", {}, [], { type: "submit", value: "Send" });
   assert.equal(lavishStateQuestionAnswer(el("div", {}, [choice, skipped, note, submit])), "Merge now, after CI");
   assert.equal(lavishStateQuestionAnswer(el("div")), "");
+});
+
+test("a binding on the control itself disables that control and puts the answer after it", () => {
+  const select = el("select", { "data-lavish-question": "pick", "data-lavish-ref": "q:pick" });
+  const form = el("form", {}, [select]);
+  const root = el("main", {}, [form]);
+  applyLavishState(root, snapshot({ "q:pick": { status: "answered", answer: "A" } }), NOW);
+  assert.equal(select.disabled, true);
+  assert.equal(form.children[1]?.textContent, "Answered: A");
+  applyLavishState(root, snapshot({ "q:pick": { status: "answered", answer: "A" } }), NOW);
+  assert.equal(form.children.length, 2, "re-render reuses the answer line");
+  applyLavishState(root, snapshot({ "q:pick": { status: "open" } }), NOW);
+  assert.equal(select.disabled, false);
+  assert.equal(form.children.length, 1);
 });

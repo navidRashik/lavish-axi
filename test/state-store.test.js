@@ -22,12 +22,24 @@ async function tempDir() {
 }
 
 test("item ids follow the four documented kinds", () => {
-  for (const id of ["pr:newscred/opal-app#9194", "ticket:OPAL-6110", "worker:hub-refresh", "q:merge-now"]) {
+  for (const id of [
+    "pr:newscred/opal-app#9194",
+    "ticket:OPAL-6110",
+    "worker:hub-refresh",
+    "q:merge-now",
+    "q:OPAL-7024 Q1 (behaviour): legacy NULL-instance PATs",
+  ]) {
     assert.equal(isValidItemId(id), true, id);
   }
-  for (const id of ["", "pr:", "issue:1", "pr: spaced", "q:a b", 42]) {
+  for (const id of ["", "pr:", "issue:1", "pr: spaced", "q:a ", "q:a\nb", "q:\u0000", "q:a\u0000", 42]) {
     assert.equal(isValidItemId(id), false, String(id));
   }
+});
+
+test("a question id copied verbatim from a page attribute survives a read", () => {
+  const id = "q:OPAL-7024 Q1 (behaviour): legacy NULL-instance PATs";
+  const state = normalizeState({ version: 1, items: { [id]: { status: "answered", answer: "fail closed" } } });
+  assert.equal(state.items[id]?.answer, "fail closed");
 });
 
 test("a missing store reads as an empty version-1 store", async () => {
