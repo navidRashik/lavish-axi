@@ -54,7 +54,13 @@ export function lavishStateStaleness(item, staleAfterHours, pageMtimes, now) {
 // order. Empty when nothing is chosen, so the caller can fall back to the queued prompt text.
 export function lavishStateQuestionAnswer(scope) {
   const parts = [];
-  for (const control of scope?.querySelectorAll ? scope.querySelectorAll("input,select,textarea") : []) {
+  if (!scope?.querySelectorAll) return "";
+  // The binding may sit on the control itself (`<select data-lavish-ref="q:…">`), not a wrapper.
+  const controls = [
+    ...(scope.matches("input,select,textarea") ? [scope] : []),
+    ...scope.querySelectorAll("input,select,textarea"),
+  ];
+  for (const control of controls) {
     if (control.disabled) continue;
     const type = String(control.type || "").toLowerCase();
     if (["button", "submit", "reset", "image", "hidden", "file"].includes(type)) continue;
@@ -72,7 +78,10 @@ export function lavishStateQuestionAnswer(scope) {
 // either in an author-placed `data-lavish-field="answer"` element or in a Lavish-owned line.
 export function lavishStateApplyQuestion(scope, item) {
   const answered = item?.status === "answered";
-  for (const control of scope.querySelectorAll("input,select,textarea,button")) {
+  // A binding on the control itself cannot hold a child line, so its answer line goes after it.
+  const isControl = scope.matches("input,select,textarea,button");
+  const controls = [...(isControl ? [scope] : []), ...scope.querySelectorAll("input,select,textarea,button")];
+  for (const control of controls) {
     if (answered && !control.disabled) {
       control.disabled = true;
       control.setAttribute("data-lavish-state-disabled", "");
@@ -84,7 +93,12 @@ export function lavishStateApplyQuestion(scope, item) {
   const authorField = [...scope.querySelectorAll("[data-lavish-field='answer']")].some(
     (field) => lavishStateScopeOf(field) === scope,
   );
-  let line = scope.querySelector("[data-lavish-state-answer]");
+  const next = scope.nextElementSibling;
+  let line = isControl
+    ? next && next.hasAttribute("data-lavish-state-answer")
+      ? next
+      : null
+    : scope.querySelector("[data-lavish-state-answer]");
   if (!answered || authorField) {
     if (line) line.remove();
     return;
@@ -93,7 +107,8 @@ export function lavishStateApplyQuestion(scope, item) {
     line = scope.ownerDocument.createElement("p");
     line.setAttribute("data-lavish-state-answer", "");
     line.setAttribute("data-lavish-ui", "");
-    scope.appendChild(line);
+    if (isControl) scope.insertAdjacentElement("afterend", line);
+    else scope.appendChild(line);
   }
   line.textContent = "Answered: " + String(item.answer || "");
 }
