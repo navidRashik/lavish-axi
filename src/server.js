@@ -37,7 +37,9 @@ import {
 } from "./layout-warnings.js";
 import * as artifactRevisions from "./artifact-revisions.js";
 import * as mermaidNode from "./mermaid-node.js";
+import * as stateBindings from "./state-bindings.js";
 import * as tableCellHelpers from "./table-cell.js";
+import { isStateDisabled, isValidItemId, setItem, stateSnapshot, watchStateDir } from "./state-store.js";
 import { extractMermaidSources, whiteboardSourceHash } from "./mermaid-source.js";
 import { createExcalidrawLibraryCache, excalidrawLibrariesDir } from "./whiteboard-library-store.js";
 import { parseLibraryIconDirectives } from "./whiteboard-libraries.js";
@@ -369,6 +371,44 @@ export async function serve({
     }
   }
 
+  // Shared state (docs/shared-state.md): one store per artifact directory. Every session whose
+  // artifact lives in a directory is pushed that directory's store whenever it, or a page file
+  // beside it, changes. LAVISH_STATE=off turns the whole mechanism off.
+  const stateEnabled = !isStateDisabled(env);
+  const sessionStateDirs = new Map();
+
+  function trackStateDir(session) {
+    if (!stateEnabled || !session?.file) return;
+    const dir = path.dirname(session.file);
+    sessionStateDirs.set(session.key, dir);
+    const watchKey = `state:${dir}`;
+    if (watchers.has(watchKey)) return;
+    watchers.set(
+      watchKey,
+      watchStateDir(dir, () => pushState(dir), {
+        onError: (error) =>
+          writeLog(`[lavish] state watcher error dir=${dir}: ${error instanceof Error ? error.message : error}`),
+      }),
+    );
+  }
+
+  async function readStateSnapshot(dir) {
+    try {
+      return await stateSnapshot(dir);
+    } catch (error) {
+      writeLog(`[lavish] state read failed dir=${dir}: ${error?.message || error}`);
+      return null;
+    }
+  }
+
+  async function pushState(dir) {
+    const snapshot = await readStateSnapshot(dir);
+    if (!snapshot) return;
+    for (const [client, clientKey] of liveEventClients) {
+      if (sessionStateDirs.get(clientKey) === dir) client.sendEvent("lavish-state", snapshot);
+    }
+  }
+
   // One listener per event scales independently of the number of open review tabs and avoids the
   // EventEmitter listener warning the former one-listener-per-SSE-client design reached at only a
   // few boards.
@@ -449,6 +489,14 @@ export async function serve({
     client.sendEvent("agent-presence", presenceEventData(key, presence, activePolls, deliveredFeedback));
     // A connection that attaches after the live end event still needs the terminal snapshot.
     if (session?.status === "ended") client.sendEvent("ended", { ended_by: session.ended_by || null });
+    // A tab that reconnects after missing store changes catches up here. A directory with no
+    // items has nothing to catch up on, and its pages already rendered the embedded snapshot.
+    trackStateDir(session);
+    const dir = sessionStateDirs.get(key);
+    const snapshot = dir ? await readStateSnapshot(dir) : null;
+    if (snapshot && Object.keys(snapshot.state.items).length > 0 && !client.isClosed()) {
+      client.sendEvent("lavish-state", snapshot);
+    }
   }
 
   function networkWarningField() {
@@ -1460,6 +1508,7 @@ export async function serve({
       const session = chromeLoad.session;
       if (refuseNonHtmlArtifact(session, res)) return;
       await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
+      trackStateDir(session);
       const artifactHtml = await readFile(session.file, "utf8").catch(() => "");
       const { faviconTag, title } = extractArtifactHead(artifactHtml);
       // Nothing legitimately frames the review chrome - it is the top-level
@@ -1650,12 +1699,53 @@ export async function serve({
         res.status(409).json({ status: "stale" });
         return;
       }
+      // The directory's store rides in the bundle so the page renders current values on first
+      // paint; a page opened later is never stale.
+      trackStateDir(verified.session);
+      const initialState = stateEnabled ? await readStateSnapshot(path.dirname(verified.session.file)) : null;
       res.type("application/javascript").send(
         createSdkJs(String(req.query.key || ""), verified.artifact_revision, verified.artifact_load_token, {
           maxAttachmentCount: attachmentConfig.maxPerPrompt,
           maxAttachmentBytes: attachmentConfig.maxBytes,
+          initialState,
         }),
       );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // A question answered inside an artifact. The sandboxed frame cannot reach this server, so the
+  // chrome forwards it. Only `q:` items and only the answer fields are writable from a page: the
+  // artifact is untrusted content and must not rewrite a PR's status.
+  app.post("/api/:key/state/answer", async (req, res, next) => {
+    try {
+      if (!isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
+        res.status(403).json({ error: "cross-origin state write rejected" });
+        return;
+      }
+      if (!stateEnabled) {
+        res.status(404).json({ error: "shared state is off (LAVISH_STATE=off)" });
+        return;
+      }
+      const session = await store.findByKey(req.params.key);
+      if (!session) {
+        res.status(404).json({ error: "session not found" });
+        return;
+      }
+      const id = String(req.body?.id || "");
+      if (!id.startsWith("q:") || !isValidItemId(id)) {
+        res.status(400).json({ error: "only q:<question-id> items can be answered" });
+        return;
+      }
+      const answeredAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+      const item = await setItem(
+        path.dirname(session.file),
+        id,
+        { status: "answered", answer: String(req.body?.answer ?? "").slice(0, 4000), answeredAt },
+        { source: path.basename(session.file) },
+      );
+      res.json({ id, item });
     } catch (error) {
       next(error);
     }
@@ -3148,17 +3238,18 @@ function serializeModuleHelpers(module) {
  * @param {string} key
  * @param {number} [artifactRevision]
  * @param {string} [artifactLoadToken]
- * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[] }} [options]
+ * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[], initialState?: unknown }} [options]
  */
 export function createSdkJs(
   key,
   artifactRevision = 0,
   artifactLoadToken = "",
-  { maxAttachmentCount, maxAttachmentBytes, acceptedImageMime = ACCEPTED_IMAGE_MIME } = {},
+  { maxAttachmentCount, maxAttachmentBytes, acceptedImageMime = ACCEPTED_IMAGE_MIME, initialState = null } = {},
 ) {
   const mermaidHelperSource = serializeModuleHelpers(mermaidNode);
   const tableHelperSource = serializeModuleHelpers(tableCellHelpers);
   const revisionHelperSource = serializeModuleHelpers(artifactRevisions);
+  const stateHelperSource = serializeModuleHelpers(stateBindings);
   const revisionNumber = Number(artifactRevision);
   const revision = Number.isFinite(revisionNumber) && revisionNumber >= 0 ? Math.trunc(revisionNumber) : 0;
   const loadToken = String(artifactLoadToken || "").slice(0, 200);
@@ -3170,6 +3261,7 @@ export function createSdkJs(
     maxAttachmentCount: Number.isFinite(maxAttachmentCount) ? maxAttachmentCount : undefined,
     maxAttachmentBytes: Number.isFinite(maxAttachmentBytes) ? maxAttachmentBytes : undefined,
     acceptedImageMime: acceptedImageMime.map(String),
+    initialState,
   };
   return `(() => {
 const key=${JSON.stringify(key)};
@@ -3195,6 +3287,7 @@ ${mermaidHelperSource.declarations}
 const mermaidHelpers={ ${mermaidHelperSource.names.join(", ")} };
 ${tableHelperSource.declarations}
 ${revisionHelperSource.declarations}
+${stateHelperSource.declarations}
 (${createArtifactSdk.toString()})(deriveQueueKey, isNativeInteractiveControl, mermaidHelpers, artifactRevision, artifactLoadToken, key, ${JSON.stringify(sdkOptions)});
 })();`;
 }

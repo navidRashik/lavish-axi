@@ -4245,6 +4245,11 @@ window.addEventListener("message", (event) => {
       });
     return;
   }
+  // The SDK just booted: hand it the newest store snapshot this tab has, in case one arrived
+  // after the server embedded its copy into the bundle.
+  if (msg.type === "lavish:annotationMode" && latestLavishState) {
+    postToFrame({ type: "lavish:state", snapshot: latestLavishState });
+  }
   // The artifact spoke, so it rendered and ran its SDK - there is nothing fatal to probe for.
   if (msg.type === "lavish:annotationMode" && typeof msg.enabled === "boolean" && !annotationDefaultReceived) {
     annotationDefaultReceived = true;
@@ -4285,7 +4290,23 @@ window.addEventListener("message", (event) => {
   if (msg.type === "lavish:revisions") applyRevisionMessage(msg);
   if (msg.type === "lavish:toggleAnnotationMode") toggleAnnotationMode();
   if (msg.type === "lavish:editQueuedAnchor") editQueuedAnchor(String(msg.selector || ""));
+  if (msg.type === "lavish:answerQuestion") answerSharedQuestion(msg);
 });
+
+// Shared state (docs/shared-state.md). The frame cannot reach the server, so a question answered
+// inside it is written to the directory's store from here; the store's watcher then pushes the
+// change to every open tab, this one included.
+let latestLavishState = null;
+
+function answerSharedQuestion(message) {
+  fetch("/api/" + key + "/state/answer", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: String(message.id || ""), answer: String(message.answer ?? "") }),
+  }).catch(() => {
+    // The answer still went out as a queued prompt; only the cross-page mirror is lost.
+  });
+}
 
 // The sandboxed artifact iframe can't reach the loopback server (opaque origin),
 // so it hands captured image bytes here and the chrome performs the same-origin
@@ -4690,6 +4711,10 @@ events.set("chat-sync", (data) => {
 });
 events.set("agent-presence", (data) => setAgentPresence(data.mode === "external-listener" ? "external" : data.state));
 events.set("layout-warnings", (data) => setLayoutWarnings(data.warnings || []));
+events.set("lavish-state", (data) => {
+  latestLavishState = data;
+  postToFrame({ type: "lavish:state", snapshot: data });
+});
 events.set("ended", () => markSessionEnded());
 connectLiveEvents();
 

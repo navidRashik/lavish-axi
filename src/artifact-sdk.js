@@ -2,6 +2,7 @@
 
 import { readArtifactRevisions } from "./artifact-revisions.js";
 import * as mermaidHelpers from "./mermaid-node.js";
+import { applyLavishState, lavishStateQuestionAnswer } from "./state-bindings.js";
 import { tableCellTarget } from "./table-cell.js";
 
 export const LAVISH_INTERNAL_QUEUE_KEY = "_lavishQueueKey";
@@ -128,13 +129,13 @@ export function isNativeInteractiveControl(el) {
       "[role='menuitemradio'],[role='option'],[role='radio'],[role='switch'],[role='tab'],[role='treeitem']",
   );
   if (!widget) return false;
-  const link = el.closest("a[href]");
   // A link that IS the widget and targets this document (`<a href="#pane" role="tab">`) is the
   // control: following the fragment is the widget's behaviour, so annotate mode lets it through.
   // A widget link to another URL would navigate away from the review, so it stays annotatable
   // (Cmd/Ctrl-click follows it), as does a link nested inside a larger widget.
-  return !(link && widget.contains(link));
+  const link = el.closest("a[href]");
   if (link && link === widget) return String(link.getAttribute("href") || "").startsWith("#");
+  return !(link && widget.contains(link));
 }
 
 // A severe text failure needs rendered-fragment proof. Scroll dimensions include harmless font
@@ -462,7 +463,7 @@ export function deriveAttachmentNoticeState(state = {}) {
  * @param {number} [artifactRevision]
  * @param {string} [artifactLoadToken]
  * @param {string} [sessionKey]
- * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[] }} [options]
+ * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[], initialState?: any }} [options]
  */
 export function createArtifactSdk(
   deriveQueueKey,
@@ -1250,6 +1251,12 @@ export function createArtifactSdk(
     }
 
     postArtifactMessage("lavish:queuePrompt", { prompt: item });
+    // A queued answer inside a store-bound question is also the shared answer: every page and tab
+    // showing that q ref then disables its controls and shows it (docs/shared-state.md).
+    const question = originElement?.closest?.("[data-lavish-question][data-lavish-ref^='q:']");
+    if (question) {
+      answerQuestion(question.getAttribute("data-lavish-ref"), lavishStateQuestionAnswer(question) || item.prompt);
+    }
   }
 
   function sendQueuedPrompts() {
@@ -2475,6 +2482,38 @@ export function createArtifactSdk(
     return (dataTransfer.types || []).includes?.("Files");
   }
 
+  // ---------------------------------------------------------------------------
+  // Shared state (docs/shared-state.md). The server embeds the directory's store in this bundle,
+  // so the first render is already current, then the chrome forwards every store change. The page
+  // opts out with <html data-lavish-state="off">; the server opts out with LAVISH_STATE=off by
+  // embedding nothing and pushing nothing.
+  // ---------------------------------------------------------------------------
+  const stateEnabled = document.documentElement.getAttribute("data-lavish-state") !== "off";
+  let stateSnapshot = stateEnabled && options.initialState ? options.initialState : null;
+  let stateAgeTimer = 0;
+
+  function renderState() {
+    if (!stateSnapshot) return;
+    try {
+      applyLavishState(document, stateSnapshot, Date.now());
+    } catch {
+      // A malformed binding costs that element its value, never the review.
+    }
+    // "updated 3h ago" and age staleness move with the clock, not only with the store.
+    if (!stateAgeTimer) stateAgeTimer = window.setInterval(renderState, 60_000);
+  }
+
+  function receiveState(snapshot) {
+    if (!stateEnabled || !snapshot || typeof snapshot !== "object") return;
+    stateSnapshot = snapshot;
+    renderState();
+  }
+
+  function answerQuestion(id, answer) {
+    if (!stateEnabled || !String(id || "").startsWith("q:")) return;
+    postArtifactMessage("lavish:answerQuestion", { id: String(id), answer: String(answer ?? "") });
+  }
+
   /** @type {Window & { lavish?: unknown }} */ (window).lavish = {
     queuePrompt,
     sendQueuedPrompts,
@@ -2482,6 +2521,8 @@ export function createArtifactSdk(
     getQueuedPrompts: () => [],
     setStatus: (message) => postArtifactMessage("lavish:status", { message: String(message) }),
     snapshot,
+    answerQuestion,
+    getItem: (id) => stateSnapshot?.state?.items?.[String(id)] ?? null,
   };
 
   window.addEventListener("message", (event) => {
@@ -2490,6 +2531,7 @@ export function createArtifactSdk(
     if (event.source !== parent) return;
     const msg = event.data || {};
     if (msg.type === "lavish:setAnnotationMode") setAnnotationMode(msg.enabled);
+    if (msg.type === "lavish:state") receiveState(msg.snapshot);
     if (msg.type === "lavish:attachmentResult") {
       if (!isTrustedAttachmentResult(event, { parentWindow: parent, nonce: ATTACHMENT_NONCE })) return;
       activeAttachments?.handleResult(msg.localId, msg.ok, msg.id, msg.error);
@@ -2653,6 +2695,8 @@ export function createArtifactSdk(
     true,
   );
 
+  renderState();
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", renderState, { once: true });
   setAnnotationMode(annotationMode);
   // Report the page default once; subsequent mode changes belong to the chrome.
   postArtifactMessage("lavish:annotationMode", { enabled: initialAnnotationMode });
