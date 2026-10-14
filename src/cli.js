@@ -64,6 +64,7 @@ import { canonicalFile, sessionKey, SessionStore } from "./session-store.js";
 import { generateSharePassword } from "./share-password.js";
 import { initDefaultTelemetry } from "./telemetry.js";
 import { excalidrawLibrariesDir, loadExcalidrawLibraries } from "./whiteboard-library-store.js";
+import { isValidItemId, parseAssignments, readState, setItem, stateFilePath } from "./state-store.js";
 
 const SHARE_VALUE_FLAGS = ["--password", "--token", "--site", "--update-key"];
 const COMMANDS = new Set([
@@ -79,6 +80,7 @@ const COMMANDS = new Set([
   "export",
   "share",
   "libraries",
+  "state",
 ]);
 // SDK-reserved built-ins (e.g. `update`) must reach runAxiCli untouched; otherwise
 // the bare-arg normalization below would rewrite them into the hidden `open` command.
@@ -232,6 +234,7 @@ export async function run(argv) {
         export: exportCommand,
         share: shareCommand,
         libraries: librariesCommand,
+        state: stateCommand,
       },
       getCommandHelp: (command) => getCommandHelp(command, { agent }),
     });
@@ -1310,6 +1313,69 @@ async function librariesCommand(args) {
     search: flagValue(args, "--search") || "",
     library: flagValue(args, "--library") || "",
   });
+}
+
+const STATE_VALUE_FLAGS = ["--dir", "--source"];
+const STATE_USAGE_HELP = [
+  "Run `lavish-axi state set <id> key=value... [--dir <pagesDir>] [--source <label>]` to write an item",
+  "Run `lavish-axi state get <id> [--dir <pagesDir>]` or `lavish-axi state list [--dir <pagesDir>]` to read",
+];
+
+// The positional words of `state ...`, with value flags and their values removed.
+function statePositionals(args) {
+  const words = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (isValueFlagToken(arg, new Set(STATE_VALUE_FLAGS))) {
+      if (!arg.includes("=")) i += 1;
+      continue;
+    }
+    words.push(arg);
+  }
+  return words;
+}
+
+async function stateCommand(args) {
+  const [action, id, ...pairs] = statePositionals(args);
+  const dir = path.resolve(flagValue(args, "--dir") || process.cwd());
+  const file = collapseHomeDirectory(stateFilePath(dir), os.homedir());
+  if (action === "list") {
+    const state = await readState(dir);
+    return {
+      file,
+      stale_after_hours: state.staleAfterHours,
+      items: Object.entries(state.items).map(([itemId, item]) => ({
+        id: itemId,
+        status: item.status || "",
+        updatedAt: item.updatedAt || "",
+        source: item.source || "",
+      })),
+    };
+  }
+  if (action !== "get" && action !== "set") {
+    throw new AxiError("state needs an action: set, get or list", "VALIDATION_ERROR", STATE_USAGE_HELP);
+  }
+  if (!isValidItemId(id)) {
+    throw new AxiError(`invalid item id "${id ?? ""}"`, "VALIDATION_ERROR", [
+      "Item ids are pr:<owner>/<repo>#<n>, ticket:<KEY>, worker:<name> or q:<question-id>",
+    ]);
+  }
+  if (action === "get") {
+    const item = (await readState(dir)).items[id];
+    if (!item) throw new AxiError(`no item ${id} in ${file}`, "NOT_FOUND", STATE_USAGE_HELP);
+    return { file, id, item };
+  }
+  let fields;
+  try {
+    fields = parseAssignments(pairs);
+  } catch (error) {
+    throw new AxiError(error instanceof Error ? error.message : String(error), "VALIDATION_ERROR", STATE_USAGE_HELP);
+  }
+  if (Object.keys(fields).length === 0) {
+    throw new AxiError("state set needs at least one key=value", "VALIDATION_ERROR", STATE_USAGE_HELP);
+  }
+  const item = await setItem(dir, id, fields, { source: flagValue(args, "--source") || "captain" });
+  return { file, id, item };
 }
 
 /**
@@ -2639,6 +2705,7 @@ function createCommandHelp({ agent = "generic" } = {}) {
     stop: `Usage: lavish-axi stop [--port <port>]\n\nShut down the background Lavish Editor server. The server also stops itself when no browser or poll has been connected for a while (LAVISH_AXI_IDLE_TIMEOUT_MS, default 30m) and immediately when the last session ends with nothing connected.\n`,
     playbook: `Usage: lavish-axi playbook [playbook_id]\n\nList focused artifact guidance playbooks, or show one playbook by ID. Known IDs: diagram, table, comparison, plan, code, input, explanation, slides.\n\n${PLAYBOOK_ROUTER_HELP}\n\nExamples:\n  lavish-axi playbook\n  lavish-axi playbook diagram\n  lavish-axi playbook input\n`,
     libraries: `Usage: lavish-axi libraries [--search <text>] [--library <id>]\n\nList the Excalidraw libraries (.excalidrawlib files) the user copied into ~/.lavish-axi/excalidraw-libraries, or LAVISH_AXI_STATE_DIR/excalidraw-libraries when set. Their items appear in every whiteboard's library panel. --search lists item refs whose ref contains every search word; --library lists one library's item refs. Lavish only reads this directory and never downloads libraries.\n\nExamples:\n  lavish-axi libraries\n  lavish-axi libraries --search lambda\n  lavish-axi libraries --library aws-architecture-icons\n`,
+    state: `Usage:\n  lavish-axi state set <id> key=value... [--dir <pagesDir>] [--source <label>]\n  lavish-axi state get <id> [--dir <pagesDir>]\n  lavish-axi state list [--dir <pagesDir>]\n\nRead or write the shared item store for a directory of artifacts, <pagesDir>/.lavish/state.json (--dir defaults to the current directory). Every open page whose artifact lives in that directory renders its data-lavish-ref bindings from this one store and updates live when it changes. Item ids are pr:<owner>/<repo>#<n>, ticket:<KEY>, worker:<name> or q:<question-id>. set merges the given fields into the item, stamps updatedAt, records --source (default captain), and writes the file atomically. Set LAVISH_STATE=off on the server to disable shared state.\n\nPage bindings: data-lavish-ref="<id>" binds an element (Lavish sets data-lavish-status on it); data-lavish-field="<field>" on it or a descendant renders that field as text; data-lavish-show-when="status=merged,closed" and data-lavish-hide-when="review=needs-you" toggle hidden; data-lavish-age shows "updated 3h ago"; a stale item gets class lavish-stale plus data-lavish-stale="age" (older than staleAfterHours) or "source" (its source page changed after the write); a data-lavish-question element with data-lavish-ref="q:<id>" shares its answer with every page. <html data-lavish-state="off"> opts one page out. See docs/shared-state.md.\n\nExamples:\n  lavish-axi state set "pr:newscred/opal-app#9194" status=merged review=none --source github\n  lavish-axi state get "pr:newscred/opal-app#9194"\n  lavish-axi state list --dir ~/hub\n`,
     design: `Usage: lavish-axi design\n\nShow a copy-pasteable CDN snippet for Tailwind CSS browser runtime v4 + DaisyUI v5 + themes, the whiteboard (Mermaid) opt-in snippet, a content-to-playbook router, an optional layout safety CSS snippet, plus technical reference for DaisyUI components. ${PLAYBOOK_ROUTER_HELP} Lavish artifacts stay portable HTML. This CDN snippet is the design fallback, not the default: inspect the subject project before falling back, and paste the layout safety CSS only when useful for dense nested grid/flex layouts, badges, wide fonts, or local media. ${DESIGN_PRIORITY_RULE}\n`,
     setup: `Usage: lavish-axi setup hooks\n       lavish-axi setup plugin\n\nhooks: install or repair agent SessionStart hooks for lavish-axi ambient context in Claude Code, Codex, OpenCode, and GitHub Copilot CLI. Restart your agent session afterward to receive the context. This is the primary integration - it carries live session state.\n\nplugin: register the installed lavish-axi package as an Agent Plugin (agent-plugins.org) in VS Code, Cursor, and GitHub Copilot CLI. The installed package directory is itself the plugin root, so nothing is downloaded and no marketplace is involved. Reload each client afterward. Codex users should use \`setup hooks\` instead.\n\nBoth actions are explicit opt-in, idempotent, and repair a stale path after a reinstall.\n`,
     server: `Usage: lavish-axi server [--port 4387] [--verbose] [--also-listen <host>...]\n\nRun the local Lavish Editor server. Pass --verbose (or set LAVISH_AXI_DEBUG=1) to log session and watcher events to stderr. Detached server output is appended to ~/.lavish-axi/server.log, or LAVISH_AXI_STATE_DIR/server.log when set, for startup and crash diagnostics.\n\nBy default Lavish binds to 127.0.0.1 and, when Tailscale is running, this machine's Tailscale IPv4. Any explicit LAVISH_AXI_HOST overrides automatic Tailscale binding; wildcard values such as 0.0.0.0 or :: are restricted to loopback. An explicit non-wildcard LAVISH_AXI_HOST sets the bind address, and the server also listens on 127.0.0.1 so every local CLI finds it; --also-listen adds further concrete addresses (the CLI passes it when it replaces a server, to keep every address the old one served). An address that cannot be bound is retried in the background and reported as network_warning. Binding beyond loopback exposes an unauthenticated server that can read and serve arbitrary local files to anything that can reach it, so only do so on a trusted network. With automatic binding enabled, a successfully bound Tailscale listener uses its MagicDNS name in generated session links; otherwise LAVISH_AXI_LINK_HOST can set the link hostname. See README's Allowed hosts section for Host allowlisting and LAVISH_AXI_ALLOWED_HOSTS. LAVISH_AXI_NO_OPEN=1 (or --no-open) suppresses the local browser launch.\n`,
