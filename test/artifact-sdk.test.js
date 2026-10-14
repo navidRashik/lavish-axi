@@ -117,7 +117,7 @@ test("isNativeInteractiveControl leaves ARIA content and link roles annotatable"
   }
 });
 
-test("isNativeInteractiveControl leaves anchors with a widget role annotatable", () => {
+test("isNativeInteractiveControl leaves anchors with a widget role to another URL annotatable", () => {
   for (const role of ["menuitem", "tab", "button"]) {
     const label = node("span");
     const anchor = node("a", { href: "/details", role }, [label]);
@@ -126,6 +126,27 @@ test("isNativeInteractiveControl leaves anchors with a widget role annotatable",
     assert.equal(isNativeInteractiveControl(anchor), false, role);
     assert.equal(isNativeInteractiveControl(label), false, role);
   }
+});
+
+test("isNativeInteractiveControl passes through a widget link to an in-page fragment", () => {
+  // The REPRODUCED hub bug: annotate mode swallowed <a href="#pane" role="tab"> clicks, so the
+  // hash never changed and the page stayed on its first tab.
+  for (const role of ["tab", "button", "menuitem"]) {
+    const label = node("span");
+    const anchor = node("a", { href: "#pane", role }, [label]);
+    node("div", { role: "tablist" }, [anchor]);
+
+    assert.equal(isNativeInteractiveControl(anchor), true, role);
+    assert.equal(isNativeInteractiveControl(label), true, role);
+  }
+});
+
+test("isNativeInteractiveControl leaves a fragment link nested inside a larger widget annotatable", () => {
+  const link = node("a", { href: "#pane" });
+  const widget = node("div", { role: "tab" }, [link]);
+
+  assert.equal(isNativeInteractiveControl(link), false);
+  assert.equal(isNativeInteractiveControl(widget), true);
 });
 
 test("isNativeInteractiveControl leaves a link inside a widget annotatable", () => {
