@@ -83,11 +83,11 @@ test("createSkillMarkdown stays a short stub that defers to the CLI", () => {
 
   assert.ok(md.length <= MAX_SKILL_MARKDOWN_CHARS, "the generated skill stays drastically smaller than CLI guidance");
   assert.match(md, /Lavish Editor/);
-  assert.match(md, /`npx -y lavish-axi --help`/);
-  assert.match(md, /`npx -y lavish-axi reply --help`/);
+  assert.match(md, /`lavish-axi --help`/);
+  assert.match(md, /`lavish-axi reply --help`/);
   assert.match(md, /not about to long-poll/);
-  assert.match(md, /`npx -y lavish-axi design`/);
-  assert.match(md, /`npx -y lavish-axi playbook <id>`/);
+  assert.match(md, /`lavish-axi design`/);
+  assert.match(md, /`lavish-axi playbook <id>`/);
   assert.match(md, /stale/i);
 });
 
@@ -130,12 +130,13 @@ test("createSkillMarkdown omits setup guidance", () => {
   assert.doesNotMatch(md, /setup plugin/);
 });
 
-test("createSkillMarkdown uses non-interactive npx commands", () => {
+test("createSkillMarkdown sends agents to the global lavish-axi, never to npx", () => {
   const md = createSkillMarkdown();
 
-  assert.match(md, /`npx -y lavish-axi <html-file>`/);
-  assert.match(md, /If lavish-axi output shows a follow-up command starting with `lavish-axi`/);
-  assert.match(md, /run it as `npx -y lavish-axi/);
-  assert.doesNotMatch(md, /`npx lavish-axi/);
+  assert.match(md, /invoke it as `lavish-axi <html-file>`/);
+  assert.match(md, /run follow-up commands exactly as lavish-axi output prints them/);
+  assert.match(md, /Never run it through npx/);
+  assert.doesNotMatch(md, /`npx -y lavish-axi/);
+  assert.doesNotMatch(md, /run it as `npx/);
   assert.doesNotMatch(md, /Run `lavish-axi/);
 });
