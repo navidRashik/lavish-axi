@@ -306,6 +306,7 @@ export const PLAYBOOKS = [
       "A custom choice UI should make option buttons update local state, then use a separate Queue answer button with data-lavish-action to queue the final selected value.",
       "Use window.lavish.queuePrompt for user intent, not internal analytics or UI-only state changes.",
       "End input paths with an obvious way for the user to send feedback back to the agent.",
+      'When several pages in one directory show the same question, PR, ticket, or worker, bind each mention to the shared store instead of baking a copy: data-lavish-ref="q:<id>" on the data-lavish-question element (an answer on any page then disables that question everywhere), and data-lavish-ref="pr:<owner>/<repo>#<n>" with data-lavish-field="status" for live values. Run `lavish-axi state --help` for the store and the full binding list.',
     ],
   },
   {
