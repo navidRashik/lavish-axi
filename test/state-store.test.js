@@ -31,7 +31,7 @@ test("item ids follow the four documented kinds", () => {
   ]) {
     assert.equal(isValidItemId(id), true, id);
   }
-  for (const id of ["", "pr:", "issue:1", "pr: spaced", "q:a ", "q:a\nb", 42]) {
+  for (const id of ["", "pr:", "issue:1", "pr: spaced", "q:a ", "q:a\nb", "q:\u0000", "q:a\u0000", 42]) {
     assert.equal(isValidItemId(id), false, String(id));
   }
 });

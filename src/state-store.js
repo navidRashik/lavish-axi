@@ -16,7 +16,7 @@ export const DEFAULT_STALE_AFTER_HOURS = 24;
 // `<kind>:<rest>`: pr:<owner>/<repo>#<n>, ticket:<KEY>, worker:<name>, q:<question-id>. The rest may
 // hold inner spaces, because question ids are copied verbatim from page attributes; it may not
 // start or end with whitespace or contain control characters.
-const ITEM_ID_PATTERN = /^(pr|ticket|worker|q):\S(?:\P{Cc}*\S)?$/u;
+const ITEM_ID_PATTERN = /^(pr|ticket|worker|q):(?!.*\p{Cc})\S(?:.*\S)?$/u;
 const FIELD_PATTERN = /^[A-Za-z][\w-]{0,63}$/;
 const LOCK_STALE_MS = 10_000;
 const LOCK_WAIT_MS = 5_000;
