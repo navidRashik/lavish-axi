@@ -9178,4 +9178,9 @@ test("L2: a session that ends with notes still queued shows them as not sent", a
   assert.equal(chrome.queued().length, 1);
   assert.equal(chrome.element("endedUnsent").hidden, false);
   assert.match(chrome.element("endedUnsentList").innerHTML, /Queued, never sent/);
+  assert.deepEqual(
+    JSON.parse(chrome.localStore.get("lavish-axi:retry:abc") || "[]").map((prompt) => prompt.prompt),
+    ["Queued, never sent"],
+    "the unsent note outlives the tab",
+  );
 });
