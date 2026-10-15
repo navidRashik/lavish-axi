@@ -34,6 +34,7 @@ import {
   updateHtmlApp,
 } from "./html-app.js";
 import { localInterfaceAddresses } from "./local-address.js";
+import { FORK_BUILD_HEADER, FORK_BUILD_ID, forkServerVersion } from "./fork-build.js";
 import {
   clientHost,
   defaultPort,
@@ -2243,7 +2244,7 @@ function fetchHealth(baseUrl, { reconcileNetwork = false, timeoutMs = DEFAULT_HE
     const timer = setTimeout(abort, timeoutMs);
     try {
       const url = new URL(`${baseUrl}/health${reconcileNetwork ? "?reconcile_network=1" : ""}`);
-      request = httpGet(url, { agent: false }, (response) => {
+      request = httpGet(url, { agent: false, headers: { [FORK_BUILD_HEADER]: FORK_BUILD_ID } }, (response) => {
         let body = "";
         response.setEncoding("utf8");
         response.on("data", (chunk) => {
@@ -2256,7 +2257,7 @@ function fetchHealth(baseUrl, { reconcileNetwork = false, timeoutMs = DEFAULT_HE
             return;
           }
           try {
-            finish(JSON.parse(body));
+            finish(withForkServerVersion(JSON.parse(body)));
           } catch {
             finish(null);
           }
@@ -2279,12 +2280,20 @@ async function requestShutdown(baseUrl, { reloadKey = "", reason = "" } = {}) {
   try {
     await fetch(`${baseUrl}/shutdown`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", [FORK_BUILD_HEADER]: FORK_BUILD_ID },
       body: JSON.stringify(body),
     });
   } catch {
     // Best effort. If the server died before answering, the port will free up on its own.
   }
+}
+
+// Every version comparison in this CLI reads `health.version`, so the fork's real version is put
+// there once, at the probe.
+function withForkServerVersion(health) {
+  if (!health || typeof health !== "object") return health;
+  const version = forkServerVersion(health);
+  return version === health.version ? health : { ...health, version };
 }
 
 async function waitForPortFree(baseUrl, timeoutMs) {
