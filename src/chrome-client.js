@@ -6,6 +6,12 @@ const key = String(sessionData.key || "");
 const filePath = String(sessionData.file || "");
 const queueStorageKey = "lavish-axi:queued:" + key;
 const terminalStorageKey = "lavish-axi:terminal:" + key;
+// Prompts a Send has handed to the server but the server has not yet acknowledged. localStorage,
+// not sessionStorage: it outlives the tab, so a reload or a closed tab during an outage (or after
+// the session ended under the Send) still resends under the same prompt_id the server dedupes.
+const retryStorageKey = "lavish-axi:retry:" + key;
+// Marks a buffered note copied at session end that the user never sent: kept, never auto-posted.
+const retryUnsentField = "unsent";
 // Review-chrome state that must survive a browser refresh. Keyed per session so one review's
 // triage can never leak into another artifact's.
 const warningSelectionStorageKey = "lavish-axi:warning-selection:" + key;
@@ -163,6 +169,12 @@ const outdatedText = /** @type {HTMLSpanElement} */ (document.getElementById("ou
 const outdatedReloadButton = /** @type {HTMLButtonElement} */ (document.getElementById("outdatedReload"));
 const outdatedDismissButton = /** @type {HTMLButtonElement} */ (document.getElementById("outdatedDismiss"));
 const endedOverlay = /** @type {HTMLDivElement} */ (document.getElementById("endedOverlay"));
+const endedUnsent = /** @type {HTMLDivElement | null} */ (document.getElementById("endedUnsent"));
+const endedUnsentTitle = /** @type {HTMLDivElement | null} */ (document.getElementById("endedUnsentTitle"));
+const endedUnsentList = /** @type {HTMLUListElement | null} */ (document.getElementById("endedUnsentList"));
+const endedUnsentStatus = /** @type {HTMLParagraphElement | null} */ (document.getElementById("endedUnsentStatus"));
+const endedResendButton = /** @type {HTMLButtonElement | null} */ (document.getElementById("endedResend"));
+const endedCopyButton = /** @type {HTMLButtonElement | null} */ (document.getElementById("endedCopy"));
 const layoutGateOverlay = /** @type {HTMLDivElement} */ (document.getElementById("layoutGateOverlay"));
 const layoutGateTitle = /** @type {HTMLDivElement} */ (document.getElementById("layoutGateTitle"));
 const layoutGateCopy = /** @type {HTMLParagraphElement} */ (document.getElementById("layoutGateCopy"));
@@ -296,6 +308,9 @@ const CHROME_RESTART_PROBE_MS = 100;
 const CHROME_RESTART_SLOW_PROBE_MS = 500;
 // A probe must always settle, so the control that is waiting on it always comes back.
 const HEALTH_PROBE_TIMEOUT_MS = 4000;
+// A Send that could not reach the server waits for /health with this backoff, then resends once.
+const SEND_RETRY_PROBE_MIN_MS = 1000;
+const SEND_RETRY_PROBE_MAX_MS = 30000;
 // A send starts before the artifact snapshot arrives and ends only when /prompts acknowledges the
 // batch. Bound that whole wait so a missing SDK response or a browser/network stall can never look
 // like a dead button while the user's queue remains safely stored in this tab.
@@ -482,6 +497,84 @@ function persistQueuedPrompts() {
   } catch {
     // The in-memory queue still works if browser storage is unavailable.
   }
+}
+
+function readRetryBuffer() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(retryStorageKey) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((prompt) => promptIdentity(prompt)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeRetryBuffer(prompts) {
+  try {
+    if (prompts.length) localStorage.setItem(retryStorageKey, JSON.stringify(prompts));
+    else localStorage.removeItem(retryStorageKey);
+  } catch {
+    // Without localStorage the sessionStorage queue still holds the text for this tab.
+  }
+}
+
+// Merge by prompt_id: a later Send of an edited note replaces its earlier copy, and drops any
+// `unsent` flag, because the user has now asked for it to be delivered.
+function bufferRetryPrompts(prompts) {
+  const incoming = prompts.map(stripInternalPromptFields).filter((prompt) => promptIdentity(prompt));
+  if (!incoming.length) return;
+  const ids = new Set(incoming.map(promptIdentity));
+  writeRetryBuffer([...readRetryBuffer().filter((prompt) => !ids.has(promptIdentity(prompt))), ...incoming]);
+}
+
+// Notes still queued when the session ends were never sent. They are kept so the text outlives the
+// tab, but flagged `unsent`: a later page lists them and never posts them without a click. Only ids
+// not already buffered are added, so a Send-buffered entry is never downgraded to unsent.
+function bufferUnsentPrompts(prompts) {
+  const buffer = readRetryBuffer();
+  const held = new Set(buffer.map(promptIdentity));
+  const incoming = prompts
+    .map(stripInternalPromptFields)
+    .filter((prompt) => promptIdentity(prompt) && !held.has(promptIdentity(prompt)))
+    .map((prompt) => ({ ...prompt, [retryUnsentField]: true }));
+  if (incoming.length) writeRetryBuffer([...buffer, ...incoming]);
+}
+
+// An edited note replaces its buffered copy, so no other tab adopts or resends the old text.
+function refreshRetryPrompt(prompt) {
+  const id = promptIdentity(prompt);
+  const buffer = readRetryBuffer();
+  const index = buffer.findIndex((entry) => promptIdentity(entry) === id);
+  if (!id || index === -1) return;
+  const fresh = stripInternalPromptFields(prompt);
+  buffer[index] = buffer[index][retryUnsentField] ? { ...fresh, [retryUnsentField]: true } : fresh;
+  writeRetryBuffer(buffer);
+}
+
+function forgetRetryPrompts(prompts) {
+  const ids = new Set(prompts.map(promptIdentity).filter(Boolean));
+  if (!ids.size) return;
+  const buffer = readRetryBuffer();
+  const kept = buffer.filter((prompt) => !ids.has(promptIdentity(prompt)));
+  if (kept.length !== buffer.length) writeRetryBuffer(kept);
+}
+
+// On boot, buffered prompts this tab's queue does not hold (a reopened tab, a crashed browser)
+// rejoin the queue by prompt_id, so they are visible and resendable. The boot transcript settle
+// then drops any the server already acknowledged, from the queue and the buffer alike.
+function adoptRetryBuffer() {
+  const held = new Set(queued.map(promptIdentity));
+  let adopted = false;
+  for (const raw of readRetryBuffer()) {
+    if (held.has(promptIdentity(raw))) continue;
+    const prompt = adoptQueuedPrompt(raw, true);
+    if (!prompt) continue;
+    // The flag is buffer bookkeeping; it never joins the queue or a POST body.
+    delete prompt[retryUnsentField];
+    queued.push(prompt);
+    held.add(promptIdentity(prompt));
+    adopted = true;
+  }
+  if (adopted) persistQueuedPrompts();
 }
 
 function persistTerminalReservation(reserved) {
@@ -1101,6 +1194,7 @@ function settleQueuedFromTranscript(chat, shouldRender = true) {
     if (settledPrompts.has(queued[i])) queued.splice(i, 1);
   }
   persistQueuedPrompts();
+  forgetRetryPrompts([...settledPrompts]);
   if (shouldRender) render();
   return true;
 }
@@ -1512,12 +1606,12 @@ function commitQueuedEdit() {
   const prompt = queued[index];
   if (!isPromptEditable(prompt)) return false;
   if (!text && !attachmentCount(prompt)) {
-    queued.splice(index, 1);
-    afterQueuedPromptRemoved();
+    afterQueuedPromptRemoved(queued.splice(index, 1));
   } else {
     // In place, not replaced: the send bookkeeping tracks notes by object identity.
     prompt.prompt = text;
     persistQueuedPrompts();
+    refreshRetryPrompt(prompt);
   }
   return true;
 }
@@ -1610,13 +1704,14 @@ queuedLog.addEventListener("keydown", (event) => {
 function removeQueuedPrompt(index, event) {
   if (event) event.stopPropagation();
   if (terminalSubmission || isPromptSending(queued[index])) return;
-  queued.splice(index, 1);
-  afterQueuedPromptRemoved();
+  afterQueuedPromptRemoved(queued.splice(index, 1));
   render();
 }
 
-function afterQueuedPromptRemoved() {
+// A note the user removed must not come back from the retry buffer on the next boot.
+function afterQueuedPromptRemoved(removed) {
   persistQueuedPrompts();
+  forgetRetryPrompts(removed);
   if (!queued.length) {
     clearSendAcknowledgementWarning();
     if (sendFailureOwner?.kind !== "preparation") clearPersistentSendFailure();
@@ -1700,6 +1795,8 @@ function requestSnapshot(action, prompts = [], endAfter = false, terminal = null
       : { action };
   snapshotRequests.set(requestId, request);
   if (action === "submit") {
+    // Buffered at the click, before the snapshot and the POST, so closing the tab mid-send keeps it.
+    bufferRetryPrompts(prompts);
     request.acknowledgement = {};
     pendingAcknowledgements.add(request.acknowledgement);
     armSendAcknowledgementWarning();
@@ -2095,6 +2192,8 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
   const prompts = submission.prompts.filter(
     (prompt) => !deliveredPrompts.has(prompt) && !promptAcknowledgedInChat(prompt, displayedChat),
   );
+  // Whatever the transcript already carries is delivered; only the rest is still owed a resend.
+  forgetRetryPrompts(submission.prompts.filter((prompt) => !prompts.includes(prompt)));
   const shouldEndSession = submission.endAfter;
   if (!prompts.length) {
     if (shouldEndSession && !ended) {
@@ -2136,6 +2235,9 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
       kind: submission.terminal ? "terminal" : "submission",
       operation: submission.terminal || submission,
     });
+    // The server never answered: the retry buffer still holds the batch, so resend it once
+    // /health answers. Send & End keeps its own explicit retry, which also ends the session.
+    if (!submission.terminal) scheduleSendRetryProbe();
     throw error;
   }
   if (!response.ok) {
@@ -2144,6 +2246,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
         "Could not send because this feedback is too large. It is still queued. Remove some feedback or attachments, then try again.",
         { kind: "submission", operation: submission },
       );
+      forgetRetryPrompts(prompts);
       if (submission.terminal) releaseTerminalSubmission(submission.terminal);
       throw new Error("queued feedback exceeds the request size limit");
     }
@@ -2162,6 +2265,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
         "Could not send because the layout issue selection changed. Your feedback is still queued. Review the current issues, then click Send to Agent to retry.",
         { kind: "submission", operation: submission },
       );
+      forgetRetryPrompts(prompts);
       if (submission.terminal) releaseTerminalSubmission(submission.terminal);
       return;
     }
@@ -2175,6 +2279,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
           kind: "submission",
           operation: submission,
         });
+        forgetRetryPrompts(prompts);
         if (submission.terminal) releaseTerminalSubmission(submission.terminal);
       } else {
         showQueuedSendFailure(submission.terminal ? TERMINAL_SEND_FAILED_COPY : SEND_FAILED_COPY, {
@@ -2188,6 +2293,8 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
         operation: submission.terminal || submission,
       });
     }
+    // A 5xx is the server failing, not refusing this batch: the buffer keeps it, so retry it too.
+    if (!submission.terminal && response.status >= 500) scheduleSendRetryProbe();
     throw new Error("failed to submit queued prompts");
   }
   const accepted = typeof response.json === "function" ? await response.json().catch(() => null) : null;
@@ -2200,6 +2307,9 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
       ? acceptedChat
       : mergeAcceptedChat(acceptedChat, submission.chatAtRequest)
     : null;
+  // A 2xx means the server holds every prompt in this batch, whether or not the transcript settled them.
+  forgetRetryPrompts(prompts);
+  sendRetryProbeDelayMs = SEND_RETRY_PROBE_MIN_MS;
   if (!acceptedChat || reconciledChat) {
     for (const prompt of prompts) {
       deliveredPrompts.add(prompt);
@@ -2215,6 +2325,56 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
     markSessionEnded();
     return;
   }
+}
+
+/** @type {ReturnType<typeof setTimeout> | null} */
+let sendRetryProbeTimer = null;
+let sendRetryProbeDelayMs = SEND_RETRY_PROBE_MIN_MS;
+
+function scheduleSendRetryProbe() {
+  if (ended || sendRetryProbeTimer) return;
+  sendRetryProbeTimer = setTimeout(async () => {
+    sendRetryProbeTimer = null;
+    if (ended) return;
+    // Back off after every probe, healthy or not: a /health that answers while /prompts keeps
+    // failing must not retry every second forever. Only an accepted resend resets the delay.
+    sendRetryProbeDelayMs = Math.min(sendRetryProbeDelayMs * 2, SEND_RETRY_PROBE_MAX_MS);
+    if ((await probeChromeHealth()) !== "running") {
+      scheduleSendRetryProbe();
+      return;
+    }
+    resendRetryBuffer();
+  }, sendRetryProbeDelayMs);
+}
+
+function stopSendRetryProbe() {
+  clearTimeout(sendRetryProbeTimer);
+  sendRetryProbeTimer = null;
+  sendRetryProbeDelayMs = SEND_RETRY_PROBE_MIN_MS;
+}
+
+// One resend of the buffered prompts this tab still holds, without a fresh DOM snapshot: the
+// snapshot is optional context, and an artifact that came back with the server may not answer.
+// It runs through the ordinary submit path, so success settles the queue and clears the buffer.
+function resendRetryBuffer() {
+  if (ended || terminalSubmission) return;
+  // Only Send-buffered entries: an `unsent` one was never sent, so it waits for the user's click.
+  const ids = new Set(
+    readRetryBuffer()
+      .filter((prompt) => !prompt[retryUnsentField])
+      .map(promptIdentity),
+  );
+  const prompts = queued.filter((prompt) => ids.has(promptIdentity(prompt)) && !isPromptSending(prompt));
+  if (!prompts.length) return;
+  submitQueued({
+    prompts,
+    chatAtRequest: displayedChat.slice(),
+    domSnapshot: "",
+    endAfter: false,
+    terminal: null,
+    acknowledgement: null,
+    order: ++nextSendOperationOrder,
+  }).catch(() => {});
 }
 
 function submissionResolvesSendFailure(submission) {
@@ -3069,6 +3229,7 @@ function markSessionEnded() {
   if (ended) return;
   ended = true;
   pendingAcknowledgements.clear();
+  stopSendRetryProbe();
   clearSendAcknowledgementWarning();
   terminalSubmission = null;
   persistTerminalReservation(false);
@@ -3094,6 +3255,79 @@ function markSessionEnded() {
   layoutGateEscape?.end?.();
   postToFrame({ type: "lavish:setAnnotationMode", enabled: false });
   endedOverlay.hidden = false;
+  // Notes queued but never sent live only in sessionStorage; keep them in the retry buffer, flagged
+  // unsent, so the text outlives this tab and a reopened page lists it without posting it.
+  bufferUnsentPrompts(queued);
+  renderEndedUnsent();
+}
+
+function unsentPromptText(prompt) {
+  return String(prompt.prompt || prompt.text || "");
+}
+
+// Text still queued when the session ended was never delivered. It stays in the queue and the
+// retry buffer and is shown here, never cleared silently; Resend reopens the session for it.
+function renderEndedUnsent() {
+  if (!endedUnsent) return;
+  endedUnsent.hidden = queued.length === 0;
+  if (!queued.length) return;
+  if (endedUnsentTitle) {
+    endedUnsentTitle.textContent = `Not sent: ${queued.length === 1 ? "this note" : queued.length + " notes"} never reached the agent.`;
+  }
+  if (endedUnsentList) {
+    endedUnsentList.innerHTML = queued
+      .map((prompt) => "<li>" + escapeHtml(unsentPromptText(prompt)) + "</li>")
+      .join("");
+  }
+  if (endedUnsentStatus) endedUnsentStatus.textContent = "";
+  if (endedResendButton) endedResendButton.disabled = false;
+}
+
+// Reopen this file's session (the explicit `reopen: true` a user-ended session requires), deliver
+// the unsent prompts under their original ids so the server dedupes a repeat, then reload into
+// the live session. Any failure keeps the text and says so.
+async function resendEndedUnsent() {
+  const prompts = queued.slice();
+  if (!prompts.length || !endedResendButton) return;
+  endedResendButton.disabled = true;
+  if (endedUnsentStatus) endedUnsentStatus.textContent = "Reopening the session...";
+  let reopened = false;
+  try {
+    const opened = await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: filePath, reopen: true }),
+    });
+    const session = await opened.json().catch(() => null);
+    if (!opened.ok || session?.status !== "opened") throw new Error("session did not reopen");
+    reopened = true;
+    const sent = await fetch("/api/" + key + "/prompts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompts: prompts.map(stripInternalPromptFields), domSnapshot: "" }),
+    });
+    if (!sent.ok) throw new Error("unsent prompts were not accepted");
+  } catch {
+    if (endedUnsentStatus) {
+      endedUnsentStatus.textContent = reopened
+        ? "The session reopened, but sending failed. Your text is still here."
+        : "Could not reopen the session and send. Your text is still here.";
+    }
+    endedResendButton.disabled = false;
+    return;
+  }
+  for (const prompt of prompts) {
+    const index = queued.indexOf(prompt);
+    if (index !== -1) queued.splice(index, 1);
+  }
+  persistQueuedPrompts();
+  forgetRetryPrompts(prompts);
+  await flushWhiteboardsBeforeChromeReload();
+  location.reload();
+}
+
+function copyEndedUnsent() {
+  copyText(queued.map(unsentPromptText).join("\n\n"));
 }
 
 function copyFilePath() {
@@ -4570,6 +4804,8 @@ endButton.onclick = () => {
   endSession();
 };
 handoffTakeoverButton.onclick = () => location.reload();
+if (endedResendButton) endedResendButton.onclick = () => resendEndedUnsent();
+if (endedCopyButton) endedCopyButton.onclick = () => copyEndedUnsent();
 if (outdatedReloadButton) outdatedReloadButton.onclick = () => reloadChromeForOutdatedBanner();
 if (outdatedDismissButton) {
   outdatedDismissButton.onclick = () => {
@@ -4719,6 +4955,7 @@ events.set("ended", () => markSessionEnded());
 connectLiveEvents();
 
 applySheetState();
+adoptRetryBuffer();
 settleQueuedFromTranscript(initialChat, false);
 render();
 setChromeOutdated(false);
@@ -4730,6 +4967,7 @@ setAgentPresence("waiting");
 // The session already ended before this page (re)loaded, so there is no future live `ended` event
 // to wait for - start read-only instead of looking live until a Send gets silently refused.
 if (sessionData.initialEnded) markSessionEnded();
+else resendRetryBuffer();
 
 // Reaching this line is the only proof that this file parsed and ran to completion. The inline
 // bootstrap already owns the gate's bounded escape if this script fails; retire only its separate
