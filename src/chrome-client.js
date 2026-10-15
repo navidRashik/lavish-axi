@@ -3216,6 +3216,9 @@ function markSessionEnded() {
   layoutGateEscape?.end?.();
   postToFrame({ type: "lavish:setAnnotationMode", enabled: false });
   endedOverlay.hidden = false;
+  // Notes queued but never sent live only in sessionStorage; copy them to the retry buffer so the
+  // text outlives this tab and a reopened page still lists it as Not sent.
+  bufferRetryPrompts(queued);
   renderEndedUnsent();
 }
 
