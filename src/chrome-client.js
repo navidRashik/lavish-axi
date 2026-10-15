@@ -10,6 +10,8 @@ const terminalStorageKey = "lavish-axi:terminal:" + key;
 // not sessionStorage: it outlives the tab, so a reload or a closed tab during an outage (or after
 // the session ended under the Send) still resends under the same prompt_id the server dedupes.
 const retryStorageKey = "lavish-axi:retry:" + key;
+// Marks a buffered note copied at session end that the user never sent: kept, never auto-posted.
+const retryUnsentField = "unsent";
 // Review-chrome state that must survive a browser refresh. Keyed per session so one review's
 // triage can never leak into another artifact's.
 const warningSelectionStorageKey = "lavish-axi:warning-selection:" + key;
@@ -515,12 +517,37 @@ function writeRetryBuffer(prompts) {
   }
 }
 
-// Merge by prompt_id: a later Send of an edited note replaces its earlier copy.
+// Merge by prompt_id: a later Send of an edited note replaces its earlier copy, and drops any
+// `unsent` flag, because the user has now asked for it to be delivered.
 function bufferRetryPrompts(prompts) {
   const incoming = prompts.map(stripInternalPromptFields).filter((prompt) => promptIdentity(prompt));
   if (!incoming.length) return;
   const ids = new Set(incoming.map(promptIdentity));
   writeRetryBuffer([...readRetryBuffer().filter((prompt) => !ids.has(promptIdentity(prompt))), ...incoming]);
+}
+
+// Notes still queued when the session ends were never sent. They are kept so the text outlives the
+// tab, but flagged `unsent`: a later page lists them and never posts them without a click. Only ids
+// not already buffered are added, so a Send-buffered entry is never downgraded to unsent.
+function bufferUnsentPrompts(prompts) {
+  const buffer = readRetryBuffer();
+  const held = new Set(buffer.map(promptIdentity));
+  const incoming = prompts
+    .map(stripInternalPromptFields)
+    .filter((prompt) => promptIdentity(prompt) && !held.has(promptIdentity(prompt)))
+    .map((prompt) => ({ ...prompt, [retryUnsentField]: true }));
+  if (incoming.length) writeRetryBuffer([...buffer, ...incoming]);
+}
+
+// An edited note replaces its buffered copy, so no other tab adopts or resends the old text.
+function refreshRetryPrompt(prompt) {
+  const id = promptIdentity(prompt);
+  const buffer = readRetryBuffer();
+  const index = buffer.findIndex((entry) => promptIdentity(entry) === id);
+  if (!id || index === -1) return;
+  const fresh = stripInternalPromptFields(prompt);
+  buffer[index] = buffer[index][retryUnsentField] ? { ...fresh, [retryUnsentField]: true } : fresh;
+  writeRetryBuffer(buffer);
 }
 
 function forgetRetryPrompts(prompts) {
@@ -541,6 +568,8 @@ function adoptRetryBuffer() {
     if (held.has(promptIdentity(raw))) continue;
     const prompt = adoptQueuedPrompt(raw, true);
     if (!prompt) continue;
+    // The flag is buffer bookkeeping; it never joins the queue or a POST body.
+    delete prompt[retryUnsentField];
     queued.push(prompt);
     held.add(promptIdentity(prompt));
     adopted = true;
@@ -1582,6 +1611,7 @@ function commitQueuedEdit() {
     // In place, not replaced: the send bookkeeping tracks notes by object identity.
     prompt.prompt = text;
     persistQueuedPrompts();
+    refreshRetryPrompt(prompt);
   }
   return true;
 }
@@ -2263,6 +2293,8 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
         operation: submission.terminal || submission,
       });
     }
+    // A 5xx is the server failing, not refusing this batch: the buffer keeps it, so retry it too.
+    if (!submission.terminal && response.status >= 500) scheduleSendRetryProbe();
     throw new Error("failed to submit queued prompts");
   }
   const accepted = typeof response.json === "function" ? await response.json().catch(() => null) : null;
@@ -2277,6 +2309,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
     : null;
   // A 2xx means the server holds every prompt in this batch, whether or not the transcript settled them.
   forgetRetryPrompts(prompts);
+  sendRetryProbeDelayMs = SEND_RETRY_PROBE_MIN_MS;
   if (!acceptedChat || reconciledChat) {
     for (const prompt of prompts) {
       deliveredPrompts.add(prompt);
@@ -2303,12 +2336,13 @@ function scheduleSendRetryProbe() {
   sendRetryProbeTimer = setTimeout(async () => {
     sendRetryProbeTimer = null;
     if (ended) return;
+    // Back off after every probe, healthy or not: a /health that answers while /prompts keeps
+    // failing must not retry every second forever. Only an accepted resend resets the delay.
+    sendRetryProbeDelayMs = Math.min(sendRetryProbeDelayMs * 2, SEND_RETRY_PROBE_MAX_MS);
     if ((await probeChromeHealth()) !== "running") {
-      sendRetryProbeDelayMs = Math.min(sendRetryProbeDelayMs * 2, SEND_RETRY_PROBE_MAX_MS);
       scheduleSendRetryProbe();
       return;
     }
-    sendRetryProbeDelayMs = SEND_RETRY_PROBE_MIN_MS;
     resendRetryBuffer();
   }, sendRetryProbeDelayMs);
 }
@@ -2324,7 +2358,12 @@ function stopSendRetryProbe() {
 // It runs through the ordinary submit path, so success settles the queue and clears the buffer.
 function resendRetryBuffer() {
   if (ended || terminalSubmission) return;
-  const ids = new Set(readRetryBuffer().map(promptIdentity));
+  // Only Send-buffered entries: an `unsent` one was never sent, so it waits for the user's click.
+  const ids = new Set(
+    readRetryBuffer()
+      .filter((prompt) => !prompt[retryUnsentField])
+      .map(promptIdentity),
+  );
   const prompts = queued.filter((prompt) => ids.has(promptIdentity(prompt)) && !isPromptSending(prompt));
   if (!prompts.length) return;
   submitQueued({
@@ -3216,9 +3255,9 @@ function markSessionEnded() {
   layoutGateEscape?.end?.();
   postToFrame({ type: "lavish:setAnnotationMode", enabled: false });
   endedOverlay.hidden = false;
-  // Notes queued but never sent live only in sessionStorage; copy them to the retry buffer so the
-  // text outlives this tab and a reopened page still lists it as Not sent.
-  bufferRetryPrompts(queued);
+  // Notes queued but never sent live only in sessionStorage; keep them in the retry buffer, flagged
+  // unsent, so the text outlives this tab and a reopened page lists it without posting it.
+  bufferUnsentPrompts(queued);
   renderEndedUnsent();
 }
 
@@ -3252,6 +3291,7 @@ async function resendEndedUnsent() {
   if (!prompts.length || !endedResendButton) return;
   endedResendButton.disabled = true;
   if (endedUnsentStatus) endedUnsentStatus.textContent = "Reopening the session...";
+  let reopened = false;
   try {
     const opened = await fetch("/api/sessions", {
       method: "POST",
@@ -3260,6 +3300,7 @@ async function resendEndedUnsent() {
     });
     const session = await opened.json().catch(() => null);
     if (!opened.ok || session?.status !== "opened") throw new Error("session did not reopen");
+    reopened = true;
     const sent = await fetch("/api/" + key + "/prompts", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3268,7 +3309,9 @@ async function resendEndedUnsent() {
     if (!sent.ok) throw new Error("unsent prompts were not accepted");
   } catch {
     if (endedUnsentStatus) {
-      endedUnsentStatus.textContent = "Could not reopen the session and send. Your text is still here.";
+      endedUnsentStatus.textContent = reopened
+        ? "The session reopened, but sending failed. Your text is still here."
+        : "Could not reopen the session and send. Your text is still here.";
     }
     endedResendButton.disabled = false;
     return;

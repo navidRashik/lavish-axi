@@ -9184,3 +9184,196 @@ test("L2: a session that ends with notes still queued shows them as not sent", a
     "the unsent note outlives the tab",
   );
 });
+
+// Round 2. A note queued but never sent is kept at session end flagged `unsent`: a later page lists
+// it, and only the user's click posts it.
+function liveFetch() {
+  const state = { posts: [] };
+  const fetchImpl = async (url, init) => {
+    if (String(url) === "/api/abc/prompts") {
+      const body = JSON.parse(init.body);
+      state.posts.push(body);
+      const chat = body.prompts.map((prompt) => chatEntryForPrompt(prompt, "2026-10-15T00:00:00.000Z"));
+      return { ok: true, json: async () => ({ status: "queued", chat, chat_revision: 1 }) };
+    }
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  return { state, fetchImpl };
+}
+
+function queueDraft(chrome, text) {
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: text, selector: "main", tag: "text", text: "" },
+  });
+}
+
+test("F1: a note left queued when the agent ends the session is never auto-posted by a later page", async () => {
+  const { state, fetchImpl } = liveFetch();
+  const localStore = new Map();
+  const tab1 = await createChromeHarness({ fetchImpl, localStore });
+  queueDraft(tab1, "Draft, never sent");
+  tab1.webSocket().listeners.get("ended")();
+
+  const tab2 = await createChromeHarness({ fetchImpl, localStore });
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 0, "a note the user never sent is not posted without a click");
+  assert.deepEqual(
+    tab2.queued().map((prompt) => prompt.prompt),
+    ["Draft, never sent"],
+  );
+
+  // The user's own Send delivers it, and the buffer flag never reaches the POST body.
+  tab2.element("send").onclick();
+  tab2.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 1);
+  assert.equal("unsent" in state.posts[0].prompts[0], false);
+  assert.equal(localStore.has("lavish-axi:retry:abc"), false);
+});
+
+test("F1: a note left queued when the user ends the session is never auto-posted by a later page", async () => {
+  const { state, fetchImpl } = liveFetch();
+  const localStore = new Map();
+  const tab1 = await createChromeHarness({ fetchImpl, localStore });
+  queueDraft(tab1, "Dropped by ending");
+  tab1.element("end").click();
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+  assert.equal(tab1.element("endedOverlay").hidden, false);
+
+  const tab2 = await createChromeHarness({ fetchImpl, localStore });
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 0);
+  assert.deepEqual(
+    tab2.queued().map((prompt) => prompt.prompt),
+    ["Dropped by ending"],
+  );
+});
+
+test("F1: a page opened on the ended session lists the unsent note as not sent", async () => {
+  const { state, fetchImpl } = liveFetch();
+  const localStore = new Map();
+  const tab1 = await createChromeHarness({ fetchImpl, localStore });
+  queueDraft(tab1, "Still not sent");
+  tab1.webSocket().listeners.get("ended")();
+
+  const tab2 = await createChromeHarness({
+    fetchImpl,
+    localStore,
+    sessionData: { ...defaultSessionData, initialEnded: true, initialEndedBy: "agent" },
+  });
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 0);
+  assert.equal(tab2.element("endedUnsent").hidden, false);
+  assert.match(tab2.element("endedUnsentList").innerHTML, /Still not sent/);
+});
+
+test("F2: an edit made after a failed Send replaces the buffered text another page would resend", async () => {
+  const { state, fetchImpl } = outageFetch();
+  const localStore = new Map();
+  const tab1 = await createChromeHarness({ fetchImpl, localStore });
+  queueDraft(tab1, "Before the edit");
+  tab1.element("send").onclick();
+  tab1.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+
+  tab1.element("queuedLog").dispatch("click", { target: queuedLogNode(["bubble", "queued"], 0) });
+  typeIntoQueuedEdit(tab1, "After the edit");
+  queuedLogKey(tab1, "Enter");
+  assert.equal(tab1.queued()[0].prompt, "After the edit");
+
+  state.up = true;
+  await createChromeHarness({ fetchImpl, localStore });
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 1);
+  assert.equal(state.posts[0].prompts[0].prompt, "After the edit");
+});
+
+test("F3: a resend that keeps failing while /health answers backs off instead of retrying every second", async () => {
+  const state = { attempts: 0 };
+  const fetchImpl = async (url) => {
+    if (String(url) === "/api/abc/prompts") {
+      state.attempts += 1;
+      throw new TypeError("fetch failed");
+    }
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  const chrome = await createChromeHarness({ fetchImpl });
+  queueDraft(chrome, "Keeps failing");
+  chrome.element("send").onclick();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+  assert.equal(state.attempts, 1);
+
+  const fire = async (ms) => {
+    chrome.runTimers(ms);
+    for (let i = 0; i < 6; i += 1) await flushPromises();
+  };
+  await fire(1000);
+  assert.equal(state.attempts, 2, "the first probe resends after 1s");
+  await fire(1000);
+  assert.equal(state.attempts, 2, "the next retry is not another 1s away");
+  await fire(2000);
+  assert.equal(state.attempts, 3, "it waits 2s");
+  await fire(4000);
+  assert.equal(state.attempts, 4, "then 4s");
+});
+
+test("F5: a Send answered with a 5xx is retried once the server is healthy", async () => {
+  const posts = [];
+  const fetchImpl = async (url, init) => {
+    if (String(url) === "/api/abc/prompts") {
+      const body = JSON.parse(init.body);
+      posts.push(body);
+      if (posts.length === 1) return { ok: false, status: 503, json: async () => ({}) };
+      const chat = body.prompts.map((prompt) => chatEntryForPrompt(prompt, "2026-10-15T00:00:00.000Z"));
+      return { ok: true, json: async () => ({ status: "queued", chat, chat_revision: 1 }) };
+    }
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  const chrome = await createChromeHarness({ fetchImpl });
+  queueDraft(chrome, "Server hiccup");
+  chrome.element("send").onclick();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+  assert.equal(posts.length, 1);
+  assert.equal(chrome.queued().length, 1);
+
+  chrome.runTimers(1000);
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  assert.equal(posts.length, 2, "the 5xx batch is resent");
+  assert.equal(posts[1].prompts[0].prompt_id, posts[0].prompts[0].prompt_id);
+  assert.equal(chrome.queued().length, 0);
+  assert.equal(chrome.localStore.has("lavish-axi:retry:abc"), false);
+});
+
+test("F6: a resend whose reopen worked but whose send failed says the send failed", async () => {
+  const state = { prompts: 0 };
+  const fetchImpl = async (url) => {
+    if (String(url) === "/api/sessions") {
+      return { ok: true, json: async () => ({ key: "abc", status: "opened" }) };
+    }
+    if (String(url) === "/api/abc/prompts") {
+      state.prompts += 1;
+      if (state.prompts === 1) {
+        return { ok: false, status: 409, json: async () => ({ status: "ended", error: "session already ended" }) };
+      }
+      return { ok: false, status: 500, json: async () => ({}) };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  const chrome = await createChromeHarness({ fetchImpl });
+  await sendIntoEndedSession(chrome, "Reopened, not sent");
+
+  chrome.element("endedResend").click();
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+
+  assert.equal(state.prompts, 2);
+  const status = chrome.element("endedUnsentStatus").textContent;
+  assert.match(status, /reopened/i);
+  assert.match(status, /failed/i);
+  assert.doesNotMatch(status, /could not reopen/i);
+  assert.equal(chrome.queued().length, 1);
+  assert.equal(chrome.element("endedResend").disabled, false);
+  assert.equal(chrome.reloadCount(), 0);
+});
