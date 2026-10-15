@@ -77,6 +77,9 @@ async function createChromeHarness({
   sessionData = defaultSessionData,
   artifactSrc = "",
   storage = new Map(),
+  // Backs `localStorage`, which outlives the tab: the Send retry buffer lives there so a reload or
+  // a reopened tab during a server outage still resends. Pass one Map to two harnesses to model that.
+  localStore = new Map(),
   beginLoadResponses = [],
   handoffResponses = [],
   storedQueue = null,
@@ -468,6 +471,17 @@ async function createChromeHarness({
         storage.delete(key);
       },
     },
+    localStorage: {
+      getItem(key) {
+        return localStore.has(key) ? localStore.get(key) : null;
+      },
+      setItem(key, value) {
+        localStore.set(key, String(value));
+      },
+      removeItem(key) {
+        localStore.delete(key);
+      },
+    },
     window: {
       clearTimeout: fakeClearTimeout,
       setTimeout: fakeSetTimeout,
@@ -619,6 +633,7 @@ async function createChromeHarness({
     },
     focusLog,
     storage,
+    localStore,
     warningRows() {
       return element("warningsList").children.filter((child) => String(child.className).startsWith("warning-row"));
     },
@@ -8954,4 +8969,213 @@ test("whiteboard init flags libraries that changed between the libraries and sou
   });
   assert.equal(failed.librariesUnavailable, true);
   assert.equal(JSON.stringify(failed.libraries), "[]");
+});
+
+// L1: a Send that cannot reach the server keeps its prompts in a localStorage retry buffer (never
+// the queue - sessionStorage and the server's state.json stay the source of truth) and resends them
+// once when /health answers again, under the prompt ids the server dedupes.
+function outageFetch() {
+  const state = { up: false, posts: [], healthChecks: 0 };
+  const fetchImpl = async (url, init) => {
+    if (String(url) === "/health") {
+      state.healthChecks += 1;
+      if (!state.up) throw new TypeError("fetch failed");
+      return { ok: true, json: async () => ({ ok: true }) };
+    }
+    if (String(url) === "/api/abc/prompts") {
+      if (!state.up) throw new TypeError("fetch failed");
+      const body = JSON.parse(init.body);
+      state.posts.push(body);
+      const chat = body.prompts.map((prompt) => chatEntryForPrompt(prompt, "2026-10-15T00:00:00.000Z"));
+      return { ok: true, json: async () => ({ status: "queued", chat, chat_revision: 1 }) };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  return { state, fetchImpl };
+}
+
+test("L1: a Send made while the server is down is buffered and delivered once when /health returns", async () => {
+  const { state, fetchImpl } = outageFetch();
+  const chrome = await createChromeHarness({ fetchImpl });
+
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Sent during the outage", selector: "button#ship", tag: "choice", text: "Ship" },
+  });
+  const queuedId = chrome.queued()[0].prompt_id;
+  chrome.element("send").onclick();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  await flushPromises();
+
+  const buffered = JSON.parse(chrome.localStore.get("lavish-axi:retry:abc") || "[]");
+  assert.deepEqual(
+    buffered.map((prompt) => prompt.prompt_id),
+    [queuedId],
+    "the unsent prompt is buffered under its id",
+  );
+  assert.equal(chrome.queued().length, 1, "the queue still holds it while the server is down");
+  assert.equal(state.posts.length, 0);
+
+  // Still down: a retry probe finds no server and posts nothing.
+  chrome.runTimers();
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 0);
+
+  state.up = true;
+  chrome.runTimers();
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 1, "delivered once when the server is back");
+  assert.deepEqual(
+    state.posts[0].prompts.map((prompt) => prompt.prompt_id),
+    [queuedId],
+  );
+  assert.equal(chrome.localStore.has("lavish-axi:retry:abc"), false, "the buffer clears on delivery");
+  assert.equal(chrome.queued().length, 0, "the delivered note leaves the queue");
+
+  chrome.runTimers();
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 1, "nothing is sent twice");
+});
+
+test("L1: a page reloaded during the outage resends the buffered prompt once on boot", async () => {
+  const { state, fetchImpl } = outageFetch();
+  state.up = true;
+  const localStore = new Map([
+    [
+      "lavish-axi:retry:abc",
+      JSON.stringify([
+        { uid: "", prompt: "Typed before the reload", selector: "main", tag: "text", text: "", prompt_id: "keep-me-1" },
+      ]),
+    ],
+  ]);
+  // A fresh tab: its sessionStorage queue is gone, only the retry buffer survived.
+  const chrome = await createChromeHarness({ fetchImpl, localStore });
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+
+  assert.equal(state.posts.length, 1);
+  assert.deepEqual(
+    state.posts[0].prompts.map((prompt) => prompt.prompt_id),
+    ["keep-me-1"],
+  );
+  assert.equal(localStore.has("lavish-axi:retry:abc"), false);
+  assert.equal(chrome.queued().length, 0);
+});
+
+// L2: a Send refused with 409 because the session ended must never drop the text. It stays visible
+// as "not sent", and one click reopens the session for this file and sends it there.
+function endedThenLiveFetch({ reopenStatus = "opened" } = {}) {
+  const state = { ended: true, prompts: [], sessions: [] };
+  const fetchImpl = async (url, init) => {
+    if (String(url) === "/api/sessions") {
+      const body = JSON.parse(init.body);
+      state.sessions.push(body);
+      if (reopenStatus === "opened") state.ended = false;
+      return { ok: true, json: async () => ({ key: "abc", file: body.file, status: reopenStatus }) };
+    }
+    if (String(url) === "/api/abc/prompts") {
+      const body = JSON.parse(init.body);
+      state.prompts.push(body);
+      if (state.ended) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ status: "ended", error: "session already ended", ended_by: "agent" }),
+        };
+      }
+      const chat = body.prompts.map((prompt) => chatEntryForPrompt(prompt, "2026-10-15T00:00:00.000Z"));
+      return { ok: true, json: async () => ({ status: "queued", chat, chat_revision: 1 }) };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  return { state, fetchImpl };
+}
+
+async function sendIntoEndedSession(chrome, text) {
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: text, selector: "button#ship", tag: "choice", text: "Ship" },
+  });
+  chrome.element("send").onclick();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  await flushPromises();
+}
+
+test("L2: a Send refused because the session ended shows the text as not sent", async () => {
+  const { fetchImpl } = endedThenLiveFetch();
+  const chrome = await createChromeHarness({ fetchImpl });
+  await sendIntoEndedSession(chrome, "Too late <b>really</b>");
+
+  assert.equal(chrome.element("endedOverlay").hidden, false);
+  assert.equal(chrome.queued().length, 1, "the refused text is kept");
+  const unsent = chrome.element("endedUnsent");
+  assert.equal(unsent.hidden, false, "the not-sent state is visible");
+  assert.match(chrome.element("endedUnsentTitle").textContent, /not sent/i);
+  assert.match(chrome.element("endedUnsentList").innerHTML, /Too late &lt;b&gt;really&lt;\/b&gt;/);
+  assert.equal(chrome.element("endedResend").disabled, false);
+});
+
+test("L2: a Send refused because the session ended keeps the prompt in the retry buffer", async () => {
+  const { state, fetchImpl } = endedThenLiveFetch();
+  const chrome = await createChromeHarness({ fetchImpl });
+  await sendIntoEndedSession(chrome, "Outlives the tab");
+  const refusedId = state.prompts[0].prompts[0].prompt_id;
+
+  const buffered = JSON.parse(chrome.localStore.get("lavish-axi:retry:abc") || "[]");
+  assert.deepEqual(
+    buffered.map((prompt) => prompt.prompt_id),
+    [refusedId],
+    "sessionStorage dies with the tab, so the refused text must survive in localStorage",
+  );
+});
+
+test("L2: one click reopens the session for this file and delivers the not-sent text once", async () => {
+  const { state, fetchImpl } = endedThenLiveFetch();
+  const chrome = await createChromeHarness({ fetchImpl });
+  await sendIntoEndedSession(chrome, "Too late");
+  const refusedId = state.prompts[0].prompts[0].prompt_id;
+
+  chrome.element("endedResend").click();
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+
+  assert.deepEqual(state.sessions, [{ file: "/tmp/artifact.html", reopen: true }]);
+  assert.equal(state.prompts.length, 2);
+  assert.deepEqual(
+    state.prompts[1].prompts.map((prompt) => prompt.prompt_id),
+    [refusedId],
+    "the resend carries the refused prompt's id, so the server dedupes a repeat",
+  );
+  assert.equal(chrome.queued().length, 0);
+  assert.equal(chrome.reloadCount(), 1, "the chrome reloads into the live session");
+});
+
+test("L2: a resend that cannot reopen the session keeps the text and says so", async () => {
+  const { state, fetchImpl } = endedThenLiveFetch({ reopenStatus: "error" });
+  const chrome = await createChromeHarness({ fetchImpl });
+  await sendIntoEndedSession(chrome, "Still mine");
+
+  chrome.element("endedResend").click();
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+
+  assert.equal(state.prompts.length, 1, "nothing is posted into a session that did not reopen");
+  assert.equal(chrome.queued().length, 1);
+  assert.equal(chrome.element("endedUnsent").hidden, false);
+  assert.match(chrome.element("endedUnsentList").innerHTML, /Still mine/);
+  assert.match(chrome.element("endedUnsentStatus").textContent, /could not/i);
+  assert.equal(chrome.element("endedResend").disabled, false);
+  assert.equal(chrome.reloadCount(), 0);
+});
+
+test("L2: a session that ends with notes still queued shows them as not sent", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Queued, never sent", selector: "main", tag: "text", text: "" },
+  });
+  chrome.webSocket().listeners.get("ended")();
+
+  assert.equal(chrome.queued().length, 1);
+  assert.equal(chrome.element("endedUnsent").hidden, false);
+  assert.match(chrome.element("endedUnsentList").innerHTML, /Queued, never sent/);
 });
