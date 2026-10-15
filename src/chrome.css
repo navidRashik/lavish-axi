@@ -1650,6 +1650,40 @@ body.lavish {
 .ended-action {
   margin-top: var(--space-8);
 }
+.ended-unsent {
+  margin-top: var(--space-8);
+  text-align: left;
+}
+.ended-unsent[hidden] {
+  display: none;
+}
+.ended-unsent-title {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+.ended-unsent-list {
+  max-height: 160px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ended-unsent-status {
+  margin: 6px 0 0;
+  color: var(--fg-faint);
+  font-size: 12px;
+}
+.ended-unsent-status:empty {
+  display: none;
+}
+.ended-unsent-copy {
+  margin-left: var(--space-4);
+}
 .layout-gate-bypass {
   margin-left: var(--space-4);
 }
