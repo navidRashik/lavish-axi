@@ -202,7 +202,19 @@ test("reply exits 0 only after the server accepts, delivers the reply, and clear
       );
       assert.equal(working.data.mode, "agent-busy");
 
-      const replyPromise = runCli(["reply", artifact, "--agent-reply", "Decision recorded."], { env });
+      // The reply child is the cause of the events below, and a cold `node` start of it alone
+      // can outlast the 5 s event window on a loaded host. Its exit is the synchronisation
+      // point: the server broadcasts agent-reply and the waiting presence before it answers
+      // the POST (publishAgentReply runs before res.json in src/server.js), so once the child
+      // has exited 0 with "status: sent" both frames are already on the socket, buffered by
+      // the live iterator, and the 5 s window only covers loopback delivery.
+      const reply = await runCli(["reply", artifact, "--agent-reply", "Decision recorded."], { env });
+      assert.equal(reply.status, 0, reply.stderr || reply.stdout);
+      assert.match(reply.stdout, /status: sent/);
+      assert.match(reply.stdout, /no longer showing Working/);
+      assert.doesNotMatch(reply.stdout, /status: waiting/);
+      assert.ok(reply.stdout.includes(`file: ${path.sep === "\\" ? JSON.stringify(absolute) : absolute}`));
+
       const accepted = await live.nextMatching(
         (message) => message.type === "agent-reply" && message.data.text === "Decision recorded.",
         "agent-reply event",
@@ -213,13 +225,6 @@ test("reply exits 0 only after the server accepts, delivers the reply, and clear
         "waiting presence",
       );
       assert.equal(waiting.data.state, "waiting");
-
-      const reply = await replyPromise;
-      assert.equal(reply.status, 0, reply.stderr || reply.stdout);
-      assert.match(reply.stdout, /status: sent/);
-      assert.match(reply.stdout, /no longer showing Working/);
-      assert.doesNotMatch(reply.stdout, /status: waiting/);
-      assert.ok(reply.stdout.includes(`file: ${path.sep === "\\" ? JSON.stringify(absolute) : absolute}`));
     } finally {
       await live.close();
     }
