@@ -2090,7 +2090,8 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
   let raceRestarted = false;
   let deadline = Date.now() + 5000;
   let answered = false;
-  const stillStarting = () => !answered && starting.running && Date.now() < starting.startedAt + SERVER_START_CEILING_MS;
+  const stillStarting = () =>
+    !answered && starting.running && Date.now() < starting.startedAt + SERVER_START_CEILING_MS;
   while (Date.now() < deadline || stillStarting()) {
     const {
       baseUrl: liveUrl,
