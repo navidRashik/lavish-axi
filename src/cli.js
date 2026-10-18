@@ -1873,6 +1873,8 @@ const MAX_HEALTH_BODY_BYTES = 256 * 1024;
 // A reconcile asks the server to re-detect Tailscale and retry any unbound address before
 // answering, which can take longer than a plain health read.
 const HEALTH_RECONCILE_TIMEOUT_MS = 3000;
+// How long a spawned server that is still running is given to answer before the CLI gives up on it.
+const SERVER_START_CEILING_MS = 30_000;
 
 // Every address a Lavish server on this port could be answering at, in preference order: the host
 // this CLI is configured for, loopback, then every other local interface address. Agents on one
@@ -2076,7 +2078,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
       }
     }
   }
-  await startServer(port, { alsoListen });
+  let starting = await startServer(port, { alsoListen });
   const replacedForNetwork =
     Boolean(existing) &&
     existing.app === "lavish-axi" &&
@@ -2087,13 +2089,16 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
   let networkRestarted = replacedForNetwork;
   let raceRestarted = false;
   let deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
+  let answered = false;
+  const stillStarting = () => !answered && starting.running && Date.now() < starting.startedAt + SERVER_START_CEILING_MS;
+  while (Date.now() < deadline || stillStarting()) {
     const {
       baseUrl: liveUrl,
       health,
       duplicates: liveDuplicates,
       foreign: liveForeign,
     } = await findRunningServer(port, { reconcileNetwork: true });
+    answered = health !== null;
     if (liveForeign) throw otherInstallationError(port, liveForeign);
     const liveMissing =
       health?.app === "lavish-axi" ? missingServerHosts(health, hostsToServe(requiredHosts, liveDuplicates)) : [];
@@ -2116,7 +2121,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
       await stopDuplicateServers(liveDuplicates, { reloadKey });
       await requestShutdown(liveUrl, { reloadKey, reason: serverReplacementReason(VERSION, health) });
       if (!(await waitForPortFree(liveUrl, 3000))) break;
-      await startServer(port, { alsoListen });
+      starting = await startServer(port, { alsoListen });
       deadline = Date.now() + 5000;
       continue;
     }
@@ -2128,7 +2133,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
       alsoListen = inheritedListenHosts([health], requiredHosts, alsoListen);
       await requestShutdown(liveUrl, { reloadKey, reason: "" });
       if (!(await waitForPortFree(liveUrl, 3000))) break;
-      await startServer(port, { alsoListen });
+      starting = await startServer(port, { alsoListen });
       networkRestarted = true;
       deadline = Date.now() + 5000;
       continue;
@@ -2345,6 +2350,9 @@ function unidentifiedListenerError(baseUrl) {
   );
 }
 
+// A spawned server can take several seconds to answer on a loaded machine, so the caller keeps
+// waiting for as long as this child is alive (bounded by SERVER_START_CEILING_MS). Once it exits,
+// only the short grace for another server that won the port remains.
 async function startServer(port, { alsoListen = [] } = {}) {
   await ensureStateDir();
   const entry = resolveServerEntry();
@@ -2354,14 +2362,22 @@ async function startServer(port, { alsoListen = [] } = {}) {
   } catch {
     // If logging cannot be initialized, keep the server behavior unchanged.
   }
+  const starting = { running: true, startedAt: Date.now() };
   try {
     const args = [entry, "server", "--port", String(port)];
     for (const host of alsoListen) args.push("--also-listen", host);
     const child = spawn(process.execPath, args, createServerSpawnOptions(logFd));
+    child.once("exit", () => {
+      starting.running = false;
+    });
+    child.once("error", () => {
+      starting.running = false;
+    });
     child.unref();
   } finally {
     if (logFd !== null) closeSync(logFd);
   }
+  return starting;
 }
 
 // The detached server child must stamp stdio before evaluating the CLI. In source layout that
