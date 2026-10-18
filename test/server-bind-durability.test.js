@@ -70,6 +70,26 @@ function listenHealth(host, port, body) {
   });
 }
 
+// A cold `node` start of the server entry takes several seconds on a loaded machine, so a fixed
+// window races the child's own startup. Wait for as long as the child is alive and has not
+// answered; the ceiling only backstops a child that hangs without either answering or exiting.
+const CHILD_START_CEILING_MS = 30_000;
+
+/** @param {import("node:child_process").ChildProcess} child @param {number} port */
+async function waitForChildHealth(child, port) {
+  const ceiling = Date.now() + CHILD_START_CEILING_MS;
+  while (child.exitCode === null && child.signalCode === null && Date.now() < ceiling) {
+    try {
+      const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+      if (health.ok) return true;
+    } catch {
+      // Not listening yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
 test("a degraded bind stays quiet while the requested address is still unavailable", async () => {
   await withTempDir(async (dir) => {
     const server = await serve({
@@ -442,23 +462,12 @@ test("a clean detached-server shutdown exits 0 without an error in server.log", 
       },
       stdio: ["ignore", fd, fd],
     });
+    // Subscribed before the shutdown request so an exit that races the response is not missed.
+    const exited = once(child, "exit");
     try {
-      const deadline = Date.now() + 5000;
-      let ready = false;
-      while (Date.now() < deadline) {
-        try {
-          const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
-          if (health.ok) {
-            ready = true;
-            break;
-          }
-        } catch {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-      }
-      assert.equal(ready, true);
+      assert.equal(await waitForChildHealth(child, port), true);
       await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
-      const [code] = await once(child, "exit");
+      const [code] = await exited;
       assert.equal(code, 0);
     } finally {
       child.kill();
@@ -503,7 +512,8 @@ test("a detached server crash writes a timestamped line to server.log", async ()
 
 test(
   "a post-listen HTTP error is logged while the server remains controllably alive",
-  { timeout: 10_000 },
+  // Covers the child-start ceiling in waitForChildHealth; a healthy run still finishes in seconds.
+  { timeout: CHILD_START_CEILING_MS + 15_000 },
   async () => {
     await withTempDir(async (dir) => {
       const preload = path.join(dir, "post-listen-error.mjs");
@@ -538,23 +548,11 @@ net.Server.prototype.emit = function (event, ...args) {
         },
         stdio: ["ignore", fd, fd],
       });
+      const exited = once(child, "exit");
       try {
-        let ready = false;
-        const deadline = Date.now() + 5000;
-        while (Date.now() < deadline) {
-          try {
-            const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
-            if (health.ok) {
-              ready = true;
-              break;
-            }
-          } catch {
-            await new Promise((resolve) => setTimeout(resolve, 50));
-          }
-        }
-        assert.equal(ready, true, "post-listen error must not take down the server");
+        assert.equal(await waitForChildHealth(child, port), true, "post-listen error must not take down the server");
         await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
-        const [code] = await once(child, "exit");
+        const [code] = await exited;
         assert.equal(code, 0);
       } finally {
         child.kill();
