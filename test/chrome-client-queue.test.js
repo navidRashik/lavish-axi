@@ -1700,8 +1700,9 @@ test("a failed timeout fallback keeps the queue and a timely retry sends it once
   await flushPromises();
 
   assert.equal(chrome.element("sendHint").hidden, false);
-  assert.match(chrome.element("sendHint").textContent, /feedback is still queued/i);
-  assert.match(chrome.element("sendHint").textContent, /click Send to Agent to retry/i);
+  assert.match(chrome.element("sendHint").textContent, /feedback is saved/i);
+  assert.match(chrome.element("sendHint").textContent, /will be sent automatically when Lavish is back/i);
+  assert.doesNotMatch(chrome.element("sendHint").textContent, /click Send to Agent to retry/i);
   assert.deepEqual(
     chrome.queued().map((prompt) => prompt.prompt),
     ["Retry me"],
@@ -9038,6 +9039,73 @@ test("L1: a Send made while the server is down is buffered and delivered once wh
   assert.equal(state.posts.length, 1, "nothing is sent twice");
 });
 
+test("L1: a Send that fails during the outage says it will be sent automatically", async () => {
+  const { fetchImpl } = outageFetch();
+  const chrome = await createChromeHarness({ fetchImpl });
+  queueDraft(chrome, "Typed while down");
+  chrome.element("send").onclick();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+
+  const hint = chrome.element("sendHint").textContent;
+  assert.equal(hint, "Could not send. Your feedback is saved and will be sent automatically when Lavish is back.");
+  assert.doesNotMatch(hint, /click Send to Agent/i, "nothing asks for a click the probe already makes");
+});
+
+test("L1: an accepted resend after a stop retires the stop banner it outlived", async () => {
+  const { state, fetchImpl } = outageFetch();
+  const chrome = await createChromeHarness({ fetchImpl });
+  const banner = chrome.element("outdatedBanner");
+  sendChromeOutdated(chrome, "stop");
+  assert.equal(banner.hidden, false);
+
+  queueDraft(chrome, "Sent while stopped");
+  chrome.element("send").onclick();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 0);
+  assert.equal(banner.hidden, false, "the stop banner stays true while Lavish is down");
+
+  state.up = true;
+  chrome.runTimers();
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 1, "the buffered Send was resent and accepted");
+  assert.equal(banner.hidden, true, "Lavish is running again, so 'start it again' is no longer true");
+});
+
+test("L1: an accepted resend leaves a banner raised after the outage began", async () => {
+  const { state, fetchImpl } = outageFetch();
+  const chrome = await createChromeHarness({ fetchImpl });
+  const banner = chrome.element("outdatedBanner");
+  sendChromeOutdated(chrome, "stop");
+  queueDraft(chrome, "Sent while stopped");
+  chrome.element("send").onclick();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+
+  // A newer banner says something else that stays true after the resend.
+  sendChromeOutdated(chrome, "upgrade");
+  state.up = true;
+  chrome.runTimers();
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 1);
+  assert.equal(banner.hidden, false);
+  assert.match(chrome.element("outdatedText").textContent, /Lavish was updated/);
+});
+
+test("L1: a Send that never hit an outage leaves the stop banner to the user", async () => {
+  const { state, fetchImpl } = outageFetch();
+  state.up = true;
+  const chrome = await createChromeHarness({ fetchImpl });
+  sendChromeOutdated(chrome, "stop");
+  queueDraft(chrome, "Sent with the server up");
+  chrome.element("send").onclick();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+  assert.equal(state.posts.length, 1);
+  assert.equal(chrome.element("outdatedBanner").hidden, false, "no Send failed in that outage, so it is not ours");
+});
+
 test("L1: a page reloaded during the outage resends the buffered prompt once on boot", async () => {
   const { state, fetchImpl } = outageFetch();
   state.up = true;
@@ -9338,6 +9406,7 @@ test("F5: a Send answered with a 5xx is retried once the server is healthy", asy
   for (let i = 0; i < 4; i += 1) await flushPromises();
   assert.equal(posts.length, 1);
   assert.equal(chrome.queued().length, 1);
+  assert.match(chrome.element("sendHint").textContent, /will be sent automatically when Lavish is back/i);
 
   chrome.runTimers(1000);
   for (let i = 0; i < 6; i += 1) await flushPromises();
@@ -9345,6 +9414,27 @@ test("F5: a Send answered with a 5xx is retried once the server is healthy", asy
   assert.equal(posts[1].prompts[0].prompt_id, posts[0].prompts[0].prompt_id);
   assert.equal(chrome.queued().length, 0);
   assert.equal(chrome.localStore.has("lavish-axi:retry:abc"), false);
+});
+
+test("F5: a Send refused with a non-5xx error still asks for the click it needs", async () => {
+  const posts = [];
+  const fetchImpl = async (url, init) => {
+    if (String(url) === "/api/abc/prompts") {
+      posts.push(JSON.parse(init.body));
+      return { ok: false, status: 403, json: async () => ({}) };
+    }
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  const chrome = await createChromeHarness({ fetchImpl });
+  queueDraft(chrome, "Refused");
+  chrome.element("send").onclick();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+
+  assert.match(chrome.element("sendHint").textContent, /click Send to Agent to retry/i);
+  chrome.runTimers(1000);
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  assert.equal(posts.length, 1, "nothing retries a refusal by itself");
 });
 
 test("F6: a resend whose reopen worked but whose send failed says the send failed", async () => {

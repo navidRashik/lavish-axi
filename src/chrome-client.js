@@ -324,6 +324,9 @@ const SEND_STALLED_COPY =
   "Still trying to send. Your feedback is saved in this tab. Keep this tab open while Lavish catches up, and check that the server is running.";
 const SEND_FAILED_COPY =
   "Could not send. Your feedback is still queued in this tab. Check that Lavish is running, then click Send to Agent to retry.";
+// A network failure or a 5xx on an ordinary Send is resent by the retry probe, so no click is asked for.
+// "Could not send" rather than "could not reach": a 5xx is a server that answered and failed.
+const SEND_RETRYING_COPY = "Could not send. Your feedback is saved and will be sent automatically when Lavish is back.";
 const TERMINAL_SEND_FAILED_COPY =
   "Could not send. Your terminal feedback is still queued in this tab. Check that Lavish is running, then click Send & End to retry the same batch.";
 const HEALTH_NO_ANSWER_TITLE = "Lavish did not answer.";
@@ -2231,13 +2234,13 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
       });
     }
   } catch (error) {
-    showQueuedSendFailure(submission.terminal ? TERMINAL_SEND_FAILED_COPY : SEND_FAILED_COPY, {
-      kind: submission.terminal ? "terminal" : "submission",
-      operation: submission.terminal || submission,
-    });
     // The server never answered: the retry buffer still holds the batch, so resend it once
     // /health answers. Send & End keeps its own explicit retry, which also ends the session.
-    if (!submission.terminal) scheduleSendRetryProbe();
+    if (submission.terminal) {
+      showQueuedSendFailure(TERMINAL_SEND_FAILED_COPY, { kind: "terminal", operation: submission.terminal });
+    } else {
+      retrySendAfterOutage(submission);
+    }
     throw error;
   }
   if (!response.ok) {
@@ -2287,14 +2290,15 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
           operation: submission.terminal || submission,
         });
       }
+    } else if (!submission.terminal && response.status >= 500) {
+      // A 5xx is the server failing, not refusing this batch: the buffer keeps it, so retry it too.
+      retrySendAfterOutage(submission);
     } else {
       showQueuedSendFailure(submission.terminal ? TERMINAL_SEND_FAILED_COPY : SEND_FAILED_COPY, {
         kind: submission.terminal ? "terminal" : "submission",
         operation: submission.terminal || submission,
       });
     }
-    // A 5xx is the server failing, not refusing this batch: the buffer keeps it, so retry it too.
-    if (!submission.terminal && response.status >= 500) scheduleSendRetryProbe();
     throw new Error("failed to submit queued prompts");
   }
   const accepted = typeof response.json === "function" ? await response.json().catch(() => null) : null;
@@ -2310,6 +2314,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
   // A 2xx means the server holds every prompt in this batch, whether or not the transcript settled them.
   forgetRetryPrompts(prompts);
   sendRetryProbeDelayMs = SEND_RETRY_PROBE_MIN_MS;
+  retireStopBannerAfterOutage();
   if (!acceptedChat || reconciledChat) {
     for (const prompt of prompts) {
       deliveredPrompts.add(prompt);
@@ -2330,6 +2335,23 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
 /** @type {ReturnType<typeof setTimeout> | null} */
 let sendRetryProbeTimer = null;
 let sendRetryProbeDelayMs = SEND_RETRY_PROBE_MIN_MS;
+// A Send failed while the stop banner was on screen, so an accepted send ends that same outage.
+let sendOutageUnderStopBanner = false;
+
+function retrySendAfterOutage(submission) {
+  showQueuedSendFailure(SEND_RETRYING_COPY, { kind: "submission", operation: submission });
+  if (outdatedBanner && !outdatedBanner.hidden && chromeOutdatedReason === "stop") sendOutageUnderStopBanner = true;
+  scheduleSendRetryProbe();
+}
+
+// "Lavish was stopped. Reload after you start it again." stops being true once a send that failed
+// in that outage is accepted. Any other reason's line stays true, so only the stop line goes. The
+// sticky "Lavish is not running." gate card is a different surface and is never touched here.
+function retireStopBannerAfterOutage() {
+  const sawStop = sendOutageUnderStopBanner;
+  sendOutageUnderStopBanner = false;
+  if (sawStop && chromeOutdatedReason === "stop") setChromeOutdated(false);
+}
 
 function scheduleSendRetryProbe() {
   if (ended || sendRetryProbeTimer) return;
