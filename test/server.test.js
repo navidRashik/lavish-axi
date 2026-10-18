@@ -5581,13 +5581,17 @@ test("a disconnect during immediate feedback take requeues the batch without wor
       client.on("error", reject);
     });
     await takePending;
-    socket.on("error", () => {});
-    socket.destroy();
-    releaseTake();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
+    // The poll holder is claimed before the store read, so the take in flight shows as listening.
+    // Watch presence from here rather than sleeping: the holder is released only after the
+    // restore has persisted, so "waiting" is the observable end of the requeue, however long the
+    // state write takes on a loaded machine.
     const presence = await startPresenceStream(base, key);
     try {
+      assert.equal(await presence.next(), "listening");
+      socket.on("error", () => {});
+      socket.destroy();
+      releaseTake();
+      // A take delivered to the dead socket would surface here as "working" instead.
       assert.equal(await presence.next(), "waiting");
     } finally {
       await presence.close();
