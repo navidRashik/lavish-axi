@@ -5138,10 +5138,10 @@ test("bare polls have a visible agent listener identity and none is reserved", a
     });
     const { key } = await open.json();
     const controller = new AbortController();
-    const poll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}`, { signal: controller.signal }).catch(
-      (error) => error,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The server writes the `Lavish-Poll-State: listening` header only after the holder is in
+    // activePolls, so awaiting the response head (not a fixed sleep) is the readiness signal.
+    const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}`, { signal: controller.signal });
+    assert.equal(poll.headers.get("lavish-poll-state"), "listening");
     const health = await fetch(`${base}/health`).then((response) => response.json());
     assert.equal(health.listeners.find((listener) => listener.key === key).label, "agent-listener");
     const conflict = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&owner=worker-8`);
@@ -5150,7 +5150,7 @@ test("bare polls have a visible agent listener identity and none is reserved", a
     assert.equal(reserved.status, 400);
     assert.equal((await reserved.json()).code, "VALIDATION_ERROR");
     controller.abort();
-    await poll;
+    await poll.text().catch((error) => error);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
