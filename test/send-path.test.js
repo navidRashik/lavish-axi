@@ -49,6 +49,30 @@ test("calls named only in comments or prose do not count either way", () => {
   );
 });
 
+test("a queuePrompt call shown as page text is not a queue", () => {
+  const pre = `<!doctype html><html><body><pre>window.lavish.queuePrompt("example")</pre></body></html>`;
+  assert.equal(analyzeSendPath(pre).stranded, false, "a <pre> sample is page text");
+  const prose = `<!doctype html><html><body><p>Call <code>lavish.queuePrompt()</code> to queue.</p></body></html>`;
+  assert.equal(analyzeSendPath(prose).stranded, false, "prose and <code> are page text");
+  const inert = `<!doctype html><html><body><script type="text/plain">lavish.queuePrompt("x")</script></body></html>`;
+  assert.equal(analyzeSendPath(inert).stranded, false, "a non-JavaScript script block never runs");
+});
+
+test("a send shown only as page text does not count as a send", () => {
+  const html = page(`go.onclick = () => window.lavish.queuePrompt("Ship it");`).replace(
+    "</body>",
+    "<pre>lavish.sendQueuedPrompts()</pre></body>",
+  );
+  assert.equal(analyzeSendPath(html).stranded, true);
+});
+
+test("a queuePrompt in an inline event handler attribute is a queue", () => {
+  const html = `<!doctype html><html><body><button onclick="window.lavish.queuePrompt('Ship it')">Go</button></body></html>`;
+  assert.equal(analyzeSendPath(html).stranded, true);
+  const sent = `<!doctype html><html><body><button onclick="lavish.queuePrompt('A'); lavish.sendQueuedPrompts()">Go</button></body></html>`;
+  assert.equal(analyzeSendPath(sent).stranded, false);
+});
+
 test("the open output carries the warning and puts the fix first in next_step", () => {
   const output = createOpenOutput({
     file: "/tmp/a.html",
