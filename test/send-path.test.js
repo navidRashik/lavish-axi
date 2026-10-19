@@ -73,6 +73,16 @@ test("a queuePrompt in an inline event handler attribute is a queue", () => {
   assert.equal(analyzeSendPath(sent).stranded, false);
 });
 
+test("handler-looking text outside a start tag is page text", () => {
+  const text = `<!doctype html><html><body><pre> onclick="lavish.queuePrompt(&quot;example&quot;)"</pre></body></html>`;
+  assert.equal(analyzeSendPath(text).stranded, false, "handler text inside <pre> is not a handler");
+  const hidden = page(`go.onclick = () => window.lavish.queuePrompt("Ship it");`).replace(
+    "</body>",
+    `<p> onclick="lavish.sendQueuedPrompts()"</p></body>`,
+  );
+  assert.equal(analyzeSendPath(hidden).stranded, true, "a send shown as text does not hide a real queue");
+});
+
 test("the open output carries the warning and puts the fix first in next_step", () => {
   const output = createOpenOutput({
     file: "/tmp/a.html",
