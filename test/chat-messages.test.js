@@ -102,18 +102,21 @@ test("Markdown images with optional titles remain literal text", () => {
 });
 
 test("malformed links and images stay literal without stalling", () => {
-  const inputs = (n) => [
-    "[".repeat(n) + " " + "![".repeat(n),
-    "[x](https://a(".repeat(n / 3),
-    "[x](https://example.test/" + "(".repeat(n),
-  ];
+  const inputs = (n) => ({
+    brackets: "[".repeat(n) + " " + "![".repeat(n),
+    recursiveLinks: "[x](https://a(".repeat(n / 3),
+    nestedDestination: "[x](https://example.test/" + "(".repeat(n),
+  });
   // CPU time, not wall time: a starved runner stretches wall time arbitrarily, but only the
   // render's own work accrues here. The bound is the growth ratio between two sizes in this same
   // process, so it does not depend on machine speed either: linear work grows ~4x when the input
   // grows 4x, and quadratic (catastrophic backtracking) work grows ~16x.
   const renderAll = (n) => {
+    const { brackets, recursiveLinks, nestedDestination } = inputs(n);
     const started = process.cpuUsage();
-    for (const input of inputs(n)) assert.equal(renderChatMarkdown(input), `<p>${input}</p>`);
+    assert.equal(renderChatMarkdown(brackets), `<p>${brackets}</p>`);
+    assert.equal(renderChatMarkdown(recursiveLinks), `<p>${recursiveLinks}</p>`);
+    assert.equal(renderChatMarkdown(nestedDestination), `<p>${nestedDestination}</p>`);
     const { user, system } = process.cpuUsage(started);
     return user + system;
   };
