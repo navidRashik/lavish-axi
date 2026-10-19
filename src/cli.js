@@ -2176,7 +2176,7 @@ const SERVER_EXIT_GRACE_MS = 5000;
 
 // LAVISH_AXI_SERVER_START_TIMEOUT_MS bounds how long the CLI waits on a spawned server that stays
 // alive without ever answering /health. Anything but a positive number means the default.
-export function resolveServerStartTimeoutMs(env = process.env) {
+function resolveServerStartTimeoutMs(env = process.env) {
   const value = Number(env.LAVISH_AXI_SERVER_START_TIMEOUT_MS?.trim() || NaN);
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_SERVER_START_TIMEOUT_MS;
 }
@@ -2189,11 +2189,11 @@ export function resolveServerStartTimeoutMs(env = process.env) {
  * @param {import("node:child_process").ChildProcess} child
  * @param {number} timeoutMs
  */
-export function startupWindow(child, timeoutMs, now = Date.now) {
-  const startedAt = now();
+function startupWindow(child, timeoutMs) {
+  const startedAt = Date.now();
   let exitedAt = /** @type {number | null} */ (null);
   return () => {
-    const at = now();
+    const at = Date.now();
     if (at - startedAt >= timeoutMs) return false;
     if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) return true;
     exitedAt ??= at;
