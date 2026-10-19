@@ -12,6 +12,7 @@ const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
 const SCRIPT_RE = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
 const SCRIPT_TYPE_RE = /\btype\s*=\s*["']?([^"'\s>]+)/i;
 const JS_TYPE_RE = /^(?:module|text\/javascript|application\/javascript|text\/ecmascript|application\/ecmascript)$/i;
+const START_TAG_RE = /<[a-z][a-z0-9-]*\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi;
 const HANDLER_RE = /\son[a-z]+\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const BLOCK_COMMENT_RE = /\/\*[\s\S]*?\*\//g;
 // A `//` right after `:` is a URL scheme ("https://"), not a comment.
@@ -30,8 +31,10 @@ function executableCode(html) {
     if (type && !JS_TYPE_RE.test(type)) continue;
     parts.push(body);
   }
-  for (const [, doubleQuoted, singleQuoted] of markup.replace(SCRIPT_RE, "").matchAll(HANDLER_RE)) {
-    parts.push(doubleQuoted ?? singleQuoted);
+  for (const [, attrs] of markup.replace(SCRIPT_RE, "").matchAll(START_TAG_RE)) {
+    for (const [, doubleQuoted, singleQuoted] of attrs.matchAll(HANDLER_RE)) {
+      parts.push(doubleQuoted ?? singleQuoted);
+    }
   }
   return parts.join("\n").replace(BLOCK_COMMENT_RE, "").replace(LINE_COMMENT_RE, "$1");
 }
