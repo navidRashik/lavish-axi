@@ -2108,7 +2108,8 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
       }
     }
   }
-  await startServer(port, { alsoListen });
+  const startTimeoutMs = resolveServerStartTimeoutMs();
+  let starting = startupWindow(await startServer(port, { alsoListen }), startTimeoutMs);
   const replacedForNetwork =
     Boolean(existing) &&
     existing.app === "lavish-axi" &&
@@ -2118,8 +2119,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
     !isServerOlderThanCli(VERSION, existing.version);
   let networkRestarted = replacedForNetwork;
   let raceRestarted = false;
-  let deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
+  while (starting()) {
     const {
       baseUrl: liveUrl,
       health,
@@ -2148,8 +2148,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
       await stopDuplicateServers(liveDuplicates, { reloadKey });
       await requestShutdown(liveUrl, { reloadKey, reason: serverReplacementReason(VERSION, health) });
       if (!(await waitForPortFree(liveUrl, 3000))) break;
-      await startServer(port, { alsoListen });
-      deadline = Date.now() + 5000;
+      starting = startupWindow(await startServer(port, { alsoListen }), startTimeoutMs);
       continue;
     }
     if (health?.network_stale === true && health.app === "lavish-axi") {
@@ -2160,9 +2159,8 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
       alsoListen = inheritedListenHosts([health], requiredHosts, alsoListen);
       await requestShutdown(liveUrl, { reloadKey, reason: "" });
       if (!(await waitForPortFree(liveUrl, 3000))) break;
-      await startServer(port, { alsoListen });
+      starting = startupWindow(await startServer(port, { alsoListen }), startTimeoutMs);
       networkRestarted = true;
-      deadline = Date.now() + 5000;
       continue;
     }
     await delay(100);
@@ -2171,6 +2169,36 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
   throw new AxiError("Lavish Editor server did not start", "SERVER_ERROR", [
     `Run \`lavish-axi server --port ${port}\` to inspect server startup`,
   ]);
+}
+
+const DEFAULT_SERVER_START_TIMEOUT_MS = 60_000;
+const SERVER_EXIT_GRACE_MS = 5000;
+
+// LAVISH_AXI_SERVER_START_TIMEOUT_MS bounds how long the CLI waits on a spawned server that stays
+// alive without ever answering /health. Anything but a positive number means the default.
+export function resolveServerStartTimeoutMs(env = process.env) {
+  const value = Number(env.LAVISH_AXI_SERVER_START_TIMEOUT_MS?.trim() || NaN);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_SERVER_START_TIMEOUT_MS;
+}
+
+// The wait for a spawned server lasts as long as that process is alive, because a cold start on a
+// loaded host has no fixed duration; `timeoutMs` only bounds a process that never answers. Once the
+// process has exited (a server that won the port makes it step aside), a short grace lets the
+// winner answer before the CLI gives up.
+/**
+ * @param {import("node:child_process").ChildProcess} child
+ * @param {number} timeoutMs
+ */
+export function startupWindow(child, timeoutMs, now = Date.now) {
+  const startedAt = now();
+  let exitedAt = /** @type {number | null} */ (null);
+  return () => {
+    const at = now();
+    if (at - startedAt >= timeoutMs) return false;
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) return true;
+    exitedAt ??= at;
+    return at - exitedAt < SERVER_EXIT_GRACE_MS;
+  };
 }
 
 function missingHostsError(port, missingHosts) {
@@ -2391,6 +2419,7 @@ async function startServer(port, { alsoListen = [] } = {}) {
     for (const host of alsoListen) args.push("--also-listen", host);
     const child = spawn(process.execPath, args, createServerSpawnOptions(logFd));
     child.unref();
+    return child;
   } finally {
     if (logFd !== null) closeSync(logFd);
   }

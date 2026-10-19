@@ -528,9 +528,10 @@ net.Server.prototype.emit = function (event, ...args) {
         stdio: ["ignore", fd, fd],
       });
       try {
+        // Wait as long as the server process lives: a loaded host can take longer than any fixed
+        // budget to start it, and an exit is the failure this test is about.
         let ready = false;
-        const deadline = Date.now() + 5000;
-        while (Date.now() < deadline) {
+        while (child.exitCode === null && child.signalCode === null) {
           try {
             const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
             if (health.ok) {
