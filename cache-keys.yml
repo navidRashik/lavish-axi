@@ -1,7 +1,8 @@
 # Cache and persisted-state keys whose name or shape is a contract with something already stored.
 # Changing a template orphans every entry written under the old one (open review tabs lose their
 # state; browsers keep serving cached attachments until ttl). Add or update a row in the same
-# change that adds or changes the key.
+# change that adds or changes the key. Routes that send `no-cache`/`no-store` are declared with
+# ttl 0, so making one cacheable is a ttl change here.
 keys:
   attachment-response:
     template: "/api/{key}/attachments/{id}"
@@ -30,4 +31,20 @@ keys:
   sheet-open:
     template: "lavish-axi:sheet-open:{key}"
     ttl: null
+    version: 1
+  events-stream:
+    template: "/events/{key}"
+    ttl: 0
+    version: 1
+  whiteboard-frame:
+    template: "/whiteboard-frame"
+    ttl: 0
+    version: 1
+  whiteboard-assets:
+    template: "/whiteboard-assets/{path}"
+    ttl: 0
+    version: 1
+  whiteboard-libraries:
+    template: "/api/whiteboard-libraries"
+    ttl: 0
     version: 1
