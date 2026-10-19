@@ -60,13 +60,16 @@ import {
 import { findPlaybook, listPlaybooks, playbookIds, PLAYBOOK_ROUTER_HELP } from "./playbooks.js";
 import { analyzeSelfPaint, SELF_PAINT_WARNING } from "./self-paint.js";
 import { analyzeSendPath, SEND_PATH_WARNING } from "./send-path.js";
-import { resolveDesignAssetPath, serve } from "./server.js";
 import { isHtmlPath } from "./artifact-path.js";
 import { canonicalFile, sessionKey, SessionStore } from "./session-store.js";
 import { generateSharePassword } from "./share-password.js";
 import { initDefaultTelemetry } from "./telemetry.js";
 import { excalidrawLibrariesDir, loadExcalidrawLibraries } from "./whiteboard-library-store.js";
 import { isValidItemId, parseAssignments, readState, setItem, stateFilePath } from "./state-store.js";
+
+// server.js pulls in express, chokidar and parse5. Only the commands that serve or export load it,
+// so a `poll` listener - often dozens of them alive at once - stays a small process.
+const loadServer = () => import("./server.js");
 
 const SHARE_VALUE_FLAGS = ["--password", "--token", "--site", "--update-key"];
 const COMMANDS = new Set([
@@ -761,7 +764,7 @@ async function exportCommand(args) {
   const { html, warnings } = await buildSelfContainedHtml(source, {
     baseDir: root,
     confineDir: root,
-    resolveAbsolute: resolveDesignAssetPath,
+    resolveAbsolute: (await loadServer()).resolveDesignAssetPath,
   });
   await writeFile(output, html);
   return createExportOutput({
@@ -827,7 +830,7 @@ export async function shareCommand(args) {
   const { html, warnings } = await buildSelfContainedHtml(source, {
     baseDir: root,
     confineDir: root,
-    resolveAbsolute: resolveDesignAssetPath,
+    resolveAbsolute: (await loadServer()).resolveDesignAssetPath,
   });
   const selfPaintWarning = analyzeSelfPaint(source).painted ? undefined : SELF_PAINT_WARNING;
 
@@ -1835,6 +1838,7 @@ function deepEqual(a, b) {
 async function serverCommand(args) {
   const port = Number(flagValue(args, "--port") || defaultPort());
   const debug = args.includes("--verbose") || process.env.LAVISH_AXI_DEBUG === "1";
+  const { serve } = await loadServer();
   const server = await serve({
     port,
     stateFile: stateFile(),
