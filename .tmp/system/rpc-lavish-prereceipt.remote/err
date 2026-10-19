@@ -1,0 +1,5 @@
+Previous session ended while 1 tool call remained pending: wait toolu_vrtx_01Semc8JDhibHfYZp2m5VUbS. The prior OMP process exited before recording tool result(s).
+Still starting after 12s — phase: createAgentSession > discoverSkills > capability:skills:omp-managed
+  logs: /home/navidanjum.chowdhury/.omp/logs/omp.2026-10-19.1987813.log · re-run with PI_DEBUG_STARTUP=1 for streaming phase markers
+Still starting after 22s — phase: createAgentSession
+  logs: /home/navidanjum.chowdhury/.omp/logs/omp.2026-10-19.1987813.log · re-run with PI_DEBUG_STARTUP=1 for streaming phase markers
