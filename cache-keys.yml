@@ -1,0 +1,33 @@
+# Cache and persisted-state keys whose name or shape is a contract with something already stored.
+# Changing a template orphans every entry written under the old one (open review tabs lose their
+# state; browsers keep serving cached attachments until ttl). Add or update a row in the same
+# change that adds or changes the key.
+keys:
+  attachment-response:
+    template: "/api/{key}/attachments/{id}"
+    ttl: 300
+    version: 1
+  queued-prompts:
+    template: "lavish-axi:queued:{key}"
+    ttl: null
+    version: 1
+  terminal-state:
+    template: "lavish-axi:terminal:{key}"
+    ttl: null
+    version: 1
+  warning-selection:
+    template: "lavish-axi:warning-selection:{key}"
+    ttl: null
+    version: 1
+  review-state:
+    template: "lavish-axi:review-state:{key}"
+    ttl: null
+    version: 1
+  retired-drafts:
+    template: "lavish-axi:retired-drafts:{key}"
+    ttl: null
+    version: 1
+  sheet-open:
+    template: "lavish-axi:sheet-open:{key}"
+    ttl: null
+    version: 1
