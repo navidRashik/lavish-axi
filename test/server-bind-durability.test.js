@@ -80,7 +80,9 @@ async function waitForChildHealth(child, port) {
   const ceiling = Date.now() + CHILD_START_CEILING_MS;
   while (child.exitCode === null && child.signalCode === null && Date.now() < ceiling) {
     try {
-      const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+      const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) }).then(
+        (response) => response.json(),
+      );
       if (health.ok) return true;
     } catch {
       // Not listening yet.
