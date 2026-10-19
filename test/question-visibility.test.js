@@ -251,6 +251,23 @@ test("many questions: answered ones, per-row checkboxes and repeated ids are not
   assert.equal(doc.querySelectorAll("[data-lavish-q=open]").length, 3);
 });
 
+test("a question made only of buttons counts until its buttons are disabled, then collapses", () => {
+  const { doc, render } = page((h) => [
+    h("div", { id: "open-btn" }, h("button", { "data-lavish-question": "approve" }, "Approve")),
+    h("div", { id: "done-btn" }, h("button", { "data-lavish-question": "rerun", disabled: "" }, "Rerun")),
+  ]);
+  render();
+  assert.equal(bar(doc).querySelector("strong").textContent, "❓ 1 question waiting");
+  assert.equal(doc.getElementById("open-btn").getAttribute("data-lavish-q"), "open");
+  const done = doc.getElementById("done-btn");
+  assert.equal(done.getAttribute("data-lavish-q"), "answered");
+  assert.equal(done.previousElementSibling.textContent, "✅ answered");
+
+  doc.getElementById("open-btn").querySelector("button").setAttribute("disabled", "");
+  render();
+  assert.equal(bar(doc), null);
+});
+
 test("the bar lists the oldest question first; undated ones follow in page order", () => {
   const { doc, render } = page((h) => [
     question(h, "undated", "Undated"),

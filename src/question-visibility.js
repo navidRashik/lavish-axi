@@ -102,14 +102,19 @@ export function lavishQuestionControls(scope) {
   );
 }
 
-// Answered in the shared store, or answered in the page: every control it holds is disabled
-// (directly or by a disabled fieldset). A question with no controls stays open.
+// Answered in the shared store, or answered in the page: every value control it holds is disabled
+// (directly or by a disabled fieldset). A question made only of buttons is answered when every
+// button is disabled. A question with no controls at all stays open.
 export function lavishQuestionAnswered(scope, item) {
   if (item?.status === "answered") return true;
+  const off = (control) => control.disabled || !!control.closest("fieldset[disabled]");
   const controls = lavishQuestionControls(scope);
-  return (
-    controls.length > 0 && controls.every((control) => control.disabled || !!control.closest("fieldset[disabled]"))
+  if (controls.length) return controls.every(off);
+  const own = scope.matches("button,input") ? [scope] : [];
+  const buttons = [...own, ...scope.querySelectorAll("button,input")].filter(
+    (control) => String(control.type || "").toLowerCase() !== "hidden",
   );
+  return buttons.length > 0 && buttons.every(off);
 }
 
 // What was picked: the store's answer, else an author-written "✅ …" line, else the selected
