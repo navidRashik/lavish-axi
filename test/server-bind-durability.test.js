@@ -13,7 +13,11 @@ import test from "node:test";
 import WebSocket from "ws";
 
 import { run, stopCommand, VERSION } from "../src/cli.js";
+import { FORK_BUILD_HEADER, FORK_BUILD_ID } from "../src/fork-build.js";
 import { serve } from "../src/server.js";
+
+// The server stops only for this fork's CLI, which names itself with this header.
+const FORK_HEADERS = { [FORK_BUILD_HEADER]: FORK_BUILD_ID };
 
 const SERVER_ENTRY = fileURLToPath(new URL("../bin/lavish-axi-server.js", import.meta.url));
 
@@ -461,7 +465,7 @@ test("a clean detached-server shutdown exits 0 without an error in server.log", 
     });
     try {
       assert.equal(await childServerReady(child, port, t.signal), true);
-      await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
+      await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST", headers: FORK_HEADERS });
       const [code] = await once(child, "exit");
       assert.equal(code, 0);
     } finally {
@@ -548,7 +552,7 @@ net.Server.prototype.emit = function (event, ...args) {
           true,
           "post-listen error must not take down the server",
         );
-        await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
+        await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST", headers: FORK_HEADERS });
         const [code] = await once(child, "exit");
         assert.equal(code, 0);
       } finally {
