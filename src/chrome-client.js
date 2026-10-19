@@ -1249,6 +1249,7 @@ function setAgentPresence(state) {
     workingBubble.innerHTML = '<span class="spinner"></span><span>Working...</span>';
     chatLog.appendChild(workingBubble);
   }
+  workingBubble.classList.toggle("is-external", agentPresence === "external");
   scrollElementIntoView(workingBubble);
 }
 
