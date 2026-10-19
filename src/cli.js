@@ -58,6 +58,7 @@ import {
 } from "./plugin.js";
 import { findPlaybook, listPlaybooks, playbookIds, PLAYBOOK_ROUTER_HELP } from "./playbooks.js";
 import { analyzeSelfPaint, SELF_PAINT_WARNING } from "./self-paint.js";
+import { analyzeSendPath, SEND_PATH_WARNING } from "./send-path.js";
 import { isHtmlPath } from "./artifact-path.js";
 import { canonicalFile, sessionKey, SessionStore } from "./session-store.js";
 import { generateSharePassword } from "./share-password.js";
@@ -348,10 +349,16 @@ export function createOpenOutput({
   status,
   agent = "generic",
   selfPaintWarning = undefined,
+  sendPathWarning = undefined,
   networkWarning = undefined,
 }) {
   const selfPaintPrefix = selfPaintWarning
     ? `First fix the unpainted page surface flagged in self_paint_warning and save - Lavish live-reloads the artifact automatically, so you do not need to re-run \`lavish-axi ${file}\`. `
+    : "";
+  // A queued prompt that is never sent waits in the reviewer's tab until they find Send to Agent.
+  // Queue-then-Send is a valid playbook pattern, so this asks rather than orders a change.
+  const sendPathPrefix = sendPathWarning
+    ? `Check send_path_warning: if the artifact's own controls should deliver feedback right away, call \`window.lavish.sendQueuedPrompts()\` after queueing (or \`window.lavish.answerQuestion()\` for a store-bound question) and save - Lavish live-reloads the artifact automatically, so you do not need to re-run \`lavish-axi ${file}\`. `
     : "";
   // A failed bind is invisible to the person holding a review link at that address - the page
   // simply does not load - so the agent is told to pass it on rather than leave it in a field.
@@ -362,7 +369,8 @@ export function createOpenOutput({
     session: { file, url, status },
     ...(networkWarning ? { network_warning: networkWarning } : {}),
     ...(selfPaintWarning ? { self_paint_warning: selfPaintWarning } : {}),
-    next_step: `${networkPrefix}${selfPaintPrefix}Do not respond to the user just yet. Now you must run \`lavish-axi poll ${file}\`. This command long-polls until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, and it stays silent the whole time - that is normal, never kill it. Layout issues the browser detects do not return this poll; they wait in the user's Layout issues inbox until the user queues them, then arrive as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use. ${pollExecutionGuidance({ agent })} After applying feedback, run \`lavish-axi poll ${file} --agent-reply "<message for the user>"\` without --timeout-ms to show a concise response in Lavish Editor and keep waiting for more feedback. If instead you are handing back a result without starting another long-poll, run \`lavish-axi reply ${file} --agent-reply "<message for the user>"\` to get an acceptance receipt. ${POLL_AGENT_REPLY_RULE} ${POLL_AGENT_REPLY_NEXT_POINTER} If the user ends the session, stop polling and do not reopen it by re-running \`lavish-axi ${file}\` unless the user asks for further review or something genuinely important needs their visual attention - deliver routine updates directly in this conversation instead. When reopening is warranted, run \`lavish-axi ${file} --reopen\`.`,
+    ...(sendPathWarning ? { send_path_warning: sendPathWarning } : {}),
+    next_step: `${networkPrefix}${selfPaintPrefix}${sendPathPrefix}Do not respond to the user just yet. Now you must run \`lavish-axi poll ${file}\`. This command long-polls until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, and it stays silent the whole time - that is normal, never kill it. Layout issues the browser detects do not return this poll; they wait in the user's Layout issues inbox until the user queues them, then arrive as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use. ${pollExecutionGuidance({ agent })} After applying feedback, run \`lavish-axi poll ${file} --agent-reply "<message for the user>"\` without --timeout-ms to show a concise response in Lavish Editor and keep waiting for more feedback. If instead you are handing back a result without starting another long-poll, run \`lavish-axi reply ${file} --agent-reply "<message for the user>"\` to get an acceptance receipt. ${POLL_AGENT_REPLY_RULE} ${POLL_AGENT_REPLY_NEXT_POINTER} If the user ends the session, stop polling and do not reopen it by re-running \`lavish-axi ${file}\` unless the user asks for further review or something genuinely important needs their visual attention - deliver routine updates directly in this conversation instead. When reopening is warranted, run \`lavish-axi ${file} --reopen\`.`,
   };
 }
 
@@ -385,7 +393,7 @@ async function openCommand(args) {
   }
   await assertHtmlFile(file);
   const absolute = await canonicalFile(file);
-  const selfPaintWarning = await selfPaintWarningForFile(absolute);
+  const { selfPaintWarning, sendPathWarning } = await artifactWarningsForFile(absolute);
   const noGate = args.includes("--no-gate");
   const reopen = args.includes("--reopen");
   const baseUrl = await ensureServer({
@@ -414,17 +422,22 @@ async function openCommand(args) {
     status: response.status || "opened",
     agent: detectInvokingAgent(process.env),
     selfPaintWarning,
+    sendPathWarning,
     networkWarning: response.network_warning,
   });
 }
 
 // A read failure here must not break the open - the server reports unreadable artifacts
-// through its own fatal path, and the self-paint check always fails open.
-async function selfPaintWarningForFile(absolute) {
+// through its own fatal path, and both source checks are warnings that always fail open.
+async function artifactWarningsForFile(absolute) {
   try {
-    return analyzeSelfPaint(await readFile(absolute, "utf8")).painted ? undefined : SELF_PAINT_WARNING;
+    const source = await readFile(absolute, "utf8");
+    return {
+      selfPaintWarning: analyzeSelfPaint(source).painted ? undefined : SELF_PAINT_WARNING,
+      sendPathWarning: analyzeSendPath(source).stranded ? SEND_PATH_WARNING : undefined,
+    };
   } catch {
-    return undefined;
+    return {};
   }
 }
 

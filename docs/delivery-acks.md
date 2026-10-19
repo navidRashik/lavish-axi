@@ -64,6 +64,9 @@ the stamps with no new wire shape.
   reload with nothing delivered changes nothing and writes nothing.
 - **Done stamps delivered-and-not-done entries.** `addAgentReply` does it in the same write as the
   reply. An entry that was sent but never delivered is not marked done: the agent has not seen it.
+  `reply --done <id,...|all>` stamps exactly the named notes instead, and records the prompt ids it
+  stamped on its own agent entry as `done_ids`, so a reader of `state.json` can tell that reply from
+  a plain one; a plain reply, or a `--done` that stamped nothing, carries no `done_ids`.
 - **Working and Done stay inside one review round.** Reopening an ended session records the last
   take so far as `session.closed_delivery_seq`, and neither stamp lands on an entry delivered at or
   before it. A note `lavish-axi end` left at Seen stays Seen: a later round's edit or reply is about

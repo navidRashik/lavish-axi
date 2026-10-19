@@ -2752,6 +2752,68 @@ test("an agent reply marks delivered entries done and leaves undelivered ones al
   });
 });
 
+// `reply --done` (docs/delivery-acks.md): the agent entry records exactly the notes it marked done, so
+// a watcher reading state.json can tell a deliberate multi-id reply from a plain one.
+async function queueNotes(store, key, texts) {
+  await store.queuePrompts(key, {
+    prompts: texts.map((text) => ({
+      uid: text,
+      prompt_id: `pm-${text.toLowerCase()}`,
+      prompt: text,
+      selector: "",
+      tag: "message",
+      text: "",
+    })),
+  });
+  const session = await store.findByKey(key);
+  return session.chat.filter((entry) => entry.role === "user").map((entry) => entry.prompt_id);
+}
+
+test("a reply --done records the stamped prompt ids on the agent entry, in transcript order", async () => {
+  await withStore(async ({ store, session, stateFile }) => {
+    const [a, b, c, d] = await queueNotes(store, session.key, ["A", "B", "C", "D"]);
+    assert.ok(a && b && c && d, "every queued note carries a prompt id");
+
+    await store.addAgentReply(session.key, "Handled three.", { done: [c, a, b] });
+    const persisted = JSON.parse(await readFile(stateFile, "utf8")).sessions[session.key];
+    const reply = persisted.chat.at(-1);
+    assert.equal(reply.role, "agent");
+    assert.deepEqual(reply.done_ids, [a, b, c]);
+    const byId = Object.fromEntries(persisted.chat.filter((e) => e.role === "user").map((e) => [e.prompt_id, e]));
+    for (const id of [a, b, c]) assert.equal(byId[id].done_at, reply.at, "done_at is the reply's own time");
+    assert.equal("done_at" in byId[d], false);
+  });
+});
+
+test("a plain reply, or a --done that stamps nothing, carries no done_ids", async () => {
+  await withStore(async ({ store, session, stateFile }) => {
+    const [a] = await queueNotes(store, session.key, ["A"]);
+    await store.addAgentReply(session.key, "Just talking.");
+    await store.addAgentReply(session.key, "Unknown id.", { done: ["no-such-id"] });
+    const chat = JSON.parse(await readFile(stateFile, "utf8")).sessions[session.key].chat;
+    const replies = chat.filter((entry) => entry.role === "agent");
+    assert.equal(replies.length, 2);
+    for (const reply of replies) assert.equal("done_ids" in reply, false);
+    assert.equal("done_at" in chat.find((entry) => entry.prompt_id === a), false);
+  });
+});
+
+test("--done all records the ids it stamped, and an already-done note is not listed again", async () => {
+  await withStore(async ({ store, session, stateFile }) => {
+    const [a, b, c] = await queueNotes(store, session.key, ["A", "B", "C"]);
+    await store.addAgentReply(session.key, "First one.", { done: [a] });
+    await store.addAgentReply(session.key, "Again, plus B.", { done: [a, b] });
+    await store.addAgentReply(session.key, "The rest.", { done: "all" });
+    const replies = JSON.parse(await readFile(stateFile, "utf8")).sessions[session.key].chat.filter(
+      (entry) => entry.role === "agent",
+    );
+    assert.deepEqual(
+      replies.map((reply) => reply.done_ids),
+      [[a], [b], [c]],
+    );
+  });
+});
+
 test("markWorking stamps delivered entries that are not done, once, and reports whether it changed", async () => {
   await withStore(async ({ store, session }) => {
     await store.queuePrompts(session.key, {
