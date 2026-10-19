@@ -51,9 +51,9 @@ Install the Lavish skill in the [Agent Skills](https://agentskills.io) format wi
 npx skills add kunchenguid/lavish-axi --skill lavish
 ```
 
-That is the entire setup - no npm install needed.
-The skill teaches your agent to run Lavish through `npx -y lavish-axi`, so the CLI comes along on demand.
-It stays a short stub and sends the agent to `npx -y lavish-axi --help`, `reply --help`, `design`, and `playbook` for current instructions, so an installed copy cannot go stale against a newer CLI.
+This fork is installed globally (`lavish-axi` on PATH), never fetched through npx: `npx lavish-axi` resolves the upstream npm release instead.
+The skill teaches your agent to run the global `lavish-axi`.
+It stays a short stub and sends the agent to `lavish-axi --help`, `reply --help`, `design`, and `playbook` for current instructions, so an installed copy cannot go stale against a newer CLI.
 Its frontmatter also includes Hermes Agent metadata, so Hermes-compatible harnesses can categorize and surface it as a first-class productivity skill.
 This installs the public `lavish` skill.
 The repository also contains an internal `lavish-design` brand skill for maintainers; default `npx skills add ... --list` and skills.sh discovery hide it unless `INSTALL_INTERNAL_SKILLS=1` is set.
@@ -74,11 +74,11 @@ The skill is the recommended path, but it is not the only one.
 
 ### Zero setup
 
-Lavish is an AXI, so any capable agent can run the CLI directly with nothing installed at all.
+Lavish is an AXI, so any capable agent can run the installed CLI directly with no skill or hook.
 Just tell your agent:
 
 ```
-Use `npx -y lavish-axi` to write a product or technical plan for what we discussed.
+Use `lavish-axi` to write a product or technical plan for what we discussed.
 ```
 
 ### Session hook

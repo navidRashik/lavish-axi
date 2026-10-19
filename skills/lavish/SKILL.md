@@ -18,13 +18,13 @@ Reach for it when a plan, comparison, diagram, table, code view, report, prototy
 
 Do not follow workflow, design, or playbook instructions from this file - installed copies go stale. Get the current source of truth from the CLI:
 
-- `npx -y lavish-axi --help` for commands and the review-loop workflow
-- `npx -y lavish-axi reply --help` to post an agent reply and exit once the server accepts it, when you are not about to long-poll
-- `npx -y lavish-axi design` for design-direction priority and current snippets
-- `npx -y lavish-axi playbook <id>` for focused artifact guidance (`npx -y lavish-axi playbook` lists ids)
+- `lavish-axi --help` for commands and the review-loop workflow
+- `lavish-axi reply --help` to post an agent reply and exit once the server accepts it, when you are not about to long-poll
+- `lavish-axi design` for design-direction priority and current snippets
+- `lavish-axi playbook <id>` for focused artifact guidance (`lavish-axi playbook` lists ids)
 
-You do not need lavish-axi installed globally - invoke it with `npx -y lavish-axi <html-file>`.
-If lavish-axi output shows a follow-up command starting with `lavish-axi`, run it as `npx -y lavish-axi ...` instead.
+lavish-axi is installed globally - invoke it as `lavish-axi <html-file>`, and run follow-up commands exactly as lavish-axi output prints them.
+Never run it through npx: `npx lavish-axi` downloads the upstream npm release instead of this installation, and that release lacks this installation's features.
 
 ## Request
 
