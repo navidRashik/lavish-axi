@@ -895,8 +895,8 @@ export async function serve({
     }
   });
 
-  async function publishAgentReply(key, text, { requireOpen = false } = {}) {
-    const session = await store.addAgentReply(key, text, { requireOpen });
+  async function publishAgentReply(key, text, { requireOpen = false, done = null } = {}) {
+    const session = await store.addAgentReply(key, text, { requireOpen, done });
     if (!session || (requireOpen && session.status === "ended")) return session;
     const lastEntry = session.chat?.at(-1);
     const entry = serializeChat([
@@ -1350,14 +1350,20 @@ export async function serve({
 
   app.post("/api/:key/agent-reply", async (req, res, next) => {
     try {
+      // `done` names user notes to mark Done beyond this round's deliveries: "all", or prompt ids.
+      const rawDone = req.body?.done;
+      const done = rawDone === "all" ? "all" : Array.isArray(rawDone) ? rawDone.map(String).filter(Boolean) : null;
+      // `ended_ok` appends the reply to an ended session's conversation without reopening it.
+      const endedOk = req.body?.ended_ok === true;
       const session = await publishAgentReply(req.params.key, String(req.body?.text || ""), {
-        requireOpen: true,
+        requireOpen: !endedOk,
+        done,
       });
       if (!session) {
         res.status(404).json({ error: "session not found" });
         return;
       }
-      if (session.status === "ended") {
+      if (session.status === "ended" && !endedOk) {
         res.status(409).json({ status: "ended", ended_by: session.ended_by });
         return;
       }

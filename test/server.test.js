@@ -4802,6 +4802,50 @@ test("the agent end refuses a protected page unless forced; the browser end is n
   }
 });
 
+test("agent-reply done marks named notes from any round; ended_ok answers an ended session without reopening it", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  const keepAlive = path.join(dir, "keep-alive.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  await writeFile(keepAlive, "<!doctype html><html><body></body></html>");
+  const stateFile = path.join(dir, "state.json");
+  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const base = `http://127.0.0.1:${server.port}`;
+  const post = (route, body) =>
+    fetch(`${base}${route}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify(body),
+    });
+  try {
+    await post("/api/sessions", { file: keepAlive });
+    const { key } = await (await post("/api/sessions", { file: artifact })).json();
+    const session = async () => JSON.parse(await readFile(stateFile, "utf8")).sessions[key];
+    const doneIds = async () =>
+      (await session()).chat.filter((entry) => entry.role === "user" && entry.done_at).map((entry) => entry.prompt_id);
+    const prompts = ["p1", "p2", "p3"].map((id) => ({ prompt: id, prompt_id: id, tag: "message", selector: "body" }));
+    assert.equal((await post(`/api/${key}/prompts`, { prompts })).status, 200);
+
+    assert.equal((await post(`/api/${key}/agent-reply`, { text: "plain" })).status, 200);
+    assert.deepEqual(await doneIds(), [], "a plain reply never marks undelivered notes done");
+    assert.equal((await post(`/api/${key}/agent-reply`, { text: "one", done: ["p2"] })).status, 200);
+    assert.deepEqual(await doneIds(), ["p2"]);
+    assert.equal((await post(`/api/${key}/agent-reply`, { text: "rest", done: "all" })).status, 200);
+    assert.deepEqual(await doneIds(), ["p1", "p2", "p3"]);
+
+    await post(`/api/${key}/end`, {});
+    assert.equal((await post(`/api/${key}/agent-reply`, { text: "late" })).status, 409, "plain reply still refused");
+    assert.equal((await post(`/api/${key}/agent-reply`, { text: "answer", ended_ok: true })).status, 200);
+    const ended = await session();
+    assert.equal(ended.chat.at(-1).text, "answer");
+    assert.equal(ended.status, "ended");
+    assert.equal(ended.ended_by, "user");
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("poll on an ended session reports who ended it", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
