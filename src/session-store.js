@@ -23,6 +23,7 @@ import {
   normalizePromptId,
   stampDelivered,
   stampDone,
+  stampDoneByIds,
   stampWorking,
   unstampDelivery,
 } from "./chat-messages.js";
@@ -707,7 +708,7 @@ export class SessionStore {
     });
   }
 
-  async addAgentReply(key, text, { requireOpen = false } = {}) {
+  async addAgentReply(key, text, { requireOpen = false, done = null } = {}) {
     return this.runExclusive(async () => {
       const state = await this.readState();
       const session = state.sessions[key];
@@ -716,9 +717,11 @@ export class SessionStore {
       }
       if (requireOpen && session.status === "ended") return session;
       const at = new Date().toISOString();
-      // Done (docs/delivery-acks.md): the reply answers what the agent has seen. Stamped in the same
-      // write as the reply, with the reply's own time, and never on an entry no poll has delivered.
-      stampDone(session.chat, at, normalizeRevision(session.closed_delivery_seq));
+      // Done (docs/delivery-acks.md), stamped in the same write as the reply with the reply's time.
+      // Named notes (`reply --done`) are exactly what gets stamped; otherwise the reply answers what
+      // the agent has seen this round, never an entry no poll has delivered.
+      if (done) stampDoneByIds(session.chat, at, done);
+      else stampDone(session.chat, at, normalizeRevision(session.closed_delivery_seq));
       session.chat = [...(session.chat || []), { role: "agent", text: String(text || ""), at }];
       applyTranscriptBound(session);
       session.chat_revision = normalizeRevision(session.chat_revision) + 1;
