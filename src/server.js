@@ -2878,7 +2878,7 @@ export async function resolveWatchTarget(session) {
 
 export function hasLiveReloadRootOptIn(html) {
   if (typeof html !== "string") return false;
-  const searchableHtml = html.replace(/<!--[\s\S]*?-->/g, "");
+  const searchableHtml = html.replace(/<!-{2}[\s\S]*?-{2}>/g, "");
   if (/<html\b[^>]*\sdata-lavish-live-reload-root(?:[\s=>/]|$)[^>]*>/i.test(searchableHtml)) return true;
   return /<meta\b(?=[^>]*name=["']lavish-live-reload["'])(?=[^>]*content=["']root["'])[^>]*>/i.test(searchableHtml);
 }
