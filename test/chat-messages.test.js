@@ -122,6 +122,7 @@ test("malformed links and images stay literal without stalling", () => {
   const large = renderAll(30_000);
   const growth = large / Math.max(small, 1);
   assert.ok(growth < 8, `4x input took ${growth.toFixed(1)}x CPU (${small}us -> ${large}us); expected ~4x`);
+  assert.ok(large < 10_000_000, `rendering the 30k inputs took ${large}us of CPU; expected under 10 s`);
 });
 
 test("destinations beyond the inline limit remain literal", () => {
