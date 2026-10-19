@@ -77,6 +77,7 @@ import { detectTailscale } from "./tailscale.js";
 import { artifactTreeRoot, isArtifactPathError, isHtmlPath, resolveAllowedArtifactFile } from "./artifact-path.js";
 import { canonicalFile, SessionStore, sessionKey } from "./session-store.js";
 import { AsyncMutex } from "./async-mutex.js";
+import { FORK_ADOPT_VERSION, FORK_BUILD_ID, isForkBuildRequest } from "./fork-build.js";
 import { generateSharePassword } from "./share-password.js";
 import {
   ACCEPTED_IMAGE_MIME,
@@ -820,10 +821,15 @@ export async function serve({
     }
     const networkStale = req.query.reconcile_network === "1" ? await reconcileNetwork() : false;
     const networkWarning = currentNetworkWarning();
+    // See fork-build.js: only this fork's CLI sees the real version and network_stale; every other
+    // client is told a version no upstream release reaches, so it adopts this server.
+    const forkClient = isForkBuildRequest(req.headers);
     res.json({
       ok: true,
       app: "lavish-axi",
-      version,
+      version: forkClient ? version : FORK_ADOPT_VERSION,
+      build: FORK_BUILD_ID,
+      ...(forkClient ? {} : { fork_version: version }),
       state_id: serverStateId,
       state_dir: path.dirname(stateFile),
       // Where this process is listening and every address it was asked to serve (bound or still
@@ -833,7 +839,7 @@ export async function serve({
       // Configured names sit beside the addresses they resolved to, so a CLI that resolves the same
       // name finds it served whichever form it compares.
       requested_hosts: [...new Set([...listenHosts, ...requestedListenHosts])],
-      ...(networkStale ? { network_stale: true } : {}),
+      ...(networkStale && forkClient ? { network_stale: true } : {}),
       ...(networkWarning ? { network_warning: networkWarning } : {}),
       listeners: [...activePolls].map(([key, holder]) => ({
         key,
@@ -852,6 +858,15 @@ export async function serve({
     // reloaded. A call that names none reloads nothing. It also names why it is shutting this
     // server down, because the banner every other chrome shows has to be true for that reason;
     // an unrecognized or absent reason claims nothing beyond "this server is gone".
+    if (!isForkBuildRequest(req.headers)) {
+      writeLog("[lavish] shutdown refused: the request did not come from a navidRashik-fork lavish-axi CLI");
+      res.status(409).json({
+        ok: false,
+        error: `This Lavish server is the ${FORK_BUILD_ID} build and only stops for its own CLI. Run the globally installed \`lavish-axi stop\`, not \`npx lavish-axi\`.`,
+        build: FORK_BUILD_ID,
+      });
+      return;
+    }
     const reloadKey = String(req.body?.reload_key || "");
     const reason = SHUTDOWN_REASONS.has(String(req.body?.reason || "")) ? String(req.body.reason) : "";
     res.json({ status: "shutting-down" });
@@ -3028,7 +3043,7 @@ const chromeIcons = {
   ),
   reveal: chromeIcon('<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>', 13),
   dismiss: chromeIcon('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>', 13),
-  // The mobile conversation sheet's only chevron: CSS rotates it when the sheet is open.
+  // The conversation toggle's only chevron: CSS rotates it for the phone sheet and the desktop rail.
   chevronUp: chromeIcon('<polyline points="6 15 12 9 18 15"/>', 18, 2),
 };
 

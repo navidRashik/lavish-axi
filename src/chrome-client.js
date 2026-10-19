@@ -1300,6 +1300,44 @@ let unreadAgentReply = "";
 /** @type {{ pointerId: any, startY: number, moved: boolean } | null} */
 let sheetDrag = null;
 let suppressSheetClick = false;
+// Above the phone breakpoint the same chevron folds the panel into a rail that keeps the dock's
+// summary. The choice belongs to the reviewer, not the artifact, so it is one key for every session.
+const PANEL_COLLAPSED_STORAGE_KEY = "lavish-axi:panel-collapsed";
+let panelCollapsed = readPanelCollapsed();
+
+function readPanelCollapsed() {
+  try {
+    return localStorage.getItem(PANEL_COLLAPSED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function setPanelCollapsed(collapsed) {
+  panelCollapsed = Boolean(collapsed);
+  try {
+    if (panelCollapsed) localStorage.setItem(PANEL_COLLAPSED_STORAGE_KEY, "1");
+    else localStorage.removeItem(PANEL_COLLAPSED_STORAGE_KEY);
+  } catch {
+    // Storage refused only costs persistence across reloads; the rail still works.
+  }
+  applySheetState();
+  if (!panelCollapsed) scrollPanelToBottom();
+}
+
+function togglePanelCollapsed() {
+  if (!isMobileSheet()) setPanelCollapsed(!panelCollapsed);
+}
+
+function isPanelToggleHotkeyEvent(event) {
+  if (event.shiftKey || event.altKey) return false;
+  return Boolean(event.metaKey || event.ctrlKey) && event.key === "\\";
+}
+
+// Whether the conversation is out of sight: a docked phone sheet or a folded desktop rail.
+function isConversationHidden() {
+  return isMobileSheet() ? !sheetOpen : panelCollapsed;
+}
 
 function readSheetOpen() {
   try {
@@ -1335,16 +1373,21 @@ function setSheetOpen(open) {
 function applySheetState() {
   const mobile = isMobileSheet();
   const open = mobile && sheetOpen;
+  const collapsed = !mobile && panelCollapsed;
   document.body.classList.toggle("sheet-open", open);
-  const docked = mobile && !open;
-  panelScroll.inert = ended || docked;
-  chatComposer.inert = ended || docked;
+  document.body.classList.toggle("panel-collapsed", collapsed);
+  const hidden = (mobile && !open) || collapsed;
+  panelScroll.inert = ended || hidden;
+  chatComposer.inert = ended || hidden;
   const activeElement = document.activeElement;
-  if (docked && activeElement && (panelScroll.contains(activeElement) || chatComposer.contains(activeElement))) {
+  if (hidden && activeElement && (panelScroll.contains(activeElement) || chatComposer.contains(activeElement))) {
     panelToggle.focus();
   }
-  panelToggle.setAttribute("aria-expanded", open ? "true" : "false");
-  panelToggle.setAttribute("aria-label", open ? "Hide conversation" : "Show conversation");
+  const expanded = mobile ? open : !collapsed;
+  panelToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  panelToggle.setAttribute("aria-label", expanded ? "Hide conversation" : "Show conversation");
+  // Whatever the layout, a visible conversation shows the reply itself, so no preview is owed.
+  if (!hidden) unreadAgentReply = "";
   renderSheetSummary();
 }
 
@@ -1372,7 +1415,7 @@ function renderSheetSummary() {
 // A brief pulse on the dock when something the user should notice lands while the sheet is
 // closed: a prompt they queued from the artifact, or an agent reply.
 function pulseSheetDock() {
-  if (!isMobileSheet() || sheetOpen) return;
+  if (!isConversationHidden()) return;
   panelHead.classList.remove("is-fresh");
   // Restart the animation even when the previous pulse is still running.
   void panelHead.offsetWidth;
@@ -1380,7 +1423,7 @@ function pulseSheetDock() {
 }
 
 function noteAgentReply(text) {
-  if (!isMobileSheet() || sheetOpen) return;
+  if (!isConversationHidden()) return;
   unreadAgentReply = String(text || "");
   renderSheetSummary();
   pulseSheetDock();
@@ -1423,8 +1466,13 @@ function finishSheetDrag(event) {
   else if (!sheetOpen && offset < -SHEET_DRAG_THRESHOLD_PX) setSheetOpen(true);
 }
 
-panelHead.addEventListener("click", () => {
-  if (!isMobileSheet()) return;
+panelHead.addEventListener("click", (event) => {
+  if (!isMobileSheet()) {
+    // On desktop the heading is plain text until the panel is a rail; then the whole rail reopens it.
+    const onToggle = panelToggle.contains(/** @type {Node | null} */ (event.target));
+    if (panelCollapsed || onToggle) setPanelCollapsed(!panelCollapsed);
+    return;
+  }
   if (suppressSheetClick) {
     suppressSheetClick = false;
     return;
@@ -1596,11 +1644,11 @@ queuedLog.addEventListener("keydown", (event) => {
   const target = /** @type {Element | null} */ (event.target);
   if (!target || typeof target.closest !== "function" || !target.closest(".queued-edit-input")) return;
   // The annotation card's keys: Enter keeps the words, Shift+Enter breaks the line.
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault();
     event.stopPropagation();
     saveQueuedEdit();
-  } else if (event.key === "Escape" && !event.isComposing) {
+  } else if (event.key === "Escape" && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault();
     event.stopPropagation();
     cancelQueuedEdit();
@@ -4289,6 +4337,7 @@ window.addEventListener("message", (event) => {
   if (msg.type === "lavish:endSession") endSession();
   if (msg.type === "lavish:revisions") applyRevisionMessage(msg);
   if (msg.type === "lavish:toggleAnnotationMode") toggleAnnotationMode();
+  if (msg.type === "lavish:togglePanel") togglePanelCollapsed();
   if (msg.type === "lavish:editQueuedAnchor") editQueuedAnchor(String(msg.selector || ""));
   if (msg.type === "lavish:answerQuestion") answerSharedQuestion(msg);
 });
@@ -4542,7 +4591,7 @@ chatAttachments.addEventListener("click", (event) => {
   if (retry) chatAttachmentController.retry(String(retry.dataset.chatAttachmentRetry || ""));
 });
 chatInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault();
     sendQueued(false);
   }
@@ -4626,6 +4675,16 @@ document.addEventListener(
     if (!isModeToggleHotkeyEvent(event)) return;
     event.preventDefault();
     toggleAnnotationMode();
+  },
+  true,
+);
+// Cmd/Ctrl+\ folds the desktop conversation into its rail, wired like the mode hotkey above.
+document.addEventListener(
+  "keydown",
+  (event) => {
+    if (!isPanelToggleHotkeyEvent(event)) return;
+    event.preventDefault();
+    togglePanelCollapsed();
   },
   true,
 );

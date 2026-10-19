@@ -720,9 +720,17 @@ export class SessionStore {
       // Done (docs/delivery-acks.md), stamped in the same write as the reply with the reply's time.
       // Named notes (`reply --done`) are exactly what gets stamped; otherwise the reply answers what
       // the agent has seen this round, never an entry no poll has delivered.
-      if (done) stampDoneByIds(session.chat, at, done);
-      else stampDone(session.chat, at, normalizeRevision(session.closed_delivery_seq));
-      session.chat = [...(session.chat || []), { role: "agent", text: String(text || ""), at }];
+      // The agent entry names the notes this `--done` stamped (`done_ids`), so a reader of state.json
+      // can tell a deliberate multi-note reply from a plain one; a plain reply carries none.
+      const doneIds = [];
+      if (done) {
+        const open = new Set((session.chat || []).filter((entry) => entry?.role === "user" && !entry.done_at));
+        stampDoneByIds(session.chat, at, done);
+        for (const entry of open)
+          if (entry.done_at && typeof entry.prompt_id === "string") doneIds.push(entry.prompt_id);
+      } else stampDone(session.chat, at, normalizeRevision(session.closed_delivery_seq));
+      const reply = { role: "agent", text: String(text || ""), at, ...(doneIds.length ? { done_ids: doneIds } : {}) };
+      session.chat = [...(session.chat || []), reply];
       applyTranscriptBound(session);
       session.chat_revision = normalizeRevision(session.chat_revision) + 1;
       session.updated_at = at;

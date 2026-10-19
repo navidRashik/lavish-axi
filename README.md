@@ -51,9 +51,9 @@ Install the Lavish skill in the [Agent Skills](https://agentskills.io) format wi
 npx skills add kunchenguid/lavish-axi --skill lavish
 ```
 
-That is the entire setup - no npm install needed.
-The skill teaches your agent to run Lavish through `npx -y lavish-axi`, so the CLI comes along on demand.
-It stays a short stub and sends the agent to `npx -y lavish-axi --help`, `reply --help`, `design`, and `playbook` for current instructions, so an installed copy cannot go stale against a newer CLI.
+This fork is installed globally (`lavish-axi` on PATH), never fetched through npx: `npx lavish-axi` resolves the upstream npm release instead.
+The skill teaches your agent to run the global `lavish-axi`.
+It stays a short stub and sends the agent to `lavish-axi --help`, `reply --help`, `design`, and `playbook` for current instructions, so an installed copy cannot go stale against a newer CLI.
 Its frontmatter also includes Hermes Agent metadata, so Hermes-compatible harnesses can categorize and surface it as a first-class productivity skill.
 This installs the public `lavish` skill.
 The repository also contains an internal `lavish-design` brand skill for maintainers; default `npx skills add ... --list` and skills.sh discovery hide it unless `INSTALL_INTERNAL_SKILLS=1` is set.
@@ -74,11 +74,11 @@ The skill is the recommended path, but it is not the only one.
 
 ### Zero setup
 
-Lavish is an AXI, so any capable agent can run the CLI directly with nothing installed at all.
+Lavish is an AXI, so any capable agent can run the installed CLI directly with no skill or hook.
 Just tell your agent:
 
 ```
-Use `npx -y lavish-axi` to write a product or technical plan for what we discussed.
+Use `lavish-axi` to write a product or technical plan for what we discussed.
 ```
 
 ### Session hook
@@ -205,6 +205,7 @@ pnpm link
   Mark only custom (non-native) clickable elements with `data-lavish-action` so Lavish does not annotate them, and use `data-lavish-question` or `queueKey` when pre-send updates for the same question should replace each other.
   Everything you send is part of the conversation: a note on an element, a text selection, a table cell, a diagram node, a whiteboard, a layout-issue batch, or a composer message each becomes a bubble on your side of the Conversation panel, with an anchor line naming what it was attached to (the element tag, text selection, table cell, diagram node, whiteboard, or layout issues), a quoted excerpt, and, when available, the selector on hover. A note you have queued but not sent sits at the end of the conversation as a dashed bubble labelled **Queued** with edit and remove controls. Clicking the bubble or its edit control opens its words for editing in place and scrolls the artifact to the element it points at; clicking that element again in annotate mode opens the same note rather than a fresh card. Saving a note with no words and no images removes it, and **Send** delivers an open edit as typed. While its batch is in flight it reads **Sending** and can no longer be edited, and once the server accepts it, it settles in place as a sent bubble in every tab of the session. The panel keeps the newest stored transcript up to 5 MiB; older bubbles drop from view, but an accepted note still settles and is not sent twice. Agent replies render a small Markdown subset - paragraphs, line breaks, headings as bold lead lines, bullet and numbered lists, fenced and inline code, bold, italic, and http(s) links - while tables, images, and raw HTML stay as the text the agent wrote; your own messages keep their line breaks and are never parsed.
   On wider screens, the conversation and the queued notes share one scrollable Conversation panel above a sticky composer, so long feedback queues do not push the text box or send controls off screen.
+  To give the artifact the full width, fold the Conversation panel into a narrow rail with the chevron in its heading or Cmd+\ / Ctrl+\ (from the chrome or the artifact iframe); the rail keeps the dock's one-line summary (queued notes, an unseen reply, agent presence), a click anywhere on it reopens the panel, and the choice is remembered in this browser across reloads and sessions.
   The browser chrome keeps editing actions in the overflow menu (copy path, reload artifact, copy DOM snapshot, export standalone HTML, publish link, end session), while the composer exposes **Send & End** beside **Send to Agent** to submit queued prompts and user-ended attribution together. Once **Send & End** starts, Lavish pauses new feedback, waits up to 5 seconds for feedback preparation already underway, keeps any open annotation draft intact until delivery succeeds, then holds that exact terminal batch. A completed reservation survives a page reload, including when its prompts were already delivered and only the pending end remains; incomplete preparation is not restored. If preparation times out, Lavish keeps the review open and its existing queue editable with a visible error. A transient delivery failure permits only retrying the same terminal batch through **Send & End** until it succeeds. If a snapshot makes the request too large (HTTP 413), Lavish retries that exact batch once without the optional snapshot. An actionable attachment rejection (HTTP 400), recoverable layout-selection conflict (HTTP 409), or unrecoverable 413 instead cancels the terminal reservation without ending the session, keeps the prompts queued, and restores editing, removal, **Send to Agent**, **Send & End**, and **End session** so the reviewer can revise or remove stale feedback before submitting again.
   Composer feedback is visibly queued before the text box clears and stays queued until acknowledged. Send waits up to 5 seconds for the artifact's DOM snapshot, then delivers without that optional context if the frame no longer answers; a late snapshot cannot submit the batch twice. A failed or still-unacknowledged POST keeps the queue and shows persistent recovery guidance unless a transcript sync proves the server already accepted that feedback.
 - **Reviewing on a phone** - Below 860px wide, the artifact takes the whole screen above a **Conversation** dock, and the conversation opens as a bottom sheet over it: tap the dock, swipe it up, or press the chevron to raise it; tap the dimmed artifact, swipe the sheet down, press the chevron, or press Escape to lower it. The dock reports what matters while the sheet is down - how many prompts are queued, a reply that arrived while you were reading, or whether the agent is listening - and the sheet stays open across a reload of the review page. The sheet sizes itself to the visible viewport and respects safe-area insets; if the keyboard or attachments leave little room, conversation content yields or scrolls while the send actions remain pinned above the bottom edge. In landscape the sheet covers the top bar as well. Wider screens keep the side-by-side layout.
