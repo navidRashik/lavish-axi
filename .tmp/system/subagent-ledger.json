@@ -1,0 +1,42 @@
+[
+  {
+    "agent": "rpc-worker:lavish-axi:1987813",
+    "status": "running",
+    "startedAt": "2026-10-19T15:58:44.719Z",
+    "tools": 0,
+    "writes": [],
+    "blocks": [],
+    "failures": {},
+    "pushes": [
+      {
+        "at": "2026-10-19T16:18:17.166Z",
+        "allowed": true,
+        "command": "git push -q -u origin feat/reply-done-ids 2>&1 | grep -v \"^remote:\" | tail -2; gh pr create --draft -R navidRashik/lavish-axi --base main --head feat/reply-done-ids --title \"feat(reply): record the id",
+        "force": "none",
+        "remote": "origin",
+        "branch": "feat/reply-done-ids",
+        "repos": [
+          "navidRashik/lavish-axi",
+          "kunchenguid/lavish-axi"
+        ],
+        "reason": "no open PR yet — open it only with `gh pr create --draft`"
+      },
+      {
+        "at": "2026-10-19T16:29:19.102Z",
+        "allowed": true,
+        "command": "git push -q origin HEAD 2>&1 | tail -1; git rev-parse HEAD; rk map --base origin/main --key fix-done-ids-pre-receipt --remap \"Scan flagged two unused exports in the startup-wait helpers; made them mod",
+        "force": "none",
+        "remote": "origin",
+        "branch": "fix/done-ids-pre-receipt",
+        "repos": [
+          "navidRashik/lavish-axi",
+          "kunchenguid/lavish-axi"
+        ],
+        "reason": "draft PR for navidRashik:fix/done-ids-pre-receipt on navidRashik/lavish-axi"
+      }
+    ],
+    "elevated": [],
+    "scope": [],
+    "widenings": []
+  }
+]
