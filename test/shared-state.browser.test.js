@@ -45,6 +45,8 @@ async function launchChrome(chrome, profile) {
       "--headless=new",
       "--remote-debugging-port=0",
       `--user-data-dir=${profile}`,
+      "--use-mock-keychain",
+      "--password-store=basic",
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-features=IsolateSandboxedIframes",
