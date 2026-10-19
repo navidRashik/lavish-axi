@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { realpathSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -170,6 +170,53 @@ export function serverLogFile() {
 
 export async function ensureStateDir() {
   await mkdir(stateDir(), { recursive: true });
+}
+
+// The Host allowlist a server was started with, kept beside state.json so a server a client
+// spawns later serves the same names. Only `lavish-axi server` writes it.
+export function allowedHostsFile() {
+  return path.join(stateDir(), "allowed-hosts.json");
+}
+
+// A set LAVISH_AXI_ALLOWED_HOSTS is recorded; one set to blank removes the record; an unset one
+// leaves it alone, since a spawned server started without the variable must not erase it.
+export async function recordAllowedHosts(env = process.env) {
+  const value = env.LAVISH_AXI_ALLOWED_HOSTS;
+  if (value === undefined) return;
+  const file = allowedHostsFile();
+  if (!value.trim()) {
+    await rm(file, { force: true });
+    return;
+  }
+  await ensureStateDir();
+  const partial = `${file}.${process.pid}.tmp`;
+  await writeFile(partial, `${JSON.stringify({ allowed_hosts: value })}\n`, "utf8");
+  await rename(partial, file);
+}
+
+// The allowlist a spawned server must start with: the caller's own LAVISH_AXI_ALLOWED_HOSTS when
+// set, else the recorded one, else undefined (none was ever configured). A record that exists but
+// cannot be read or parsed throws: starting without it would serve with no allowlist at all.
+export async function allowedHostsForSpawn(env = process.env) {
+  if (env.LAVISH_AXI_ALLOWED_HOSTS !== undefined) return env.LAVISH_AXI_ALLOWED_HOSTS;
+  const file = allowedHostsFile();
+  let raw;
+  try {
+    raw = await readFile(file, "utf8");
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error)?.code === "ENOENT") return undefined;
+    throw new Error(`cannot read the recorded Host allowlist ${file}: ${/** @type {Error} */ (error).message}`, {
+      cause: error,
+    });
+  }
+  let value;
+  try {
+    value = JSON.parse(raw)?.allowed_hosts;
+  } catch {
+    value = undefined;
+  }
+  if (typeof value !== "string") throw new Error(`the recorded Host allowlist ${file} is not valid`);
+  return value;
 }
 
 export function defaultPort() {
