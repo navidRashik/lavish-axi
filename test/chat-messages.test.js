@@ -12,6 +12,7 @@ import {
   serializeChat,
   stampDelivered,
   stampDone,
+  stampDoneByIds,
   stampWorking,
   storedChatBytes,
   unstampDelivery,
@@ -478,4 +479,19 @@ test("pre-receipt entries are marked once and excluded from every stamp", () => 
   assert.equal(stampWorking(chat, at), true);
   assert.equal(stampDone(chat, at), true);
   assert.deepEqual(chat[0], userEntry("Old", { receipt: RECEIPT_NONE }));
+});
+
+test("an explicit done id reaches a pre-receipt note; done all and a done note stay untouched", () => {
+  const chat = [userEntry("Old", { prompt_id: "p-old" }), userEntry("Other old", { prompt_id: "p-other" })];
+  markPreReceipt(chat);
+  assert.equal(stampDoneByIds(chat, "2026-10-19T10:00:00.000Z", "all"), false, "all skips pre-receipt notes");
+  assert.equal("done_at" in chat[0], false);
+
+  assert.equal(stampDoneByIds(chat, "2026-10-19T10:01:00.000Z", ["p-old"]), true);
+  assert.equal(chat[0].done_at, "2026-10-19T10:01:00.000Z");
+  assert.equal(chat[0].receipt, RECEIPT_NONE);
+  assert.equal("done_at" in chat[1], false, "an unnamed pre-receipt note stays open");
+
+  assert.equal(stampDoneByIds(chat, "2026-10-19T10:02:00.000Z", ["p-old"]), false);
+  assert.equal(chat[0].done_at, "2026-10-19T10:01:00.000Z", "a done note keeps its first stamp");
 });
