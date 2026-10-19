@@ -5672,6 +5672,22 @@ test("a send acknowledgement does not finish the round before late feedback deli
   assert.equal(workingBubbles().length, 1);
 });
 
+test("the working spinner stands still for an external listener and spins only while the agent works", async () => {
+  const chrome = await createChromeHarness({ fetchImpl: async () => ({ ok: true, json: async () => ({}) }) });
+  const presence = (data) => chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify(data) });
+  const workingBubble = () =>
+    chrome.element("chatLog").children.find((child) => String(child.className).includes("agent-working"));
+
+  presence({ state: "listening", mode: "external-listener" });
+  assert.equal(workingBubble().classList.contains("is-external"), true);
+
+  presence({ state: "working" });
+  assert.equal(workingBubble().classList.contains("is-external"), false);
+
+  presence({ state: "listening", mode: "external-listener" });
+  assert.equal(workingBubble().classList.contains("is-external"), true);
+});
+
 test("send controls stay enabled while the agent works and lock only once the session ends", async () => {
   const chrome = await createChromeHarness({
     fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
