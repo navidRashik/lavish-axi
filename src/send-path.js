@@ -13,7 +13,9 @@ const SCRIPT_RE = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
 const SCRIPT_TYPE_RE = /\btype\s*=\s*["']?([^"'\s>]+)/i;
 const JS_TYPE_RE = /^(?:module|text\/javascript|application\/javascript|text\/ecmascript|application\/ecmascript)$/i;
 const START_TAG_RE = /<[a-z][a-z0-9-]*\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi;
-const HANDLER_RE = /\son[a-z]+\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+// One attribute per match: its name, then a double-quoted, single-quoted or bare value. Values are
+// consumed whole, so handler-looking text inside another attribute's value is never a handler.
+const ATTRIBUTE_RE = /([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
 const BLOCK_COMMENT_RE = /\/\*[\s\S]*?\*\//g;
 // A `//` right after `:` is a URL scheme ("https://"), not a comment.
 const LINE_COMMENT_RE = /(^|[^:\\])\/\/[^\n]*/g;
@@ -32,8 +34,8 @@ function executableCode(html) {
     parts.push(body);
   }
   for (const [, attrs] of markup.replace(SCRIPT_RE, "").matchAll(START_TAG_RE)) {
-    for (const [, doubleQuoted, singleQuoted] of attrs.matchAll(HANDLER_RE)) {
-      parts.push(doubleQuoted ?? singleQuoted);
+    for (const [, name, doubleQuoted, singleQuoted, bare] of attrs.matchAll(ATTRIBUTE_RE)) {
+      if (/^on[a-z]+$/i.test(name)) parts.push(doubleQuoted ?? singleQuoted ?? bare ?? "");
     }
   }
   return parts.join("\n").replace(BLOCK_COMMENT_RE, "").replace(LINE_COMMENT_RE, "$1");

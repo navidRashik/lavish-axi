@@ -83,6 +83,16 @@ test("handler-looking text outside a start tag is page text", () => {
   assert.equal(analyzeSendPath(hidden).stranded, true, "a send shown as text does not hide a real queue");
 });
 
+test("handler-looking text inside another attribute's value is not a handler", () => {
+  const queued = `<!doctype html><html><body><p title=' onclick="lavish.queuePrompt()"'>Example</p></body></html>`;
+  assert.equal(analyzeSendPath(queued).stranded, false);
+  const hidden = page(`go.onclick = () => window.lavish.queuePrompt("Ship it");`).replace(
+    "</body>",
+    `<p title=' onclick="lavish.sendQueuedPrompts()"'>Example</p></body>`,
+  );
+  assert.equal(analyzeSendPath(hidden).stranded, true);
+});
+
 test("the open output carries the warning and puts the fix first in next_step", () => {
   const output = createOpenOutput({
     file: "/tmp/a.html",
