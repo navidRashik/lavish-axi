@@ -293,7 +293,7 @@ test(
       await pageA.frameEval('document.getElementById("aYes").click(), document.getElementById("aSend").click(), true');
       await pageB.waitFor(
         'document.getElementById("bYes").disabled && document.querySelector("[data-lavish-state-answer]")?.textContent',
-        (v) => v === "Answered: Yes",
+        (v) => v === "✅ YOUR PICK: Yes",
         "B shows A's answer and disables its controls",
       );
       await pageA.waitFor('document.getElementById("aSend").disabled', ready, "A disables its own controls");

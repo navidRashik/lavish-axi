@@ -55,6 +55,20 @@ async function withEnv(overrides, fn) {
   }
 }
 
+// Waits as long as the spawned server process lives: a loaded host can take longer than any fixed
+// budget to start it, so only an exit means it will never answer. The test timeout bounds a hang.
+async function childServerReady(child, port) {
+  while (child.exitCode === null && child.signalCode === null) {
+    try {
+      const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+      if (health.ok) return true;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  return false;
+}
+
 function listenHealth(host, port, body) {
   const server = createHttpServer((req, res) => {
     if (req.url?.startsWith("/health")) {
@@ -432,20 +446,7 @@ test("a clean detached-server shutdown exits 0 without an error in server.log", 
       stdio: ["ignore", fd, fd],
     });
     try {
-      const deadline = Date.now() + 5000;
-      let ready = false;
-      while (Date.now() < deadline) {
-        try {
-          const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
-          if (health.ok) {
-            ready = true;
-            break;
-          }
-        } catch {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-      }
-      assert.equal(ready, true);
+      assert.equal(await childServerReady(child, port), true);
       await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
       const [code] = await once(child, "exit");
       assert.equal(code, 0);
@@ -528,20 +529,7 @@ net.Server.prototype.emit = function (event, ...args) {
         stdio: ["ignore", fd, fd],
       });
       try {
-        let ready = false;
-        const deadline = Date.now() + 5000;
-        while (Date.now() < deadline) {
-          try {
-            const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
-            if (health.ok) {
-              ready = true;
-              break;
-            }
-          } catch {
-            await new Promise((resolve) => setTimeout(resolve, 50));
-          }
-        }
-        assert.equal(ready, true, "post-listen error must not take down the server");
+        assert.equal(await childServerReady(child, port), true, "post-listen error must not take down the server");
         await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
         const [code] = await once(child, "exit");
         assert.equal(code, 0);
