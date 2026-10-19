@@ -5050,8 +5050,10 @@ test("exclusive listener ownership rejects a loser and reports a takeover", asyn
       body: JSON.stringify({ file: artifact }),
     });
     const { key } = await open.json();
-    const poll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&owner=worker-7`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The server writes the `Lavish-Poll-State: listening` header only after worker-7 is in
+    // activePolls, so awaiting the response head (not a fixed sleep) is the readiness signal.
+    const first = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&owner=worker-7`);
+    assert.equal(first.headers.get("lavish-poll-state"), "listening");
 
     const health = await fetch(`${base}/health`).then((response) => response.json());
     assert.deepEqual(
@@ -5080,7 +5082,6 @@ test("exclusive listener ownership rejects a loser and reports a takeover", asyn
       body: JSON.stringify({}),
       signal: takeover.signal,
     }).catch((error) => error);
-    const first = await poll;
     const replaced = await first.json();
     assert.equal(replaced.code, "LISTENER_REPLACED");
     assert.equal(replaced.holder.label, "worker-7");
