@@ -35,6 +35,10 @@ import {
   serve,
 } from "../src/server.js";
 import { canonicalFile, sessionKey, SessionStore } from "../src/session-store.js";
+import { FORK_BUILD_HEADER, FORK_BUILD_ID } from "../src/fork-build.js";
+
+// What this fork's CLI sends; the server answers /health and /shutdown in full only for it.
+const FORK_HEADERS = { [FORK_BUILD_HEADER]: FORK_BUILD_ID };
 
 async function chromeClientSource() {
   return readFile(new URL("../src/chrome-client.js", import.meta.url), "utf8");
@@ -1254,7 +1258,7 @@ test("/health reports the server version so clients can detect upgrades", async 
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
   try {
-    const res = await fetch(`http://127.0.0.1:${server.port}/health`);
+    const res = await fetch(`http://127.0.0.1:${server.port}/health`, { headers: FORK_HEADERS });
     const body = await res.json();
     assert.equal(body.ok, true);
     assert.equal(body.version, "9.9.9-test");
@@ -1406,19 +1410,23 @@ test("network reconciliation coalesces concurrent checks and briefly caches the 
       magicDnsName: null,
       warning: "Tailscale is running but MagicDNS is unavailable; there is no phone access.",
     };
-    const ordinary = await fetch(`http://127.0.0.1:${server.port}/health`).then((response) => response.json());
+    const ordinary = await fetch(`http://127.0.0.1:${server.port}/health`, { headers: FORK_HEADERS }).then((response) =>
+      response.json(),
+    );
     assert.equal(ordinary.network_stale, undefined);
     const checks = await Promise.all(
       Array.from({ length: 8 }, () =>
-        fetch(`http://127.0.0.1:${server.port}/health?reconcile_network=1`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${server.port}/health?reconcile_network=1`, { headers: FORK_HEADERS }).then(
+          (response) => response.json(),
+        ),
       ),
     );
     assert.ok(checks.every((body) => body.network_stale === true));
     assert.ok(checks.every((body) => body.network_warning.includes("MagicDNS is unavailable")));
     assert.equal(detectionCalls, 2);
-    const cached = await fetch(`http://127.0.0.1:${server.port}/health?reconcile_network=1`).then((response) =>
-      response.json(),
-    );
+    const cached = await fetch(`http://127.0.0.1:${server.port}/health?reconcile_network=1`, {
+      headers: FORK_HEADERS,
+    }).then((response) => response.json());
     assert.equal(cached.network_stale, true);
     assert.match(cached.network_warning, /MagicDNS is unavailable/);
     assert.equal(detectionCalls, 2);
@@ -1447,9 +1455,9 @@ test("reconciliation distinguishes incomplete Tailscale from down state", async 
   });
   try {
     detected = null;
-    const health = await fetch(`http://127.0.0.1:${server.port}/health?reconcile_network=1`).then((response) =>
-      response.json(),
-    );
+    const health = await fetch(`http://127.0.0.1:${server.port}/health?reconcile_network=1`, {
+      headers: FORK_HEADERS,
+    }).then((response) => response.json());
     assert.equal(health.network_stale, true);
     assert.equal(health.network_warning, undefined);
   } finally {
@@ -1566,7 +1574,7 @@ test("Tailscale mode binds concrete listeners, serves the MagicDNS link, and tea
     const shutdown = await rawRequest(server.port, "/shutdown", {
       method: "POST",
       host: `${tailscaleIpv4}:${server.port}`,
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...FORK_HEADERS },
       body: "{}",
     });
     assert.equal(shutdown.status, 200);
@@ -4207,7 +4215,7 @@ test("POST /shutdown stops the listener so the client can spawn a fresh server",
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
   try {
-    const res = await fetch(`http://127.0.0.1:${server.port}/shutdown`, { method: "POST" });
+    const res = await fetch(`http://127.0.0.1:${server.port}/shutdown`, { method: "POST", headers: FORK_HEADERS });
     assert.equal(res.status, 200);
     await server.done;
     await assert.rejects(() => fetch(`http://127.0.0.1:${server.port}/health`), /fetch failed|ECONNREFUSED/);
@@ -4335,7 +4343,7 @@ test("a version-driven shutdown reloads only the chrome whose session it names",
   try {
     await fetch(`${base}/shutdown`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...FORK_HEADERS },
       body: JSON.stringify({ reload_key: openedKey, reason: "upgrade" }),
     });
 
@@ -4365,7 +4373,7 @@ test("a shutdown that names no session reloads nobody", async () => {
   try {
     await fetch(`${base}/shutdown`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...FORK_HEADERS },
       body: JSON.stringify({ reason: "stop" }),
     });
 
@@ -4391,7 +4399,7 @@ test("a shutdown that names no reason claims none", async () => {
   try {
     await fetch(`${base}/shutdown`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...FORK_HEADERS },
       body: JSON.stringify({ reason: "because" }),
     });
 
