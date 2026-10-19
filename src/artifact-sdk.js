@@ -2,6 +2,7 @@
 
 import { readArtifactRevisions } from "./artifact-revisions.js";
 import * as mermaidHelpers from "./mermaid-node.js";
+import { applyLavishQuestions } from "./question-visibility.js";
 import { applyLavishState, lavishStateQuestionAnswer, lavishStateRefOf } from "./state-bindings.js";
 import { tableCellTarget } from "./table-cell.js";
 
@@ -2499,8 +2500,24 @@ export function createArtifactSdk(
     } catch {
       // A malformed binding costs that element its value, never the review.
     }
+    scheduleQuestions();
     // "updated 3h ago" and age staleness move with the clock, not only with the store.
     if (!stateAgeTimer) stateAgeTimer = window.setInterval(renderState, 60_000);
+  }
+
+  // Question cards and the "N questions waiting" bar run with or without the store: the store only
+  // adds answers given on other pages. One render per frame, however many mutations arrive.
+  let questionFrame = 0;
+  function renderQuestions() {
+    questionFrame = 0;
+    try {
+      applyLavishQuestions(document, stateSnapshot?.state?.items || null, window);
+    } catch {
+      // A malformed question costs the reader its highlight, never the review.
+    }
+  }
+  function scheduleQuestions() {
+    if (!questionFrame) questionFrame = window.requestAnimationFrame(renderQuestions);
   }
 
   function receiveState(snapshot) {
@@ -2707,6 +2724,15 @@ export function createArtifactSdk(
 
   renderState();
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", renderState, { once: true });
+  scheduleQuestions();
+  if (document.readyState === "loading")
+    document.addEventListener("DOMContentLoaded", scheduleQuestions, { once: true });
+  new MutationObserver(scheduleQuestions).observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["disabled", "data-lavish-question", "data-lavish-status", "data-lavish-asked"],
+  });
   setAnnotationMode(annotationMode);
   // Report the page default once; subsequent mode changes belong to the chrome.
   postArtifactMessage("lavish:annotationMode", { enabled: initialAnnotationMode });

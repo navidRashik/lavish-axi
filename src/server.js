@@ -37,6 +37,7 @@ import {
 } from "./layout-warnings.js";
 import * as artifactRevisions from "./artifact-revisions.js";
 import * as mermaidNode from "./mermaid-node.js";
+import * as questionVisibility from "./question-visibility.js";
 import * as stateBindings from "./state-bindings.js";
 import * as tableCellHelpers from "./table-cell.js";
 import { isStateDisabled, isValidItemId, setItem, stateSnapshot, watchStateDir } from "./state-store.js";
@@ -3323,6 +3324,7 @@ export function createSdkJs(
   const tableHelperSource = serializeModuleHelpers(tableCellHelpers);
   const revisionHelperSource = serializeModuleHelpers(artifactRevisions);
   const stateHelperSource = serializeModuleHelpers(stateBindings);
+  const questionHelperSource = serializeModuleHelpers(questionVisibility);
   const revisionNumber = Number(artifactRevision);
   const revision = Number.isFinite(revisionNumber) && revisionNumber >= 0 ? Math.trunc(revisionNumber) : 0;
   const loadToken = String(artifactLoadToken || "").slice(0, 200);
@@ -3361,6 +3363,7 @@ const mermaidHelpers={ ${mermaidHelperSource.names.join(", ")} };
 ${tableHelperSource.declarations}
 ${revisionHelperSource.declarations}
 ${stateHelperSource.declarations}
+${questionHelperSource.declarations}
 (${createArtifactSdk.toString()})(deriveQueueKey, isNativeInteractiveControl, mermaidHelpers, artifactRevision, artifactLoadToken, key, ${JSON.stringify(sdkOptions)});
 })();`;
 }
