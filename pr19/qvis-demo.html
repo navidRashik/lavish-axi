@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qvis demo — release plan</title>
+<style>
+  :root { color-scheme: light dark; --bg:#ffffff; --fg:#1d232b; --card:#f5f6f8; --muted:#5b6573; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171c; --fg:#e6e9ee; --card:#1d2128; --muted:#a3abb7; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.55 system-ui, -apple-system, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px; }
+  h1 { margin: 0 0 4px; } .cap { color: var(--muted); margin: 0 0 20px; }
+  section { background: var(--card); border-radius: 10px; padding: 14px 18px; margin: 16px 0; }
+  table { border-collapse: collapse; width: 100%; } td, th { padding: 6px 8px; border-bottom: 1px solid #8884; text-align: left; }
+  fieldset { border: 1px solid #8886; border-radius: 8px; } legend { font-weight: 700; }
+  .filler { height: 380px; display:flex; align-items:center; justify-content:center; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>🚀 Release plan — lavish 0.1.90</h1>
+  <p class="cap">Demo page: three open questions, one answered, spread down the page.</p>
+
+  <section>
+    <h2>📦 What ships</h2>
+    <table>
+      <tr><th>PR</th><th>Change</th><th>State</th></tr>
+      <tr><td>#17</td><td>poll loads the server on demand</td><td>integ</td></tr>
+      <tr><td>#19</td><td>question visibility</td><td>draft</td></tr>
+      <tr><td>#20</td><td>chat collapse</td><td>draft</td></tr>
+    </table>
+  </section>
+
+  <section data-lavish-question="q-scope" data-lavish-asked="2026-10-20T08:00:00Z">
+    <form>
+      <fieldset>
+        <legend>Ship #20 in this release? (scope)</legend>
+        <label><input type="radio" name="scope" value="yes"> Yes, include it</label><br>
+        <label><input type="radio" name="scope" value="no"> No, next release</label><br>
+        <button type="button">Submit</button>
+      </fieldset>
+    </form>
+  </section>
+
+  <div class="filler">… release notes …</div>
+
+  <section data-lavish-question="q-behaviour" data-lavish-asked="2026-10-20T08:05:00Z">
+    <form>
+      <fieldset>
+        <legend>Collapse answered questions by default? (behaviour)</legend>
+        <select name="collapse"><option>Collapse</option><option>Keep expanded</option></select>
+        <button type="button">Submit</button>
+      </fieldset>
+    </form>
+  </section>
+
+  <section data-lavish-question="q-done" data-lavish-asked="2026-10-20T07:00:00Z">
+    <form>
+      <fieldset disabled>
+        <legend>Run integ on cmp-ec2? (implementer)</legend>
+        <label><input type="radio" name="host" value="vps" checked> cmp-ec2</label><br>
+        <label><input type="radio" name="host" value="mac"> Mac</label><br>
+        <button type="button">Submit</button>
+      </fieldset>
+    </form>
+  </section>
+
+  <div class="filler">… QA evidence …</div>
+
+  <section data-lavish-question="q-commit" data-lavish-asked="2026-10-20T08:10:00Z">
+    <form>
+      <fieldset>
+        <legend>Tag 0.1.90 today? (commitment)</legend>
+        <label><input type="radio" name="tag" value="today"> Tag today</label><br>
+        <label><input type="radio" name="tag" value="wait"> Wait for #20</label><br>
+        <button type="button">Submit</button>
+      </fieldset>
+    </form>
+  </section>
+
+  <p><strong>One-line takeaway:</strong> three calls stand between us and the tag.</p>
+</main>
+</body>
+</html>
