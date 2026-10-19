@@ -709,6 +709,53 @@ test(
   },
 );
 
+async function writeStartupDelay(dir, ms) {
+  const preload = path.join(dir, "slow-start.mjs");
+  await writeFile(preload, `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${ms});\n`);
+  return `--import=${pathToFileURL(preload).href}`;
+}
+
+test(
+  "open waits for a server that is still starting past the old five-second budget",
+  { timeout: 30_000 },
+  async () => {
+    await withTempDir(async (dir) => {
+      const artifact = await writeArtifact(dir);
+      const port = await freePort();
+      const nodeOptions = await writeStartupDelay(dir, 6000);
+      try {
+        await withEnv({ ...cliEnv(dir, port, "127.0.0.1"), NODE_OPTIONS: nodeOptions }, () =>
+          runCli(["open", artifact, "--no-open"]),
+        );
+        assert.equal((await health("127.0.0.1", port)).version, VERSION);
+        assert.deepEqual(await stateSessions(dir), [artifact]);
+      } finally {
+        await shutdownAt("127.0.0.1", port);
+      }
+    });
+  },
+);
+
+test("LAVISH_AXI_SERVER_START_TIMEOUT_MS bounds a server process that never answers", { timeout: 30_000 }, async () => {
+  await withTempDir(async (dir) => {
+    const artifact = await writeArtifact(dir);
+    const port = await freePort();
+    const nodeOptions = await writeStartupDelay(dir, 4000);
+    const startedAt = Date.now();
+    try {
+      const outcome = await withEnv(
+        { ...cliEnv(dir, port, "127.0.0.1"), NODE_OPTIONS: nodeOptions, LAVISH_AXI_SERVER_START_TIMEOUT_MS: "1500" },
+        () => captureCli(["open", artifact, "--no-open"]).catch((error) => String(error?.message ?? error)),
+      );
+      assert.match(outcome, /did not start/);
+      assert.ok(Date.now() - startedAt < 4000, "the CLI gave up before the delayed server answered");
+    } finally {
+      await waitFor(() => reachable("127.0.0.1", port), 15_000);
+      await shutdownAt("127.0.0.1", port);
+    }
+  });
+});
+
 test(
   "a loopback-only server that wins the port during a host replacement is replaced once more",
   { timeout: 30_000 },
