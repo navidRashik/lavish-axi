@@ -12,11 +12,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import WebSocket from "ws";
 
 import { inheritedListenHosts, run, stopCommand, VERSION } from "../src/cli.js";
+import { FORK_BUILD_HEADER, FORK_BUILD_ID } from "../src/fork-build.js";
 import { stateId } from "../src/paths.js";
 import { serve } from "../src/server.js";
 
 // 192.0.2.0/24 is TEST-NET-1: assigned to no interface, so binding it fails with EADDRNOTAVAIL.
 const UNBINDABLE_HOST = "192.0.2.1";
+// What this fork's CLI sends; the server reports its real version and stops only for it.
+const FORK_HEADERS = { [FORK_BUILD_HEADER]: FORK_BUILD_ID };
 
 // A second concrete address on this machine, standing in for the Tailscale or LAN address one
 // agent pins with LAVISH_AXI_HOST while another agent on the same machine sets nothing.
@@ -123,7 +126,10 @@ function closeRaw(server) {
 }
 
 async function health(host, port, query = "") {
-  const response = await fetch(`http://${host}:${port}/health${query}`, { signal: AbortSignal.timeout(3000) });
+  const response = await fetch(`http://${host}:${port}/health${query}`, {
+    headers: FORK_HEADERS,
+    signal: AbortSignal.timeout(3000),
+  });
   return response.json();
 }
 
@@ -180,7 +186,7 @@ async function openSession(host, port, file) {
 }
 
 async function shutdownAt(host, port) {
-  await fetch(`http://${host}:${port}/shutdown`, { method: "POST" }).catch(() => {});
+  await fetch(`http://${host}:${port}/shutdown`, { method: "POST", headers: FORK_HEADERS }).catch(() => {});
   await waitFor(async () => !(await reachable(host, port)));
 }
 
@@ -435,7 +441,9 @@ test("a symlinked state directory adopts the daemon started at its target", asyn
         await runCli(["open", artifact, "--no-open"]);
       });
       assert.equal(await isResolved(owner.done), false, "the original daemon was replaced");
-      const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+      const health = await fetch(`http://127.0.0.1:${port}/health`, { headers: FORK_HEADERS }).then((response) =>
+        response.json(),
+      );
       assert.equal(health.state_id, stateId(path.join(alias, "state.json")));
       assert.equal(health.version, VERSION);
     } finally {

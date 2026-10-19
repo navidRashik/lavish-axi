@@ -8,6 +8,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { FORK_BUILD_HEADER, FORK_BUILD_ID } from "../src/fork-build.js";
+
 const runBrowserE2e = process.env.LAVISH_AXI_BROWSER_E2E === "1";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const baseCommit = "5b871af347444feda1d3002952ec5fc179248629";
@@ -61,7 +63,7 @@ async function stopServer(server, base, reason = "stop") {
   if (!server || server.child.exitCode !== null) return;
   await fetch(`${base}/shutdown`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", [FORK_BUILD_HEADER]: FORK_BUILD_ID },
     body: JSON.stringify({ reason }),
     signal: AbortSignal.timeout(2000),
   }).catch(() => {});

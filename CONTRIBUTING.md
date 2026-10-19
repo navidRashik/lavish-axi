@@ -42,6 +42,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 - Node 22+, ESM-only JavaScript, and TypeScript `checkJs` validation.
 - Run `pnpm run check` before pushing.
+- Coverage: `pnpm run test:coverage [test files...]` runs `node --test` under c8 and writes istanbul JSON to `coverage/coverage-final.json` (gitignored), which is what review-kit's done gate reads, e.g. `rk done --base origin/main --key <KEY> --run "pnpm run test:coverage test/<file>.test.js"`. c8 measures Node only: code that runs inside the browser, or through `vm` under a bare filename, shows as unexecuted.
 - Do not reformat repo-provided `.agents/` skill content; `.prettierignore` excludes it intentionally.
 - Do not hand-edit `CHANGELOG.md` or `.release-please-manifest.json`.
 - User-facing telemetry docs should stay minimal: anonymous usage telemetry, no sensitive content, and `LAVISH_AXI_TELEMETRY=0` opt-out.

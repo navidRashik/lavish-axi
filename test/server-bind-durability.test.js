@@ -13,7 +13,11 @@ import test from "node:test";
 import WebSocket from "ws";
 
 import { run, stopCommand, VERSION } from "../src/cli.js";
+import { FORK_BUILD_HEADER, FORK_BUILD_ID } from "../src/fork-build.js";
 import { serve } from "../src/server.js";
+
+// The server stops only for this fork's CLI, which names itself with this header.
+const FORK_HEADERS = { [FORK_BUILD_HEADER]: FORK_BUILD_ID };
 
 const SERVER_ENTRY = fileURLToPath(new URL("../bin/lavish-axi-server.js", import.meta.url));
 
@@ -73,16 +77,21 @@ function listenHealth(host, port, body) {
 // A cold `node` start of the server entry takes several seconds on a loaded machine, so a fixed
 // window races the child's own startup. Wait for as long as the child is alive and has not
 // answered; the ceiling only backstops a child that hangs without either answering or exiting.
+// `signal` is the test's own, so the test timeout also ends the wait.
 const CHILD_START_CEILING_MS = 30_000;
 
-/** @param {import("node:child_process").ChildProcess} child @param {number} port */
-async function waitForChildHealth(child, port) {
+/**
+ * @param {import("node:child_process").ChildProcess} child
+ * @param {number} port
+ * @param {AbortSignal} signal
+ */
+async function waitForChildHealth(child, port, signal) {
   const ceiling = Date.now() + CHILD_START_CEILING_MS;
-  while (child.exitCode === null && child.signalCode === null && Date.now() < ceiling) {
+  while (!signal.aborted && child.exitCode === null && child.signalCode === null && Date.now() < ceiling) {
     try {
-      const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) }).then(
-        (response) => response.json(),
-      );
+      const health = await fetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(2000)]),
+      }).then((response) => response.json());
       if (health.ok) return true;
     } catch {
       // Not listening yet.
@@ -445,7 +454,7 @@ try {
   });
 });
 
-test("a clean detached-server shutdown exits 0 without an error in server.log", async () => {
+test("a clean detached-server shutdown exits 0 without an error in server.log", { timeout: 20_000 }, async (t) => {
   await withTempDir(async (dir) => {
     const holder = createServer();
     await new Promise((resolve) => holder.listen({ port: 0, host: "127.0.0.1" }, () => resolve(undefined)));
@@ -467,8 +476,8 @@ test("a clean detached-server shutdown exits 0 without an error in server.log", 
     // Subscribed before the shutdown request so an exit that races the response is not missed.
     const exited = once(child, "exit");
     try {
-      assert.equal(await waitForChildHealth(child, port), true);
-      await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
+      assert.equal(await waitForChildHealth(child, port, t.signal), true);
+      await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST", headers: FORK_HEADERS });
       const [code] = await exited;
       assert.equal(code, 0);
     } finally {
@@ -516,7 +525,7 @@ test(
   "a post-listen HTTP error is logged while the server remains controllably alive",
   // Covers the child-start ceiling in waitForChildHealth; a healthy run still finishes in seconds.
   { timeout: CHILD_START_CEILING_MS + 15_000 },
-  async () => {
+  async (t) => {
     await withTempDir(async (dir) => {
       const preload = path.join(dir, "post-listen-error.mjs");
       await writeFile(
@@ -552,8 +561,12 @@ net.Server.prototype.emit = function (event, ...args) {
       });
       const exited = once(child, "exit");
       try {
-        assert.equal(await waitForChildHealth(child, port), true, "post-listen error must not take down the server");
-        await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST" });
+        assert.equal(
+          await waitForChildHealth(child, port, t.signal),
+          true,
+          "post-listen error must not take down the server",
+        );
+        await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST", headers: FORK_HEADERS });
         const [code] = await exited;
         assert.equal(code, 0);
       } finally {
