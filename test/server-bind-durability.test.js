@@ -60,11 +60,14 @@ async function withEnv(overrides, fn) {
 }
 
 // Waits as long as the spawned server process lives: a loaded host can take longer than any fixed
-// budget to start it, so only an exit means it will never answer. The test timeout bounds a hang.
-async function childServerReady(child, port) {
-  while (child.exitCode === null && child.signalCode === null) {
+// budget to start it, so only an exit means it will never answer. `signal` is the test's own, so
+// the test timeout ends a wait on a process that stays up without answering.
+async function childServerReady(child, port, signal) {
+  while (!signal.aborted && child.exitCode === null && child.signalCode === null) {
     try {
-      const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+      const health = await fetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(2000)]),
+      }).then((response) => response.json());
       if (health.ok) return true;
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -430,7 +433,7 @@ try {
   });
 });
 
-test("a clean detached-server shutdown exits 0 without an error in server.log", async () => {
+test("a clean detached-server shutdown exits 0 without an error in server.log", { timeout: 20_000 }, async (t) => {
   await withTempDir(async (dir) => {
     const holder = createServer();
     await new Promise((resolve) => holder.listen({ port: 0, host: "127.0.0.1" }, () => resolve(undefined)));
@@ -450,7 +453,7 @@ test("a clean detached-server shutdown exits 0 without an error in server.log", 
       stdio: ["ignore", fd, fd],
     });
     try {
-      assert.equal(await childServerReady(child, port), true);
+      assert.equal(await childServerReady(child, port, t.signal), true);
       await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST", headers: FORK_HEADERS });
       const [code] = await once(child, "exit");
       assert.equal(code, 0);
@@ -497,8 +500,8 @@ test("a detached server crash writes a timestamped line to server.log", async ()
 
 test(
   "a post-listen HTTP error is logged while the server remains controllably alive",
-  { timeout: 10_000 },
-  async () => {
+  { timeout: 20_000 },
+  async (t) => {
     await withTempDir(async (dir) => {
       const preload = path.join(dir, "post-listen-error.mjs");
       await writeFile(
@@ -533,7 +536,11 @@ net.Server.prototype.emit = function (event, ...args) {
         stdio: ["ignore", fd, fd],
       });
       try {
-        assert.equal(await childServerReady(child, port), true, "post-listen error must not take down the server");
+        assert.equal(
+          await childServerReady(child, port, t.signal),
+          true,
+          "post-listen error must not take down the server",
+        );
         await fetch(`http://127.0.0.1:${port}/shutdown`, { method: "POST", headers: FORK_HEADERS });
         const [code] = await once(child, "exit");
         assert.equal(code, 0);
