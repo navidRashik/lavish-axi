@@ -639,3 +639,18 @@ export function stampDone(chat, at, closedSeq = 0) {
   }
   return changed;
 }
+
+// The agent names the notes it handled (`reply --done`): each listed `prompt_id`, or every user note
+// for "all", is marked Done whatever round it came from and whether or not a poll delivered it.
+// A named id is explicit, so it reaches a pre-receipt note too; "all" leaves pre-receipt notes alone.
+export function stampDoneByIds(chat, at, ids) {
+  const wanted = ids === "all" ? null : new Set(Array.isArray(ids) ? ids : []);
+  let changed = false;
+  for (const entry of Array.isArray(chat) ? chat : []) {
+    if (!entry || typeof entry !== "object" || entry.role !== "user" || entry.done_at) continue;
+    if (wanted ? !wanted.has(entry.prompt_id) : !isUserEntry(entry)) continue;
+    entry.done_at = String(at);
+    changed = true;
+  }
+  return changed;
+}

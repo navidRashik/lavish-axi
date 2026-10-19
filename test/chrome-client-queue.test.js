@@ -8925,6 +8925,22 @@ test("a transcript entry from before receipts renders no receipt and ignores pre
   assert.equal(receiptNote(bubbles[1].innerHTML), "Agent is busy; delivered on its next poll");
 });
 
+test("a pre-receipt entry the agent named done shows only its Done step", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: {
+      ...defaultSessionData,
+      initialChat: [
+        { role: "user", kind: "message", text: "Old note", receipt: "none", done_at: "2026-10-19T10:00:00.000Z" },
+      ],
+    },
+  });
+  const html = chrome.element("chatLog").children[0].innerHTML;
+  assert.deepEqual(receiptSteps(html), [true]);
+  assert.match(html, /Done/);
+  assert.doesNotMatch(html, /Seen|Working/);
+  assert.equal(receiptNote(html), "");
+});
+
 async function whiteboardInitWithLibraries({ librariesResponse, sourcesVersion }) {
   const chrome = await createChromeHarness({
     fetchImpl: async (url) => {
