@@ -3,10 +3,23 @@
 // Every helper here is serialized wholesale into the artifact SDK bundle by `createSdkJs`, so
 // each one may reference only its own arguments, browser globals, or its sibling exports.
 
-// The binding scope of an element is the nearest `data-lavish-ref` at or above it, so a ref nested
+// An element binds to the store through `data-lavish-ref`, or implicitly to `q:<id>` when it has a
+// non-empty `data-lavish-question="<id>"` and no `data-lavish-ref`. Null when it does not bind.
+export function lavishStateRefOf(element) {
+  if (!element?.getAttribute) return null;
+  const explicit = element.getAttribute("data-lavish-ref");
+  if (explicit !== null) return String(explicit);
+  const question = String(element.getAttribute("data-lavish-question") || "").trim();
+  return question ? "q:" + question : null;
+}
+
+// The binding scope of an element is the nearest binding element at or above it, so a ref nested
 // inside another ref owns its own fields.
 export function lavishStateScopeOf(element) {
-  return element?.closest ? element.closest("[data-lavish-ref]") : null;
+  for (let current = element; current; current = current.parentElement) {
+    if (lavishStateRefOf(current) !== null) return current;
+  }
+  return null;
 }
 
 // `status=merged,closed` -> true when item.status is merged or closed. A missing item matches
@@ -110,7 +123,7 @@ export function lavishStateApplyQuestion(scope, item) {
     if (isControl) scope.insertAdjacentElement("afterend", line);
     else scope.appendChild(line);
   }
-  line.textContent = "Answered: " + String(item.answer || "");
+  line.textContent = "✅ YOUR PICK: " + String(item.answer || "");
 }
 
 export function lavishStateSetText(element, text) {
@@ -128,8 +141,9 @@ export function lavishStateSetText(element, text) {
 export function applyLavishState(root, snapshot, now) {
   const state = snapshot?.state || {};
   const items = state.items || {};
-  for (const scope of root.querySelectorAll("[data-lavish-ref]")) {
-    const id = String(scope.getAttribute("data-lavish-ref") || "");
+  for (const scope of root.querySelectorAll("[data-lavish-ref],[data-lavish-question]")) {
+    const id = lavishStateRefOf(scope);
+    if (id === null) continue;
     const item = Object.prototype.hasOwnProperty.call(items, id) ? items[id] : null;
     if (!item) {
       scope.setAttribute("data-lavish-status", "unknown");

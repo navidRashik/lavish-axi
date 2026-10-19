@@ -6,6 +6,7 @@ import {
   lavishStateAgeText,
   lavishStateConditionMatches,
   lavishStateQuestionAnswer,
+  lavishStateRefOf,
   lavishStateStaleness,
 } from "../src/state-bindings.js";
 
@@ -213,7 +214,7 @@ test("an answered question disables its controls and shows the answer; reopening
   );
   assert.equal(yes.disabled, true);
   assert.equal(button.disabled, true);
-  assert.equal(question.querySelector("[data-lavish-state-answer]").textContent, "Answered: yes");
+  assert.equal(question.querySelector("[data-lavish-state-answer]").textContent, "✅ YOUR PICK: yes");
 
   applyLavishState(root, snapshot({ "q:merge": { status: "open", updatedAt: "2026-10-14T14:00:00Z" } }), NOW);
   assert.equal(yes.disabled, false);
@@ -247,10 +248,26 @@ test("a binding on the control itself disables that control and puts the answer 
   const root = el("main", {}, [form]);
   applyLavishState(root, snapshot({ "q:pick": { status: "answered", answer: "A" } }), NOW);
   assert.equal(select.disabled, true);
-  assert.equal(form.children[1]?.textContent, "Answered: A");
+  assert.equal(form.children[1]?.textContent, "✅ YOUR PICK: A");
   applyLavishState(root, snapshot({ "q:pick": { status: "answered", answer: "A" } }), NOW);
   assert.equal(form.children.length, 2, "re-render reuses the answer line");
   applyLavishState(root, snapshot({ "q:pick": { status: "open" } }), NOW);
   assert.equal(select.disabled, false);
   assert.equal(form.children.length, 1);
+});
+
+test("a question with no data-lavish-ref binds to q:<id> and disables its controls once answered", () => {
+  const yes = el("input", {}, [], { type: "radio", value: "yes" });
+  const send = el("button", {});
+  const question = el("div", { "data-lavish-question": "hub-merge" }, [yes, send]);
+  const unbound = el("div", { "data-lavish-question": "" }, [el("button", {})]);
+  const root = el("main", {}, [question, unbound]);
+  applyLavishState(root, snapshot({ "q:hub-merge": { status: "answered", answer: "yes" } }), NOW);
+  assert.equal(yes.disabled, true);
+  assert.equal(send.disabled, true);
+  assert.equal(question.getAttribute("data-lavish-status"), "answered");
+  assert.equal(question.querySelector("[data-lavish-state-answer]").textContent, "✅ YOUR PICK: yes");
+  assert.equal(unbound.getAttribute("data-lavish-status"), null, "an empty question id binds nothing");
+  assert.equal(lavishStateRefOf(question), "q:hub-merge");
+  assert.equal(lavishStateRefOf(el("div", { "data-lavish-question": "x", "data-lavish-ref": "pr:a/b#1" })), "pr:a/b#1");
 });
