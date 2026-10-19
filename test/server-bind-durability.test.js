@@ -358,7 +358,7 @@ test(
   },
 );
 
-test("a live-event client that answers its pings is left connected", async () => {
+test("a live-event client that answers its pings is left connected", { timeout: 10_000 }, async () => {
   await withTempDir(async (dir) => {
     const artifact = await writeArtifact(dir);
     const server = await serve({
@@ -369,7 +369,13 @@ test("a live-event client that answers its pings is left connected", async () =>
       hosts: ["127.0.0.1"],
       log: () => {},
       idleTimeoutMs: null,
-      liveEventHeartbeatMs: 40,
+      // The server gives each ping exactly one interval to be answered, and the client shares this
+      // process's event loop: a stall longer than the interval leaves the pong unread when the next
+      // tick fires (timers run before socket reads), so a healthy client is reaped. Measured with
+      // monitorEventLoopDelay while three full `node --test` runs competed for the CPU, stalls
+      // reached 284 ms (p90 181 ms) and a 40 ms interval reaped the client in 12 of 30 runs. 500 ms
+      // keeps the check about the server's logic rather than about the test machine's load.
+      liveEventHeartbeatMs: 500,
     });
     const base = `http://127.0.0.1:${server.port}`;
     try {
@@ -381,14 +387,19 @@ test("a live-event client that answers its pings is left connected", async () =>
 
       const healthy = new WebSocket(`${base.replace(/^http/, "ws")}/events/${opened.key}`, { origin: base });
       await once(healthy, "open");
-      let closed = false;
-      healthy.once("close", () => {
-        closed = true;
-      });
       // Several heartbeat rounds: a reviewer sitting quietly on a board must never be reaped as
-      // absent, which is the failure mode a liveness check most easily introduces.
-      await new Promise((resolve) => setTimeout(resolve, 260));
-      assert.equal(closed, false);
+      // absent, which is the failure mode a liveness check most easily introduces. The server only
+      // sends a ping once the previous one was answered, so the third ping proves two full rounds
+      // were accepted - counted from the wire instead of guessed from a sleep.
+      const outcome = await new Promise((resolve) => {
+        let pings = 0;
+        healthy.on("ping", () => {
+          pings += 1;
+          if (pings === 3) resolve("answered");
+        });
+        healthy.once("close", () => resolve("reaped"));
+      });
+      assert.equal(outcome, "answered");
       assert.equal(healthy.readyState, WebSocket.OPEN);
       healthy.close();
     } finally {
