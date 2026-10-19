@@ -1241,7 +1241,6 @@ os.networkInterfaces = () => ({ ...networkInterfaces(), blackhole: [{ address: "
 `,
     );
     const port = await freePort();
-    const started = Date.now();
     const child = spawn(
       process.execPath,
       [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "stop", "--port", String(port)],
@@ -1256,13 +1255,21 @@ os.networkInterfaces = () => ({ ...networkInterfaces(), blackhole: [{ address: "
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
+    // The clock starts when the CLI prints its result, not at spawn: a cold node start on a loaded
+    // machine takes seconds on its own, and that is the CLI still starting, not the CLI hung.
     let stdout = "";
-    child.stdout.on("data", (chunk) => (stdout += chunk));
-    const [code] = await once(child, "exit");
-    const elapsedMs = Date.now() - started;
+    let printedAt = 0;
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (!printedAt && /not-running/.test(stdout)) printedAt = Date.now();
+    });
+    // `close`, not `exit`: it fires once stdout is drained, so the result line has been seen.
+    const [code] = await once(child, "close");
+    const lingeredMs = Date.now() - printedAt;
     assert.equal(code, 0);
     assert.match(stdout, /not-running/);
-    // Before the fix the aborted probe's TCP connect kept the process alive until the OS gave up.
-    assert.ok(elapsedMs < 5000, `the CLI took ${elapsedMs}ms to exit`);
+    // Before the fix the aborted probe's TCP connect kept the process alive after it printed its
+    // result, until the OS gave up on the connect.
+    assert.ok(lingeredMs < 5000, `the CLI stayed alive ${lingeredMs}ms after printing its result`);
   });
 });

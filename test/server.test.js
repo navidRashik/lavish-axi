@@ -103,12 +103,17 @@ async function startPresenceStream(base, key) {
       return (await stream.next()).state;
     },
     close: stream.close,
+    closed: stream.closed,
   };
 }
 
 async function startEventStream(base, key, eventName) {
   const socket = new WebSocket(`${base.replace(/^http/, "ws")}/events/${key}`, { origin: base });
   const messages = on(socket, "message");
+  // `close` fires only after the server echoed the close frame, and the server marks its end
+  // closing before it echoes, so awaiting this orders a later request after the server saw the
+  // browser leave.
+  const closed = new Promise((resolve) => socket.once("close", resolve));
   await once(socket, "open");
 
   return {
@@ -131,6 +136,7 @@ async function startEventStream(base, key, eventName) {
       await messages.return();
       socket.close();
     },
+    closed,
   };
 }
 
@@ -5044,9 +5050,13 @@ test("a poll that starts after a browser disconnect receives its own full wait",
     const browser = await startPresenceStream(base, opened.key);
     assert.equal(await browser.next(), "waiting");
     await browser.close();
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=80`);
+    // Wait for the close handshake rather than a fixed sleep: the server's own socket `close`
+    // event can still be pending, but the server has seen the close frame, so this poll starts
+    // after the disconnect however starved the event loop is.
+    await browser.closed;
+    // The poll's own wait outlasts the 120 ms grace, so a timer armed for the earlier disconnect
+    // would cut it short.
+    const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=200`);
     assert.deepEqual(await poll.json(), { status: "waiting" });
   } finally {
     await server.close();
@@ -5145,8 +5155,10 @@ test("exclusive listener ownership rejects a loser and reports a takeover", asyn
       body: JSON.stringify({ file: artifact }),
     });
     const { key } = await open.json();
-    const poll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&owner=worker-7`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The server writes the `Lavish-Poll-State: listening` header only after worker-7 is in
+    // activePolls, so awaiting the response head (not a fixed sleep) is the readiness signal.
+    const first = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&owner=worker-7`);
+    assert.equal(first.headers.get("lavish-poll-state"), "listening");
 
     const health = await fetch(`${base}/health`).then((response) => response.json());
     assert.deepEqual(
@@ -5175,7 +5187,6 @@ test("exclusive listener ownership rejects a loser and reports a takeover", asyn
       body: JSON.stringify({}),
       signal: takeover.signal,
     }).catch((error) => error);
-    const first = await poll;
     const replaced = await first.json();
     assert.equal(replaced.code, "LISTENER_REPLACED");
     assert.equal(replaced.holder.label, "worker-7");
@@ -5233,10 +5244,10 @@ test("bare polls have a visible agent listener identity and none is reserved", a
     });
     const { key } = await open.json();
     const controller = new AbortController();
-    const poll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}`, { signal: controller.signal }).catch(
-      (error) => error,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The server writes the `Lavish-Poll-State: listening` header only after the holder is in
+    // activePolls, so awaiting the response head (not a fixed sleep) is the readiness signal.
+    const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}`, { signal: controller.signal });
+    assert.equal(poll.headers.get("lavish-poll-state"), "listening");
     const health = await fetch(`${base}/health`).then((response) => response.json());
     assert.equal(health.listeners.find((listener) => listener.key === key).label, "agent-listener");
     const conflict = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&owner=worker-8`);
@@ -5245,7 +5256,7 @@ test("bare polls have a visible agent listener identity and none is reserved", a
     assert.equal(reserved.status, 400);
     assert.equal((await reserved.json()).code, "VALIDATION_ERROR");
     controller.abort();
-    await poll;
+    await poll.text().catch((error) => error);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });

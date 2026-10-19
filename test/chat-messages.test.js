@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { performance } from "node:perf_hooks";
 import test from "node:test";
 
 import {
@@ -104,17 +103,30 @@ test("Markdown images with optional titles remain literal text", () => {
 });
 
 test("malformed links and images stay literal without stalling", () => {
-  const brackets = "[".repeat(30_000) + " " + "![".repeat(30_000);
-  const recursiveLinks = "[x](https://a(".repeat(10_000);
-  const nestedDestination = "[x](https://example.test/" + "(".repeat(30_000);
-  const started = performance.now();
-  assert.equal(renderChatMarkdown(brackets), `<p>${brackets}</p>`);
-  assert.equal(renderChatMarkdown(recursiveLinks), `<p>${recursiveLinks}</p>`);
-  assert.equal(renderChatMarkdown(nestedDestination), `<p>${nestedDestination}</p>`);
-  const elapsed = performance.now() - started;
-  // Catastrophic backtracking would blow this budget by orders of magnitude;
-  // the wide margin absorbs slower/shared CI runners (observed ~1.1s on windows-latest).
-  assert.ok(elapsed < 10_000, `render took ${Math.round(elapsed)}ms`);
+  const inputs = (n) => ({
+    brackets: "[".repeat(n) + " " + "![".repeat(n),
+    recursiveLinks: "[x](https://a(".repeat(n / 3),
+    nestedDestination: "[x](https://example.test/" + "(".repeat(n),
+  });
+  // CPU time, not wall time: a starved runner stretches wall time arbitrarily, but only the
+  // render's own work accrues here. The bound is the growth ratio between two sizes in this same
+  // process, so it does not depend on machine speed either: linear work grows ~4x when the input
+  // grows 4x, and quadratic (catastrophic backtracking) work grows ~16x.
+  const renderAll = (n) => {
+    const { brackets, recursiveLinks, nestedDestination } = inputs(n);
+    const started = process.cpuUsage();
+    assert.equal(renderChatMarkdown(brackets), `<p>${brackets}</p>`);
+    assert.equal(renderChatMarkdown(recursiveLinks), `<p>${recursiveLinks}</p>`);
+    assert.equal(renderChatMarkdown(nestedDestination), `<p>${nestedDestination}</p>`);
+    const { user, system } = process.cpuUsage(started);
+    return user + system;
+  };
+  renderAll(7_500); // warm the JIT so the small run measures the parser, not compilation
+  const small = renderAll(7_500);
+  const large = renderAll(30_000);
+  const growth = large / Math.max(small, 1);
+  assert.ok(growth < 8, `4x input took ${growth.toFixed(1)}x CPU (${small}us -> ${large}us); expected ~4x`);
+  assert.ok(large < 10_000_000, `rendering the 30k inputs took ${large}us of CPU; expected under 10 s`);
 });
 
 test("destinations beyond the inline limit remain literal", () => {
