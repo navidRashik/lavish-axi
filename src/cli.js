@@ -36,12 +36,14 @@ import {
 import { localInterfaceAddresses } from "./local-address.js";
 import { FORK_BUILD_HEADER, FORK_BUILD_ID, forkServerVersion } from "./fork-build.js";
 import {
+  allowedHostsForSpawn,
   clientHost,
   defaultPort,
   ensureStateDir,
   hostForUrl,
   isWildcardHost,
   LOOPBACK_HOST,
+  recordAllowedHosts,
   resolveConcreteListenHosts,
   serverLogFile,
   stateFile,
@@ -1839,6 +1841,7 @@ async function serverCommand(args) {
   const port = Number(flagValue(args, "--port") || defaultPort());
   const debug = args.includes("--verbose") || process.env.LAVISH_AXI_DEBUG === "1";
   const { serve } = await loadServer();
+  await recordAllowedHosts();
   const server = await serve({
     port,
     stateFile: stateFile(),
@@ -2433,6 +2436,14 @@ function unidentifiedListenerError(baseUrl) {
 
 async function startServer(port, { alsoListen = [] } = {}) {
   await ensureStateDir();
+  let allowedHosts;
+  try {
+    allowedHosts = await allowedHostsForSpawn();
+  } catch (error) {
+    throw new AxiError(`Not starting a Lavish server: ${/** @type {Error} */ (error).message}`, "SERVER_ERROR", [
+      "Fix or delete that file, or set LAVISH_AXI_ALLOWED_HOSTS, so the server keeps its Host allowlist",
+    ]);
+  }
   const entry = resolveServerEntry();
   let logFd = null;
   try {
@@ -2443,7 +2454,7 @@ async function startServer(port, { alsoListen = [] } = {}) {
   try {
     const args = [entry, "server", "--port", String(port)];
     for (const host of alsoListen) args.push("--also-listen", host);
-    const child = spawn(process.execPath, args, createServerSpawnOptions(logFd));
+    const child = spawn(process.execPath, args, createServerSpawnOptions(logFd, allowedHosts));
     child.unref();
     return child;
   } finally {
@@ -2463,16 +2474,21 @@ function resolveServerEntry() {
 
 /**
  * @param {number | null} logFd
+ * @param {string | undefined} [allowedHosts] the Host allowlist the spawned server keeps; undefined when none is configured
  * @returns {import("node:child_process").SpawnOptions}
  */
-export function createServerSpawnOptions(logFd = null) {
+export function createServerSpawnOptions(logFd = null, allowedHosts = undefined) {
   const stdio = /** @type {import("node:child_process").StdioOptions} */ (
     logFd === null ? "ignore" : ["ignore", logFd, logFd]
   );
   return {
     detached: true,
     stdio,
-    env: { ...process.env, LAVISH_AXI_NO_OPEN: "1" },
+    env: {
+      ...process.env,
+      LAVISH_AXI_NO_OPEN: "1",
+      ...(allowedHosts === undefined ? {} : { LAVISH_AXI_ALLOWED_HOSTS: allowedHosts }),
+    },
   };
 }
 
