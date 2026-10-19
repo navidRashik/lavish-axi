@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 // One process holds the long-poll listener of every page in a watch list. Each page costs one idle
 // socket on the server instead of its own node process. The list is append-only: `+<page>\t<name>`
@@ -150,19 +151,7 @@ export async function runWatch({
   let wake = null;
 
   const note = (name, text) => appendFileSync(path.join(feedDir, `${name}.log`), `=== ${utc()} · ${text}\n`);
-  const sleep = (ms) => {
-    const { promise, resolve } = Promise.withResolvers();
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      stop.signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    stop.signal.addEventListener("abort", onAbort, { once: true });
-    return promise;
-  };
+  const sleep = (ms) => delay(ms, undefined, { signal: stop.signal }).catch(() => {});
 
   async function watchPage(file, name) {
     note(name, `watch start pid=${process.pid} page=${file}`);
@@ -197,34 +186,22 @@ export async function runWatch({
     wake?.();
   }
 
+  const listSize = () => statSync(listFile, { throwIfNoEntry: false })?.size ?? 0;
+
   function readNewLines() {
-    let size;
-    try {
-      size = statSync(listFile).size;
-    } catch {
-      return;
-    }
+    const size = listSize();
     if (size <= offset) return;
     const fd = openSync(listFile, "r");
     const buffer = Buffer.alloc(size - offset);
     readSync(fd, buffer, 0, buffer.length, offset);
     closeSync(fd);
-    const text = buffer.toString("utf8");
-    const complete = text.lastIndexOf("\n") + 1;
-    offset += Buffer.byteLength(text.slice(0, complete));
-    for (const { file, name } of parseWatchLines(text.slice(0, complete))) {
+    const end = buffer.lastIndexOf(10) + 1;
+    offset += end;
+    for (const { file, name } of parseWatchLines(buffer.toString("utf8", 0, end))) {
       seen += 1;
       if (!active.has(file)) active.set(file, watchPage(file, name));
     }
   }
-
-  const listGrew = () => {
-    try {
-      return statSync(listFile).size > offset;
-    } catch {
-      return false;
-    }
-  };
 
   const onSignal = () => stop.abort();
   process.once("SIGINT", onSignal);
@@ -244,7 +221,7 @@ export async function runWatch({
         } catch {
           // Already gone.
         }
-        if (stop.signal.aborted || !listGrew() || !claimWatchPid(feedDir)) break;
+        if (stop.signal.aborted || listSize() <= offset || !claimWatchPid(feedDir)) break;
         continue;
       }
       const { promise, resolve } = Promise.withResolvers();
