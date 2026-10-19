@@ -72,6 +72,7 @@ import { canonicalFile, sessionKey, SessionStore } from "./session-store.js";
 import { generateSharePassword } from "./share-password.js";
 import { initDefaultTelemetry } from "./telemetry.js";
 import { excalidrawLibrariesDir, loadExcalidrawLibraries } from "./whiteboard-library-store.js";
+import { appendWatchLine, claimWatchPid, runWatch, watcherRunning } from "./watch.js";
 import { isValidItemId, parseAssignments, readState, setItem, stateFilePath } from "./state-store.js";
 
 // server.js pulls in express, chokidar and parse5. Only the commands that serve or export load it,
@@ -94,6 +95,7 @@ const COMMANDS = new Set([
   "share",
   "libraries",
   "state",
+  "watch",
 ]);
 // SDK-reserved built-ins (e.g. `update`) must reach runAxiCli untouched; otherwise
 // the bare-arg normalization below would rewrite them into the hidden `open` command.
@@ -249,6 +251,7 @@ export async function run(argv) {
         share: shareCommand,
         libraries: librariesCommand,
         state: stateCommand,
+        watch: watchCommand,
       },
       getCommandHelp: (command) => getCommandHelp(command, { agent }),
     });
@@ -530,6 +533,71 @@ async function pollCommand(args) {
       process.off("SIGTERM", onPollSignal);
     }
   }
+}
+
+// Renders a poll response exactly as `lavish-axi poll` prints it, so feed logs written by `watch`
+// read the same as the ones a per-page poll loop wrote.
+async function renderPollResponse(file, response) {
+  if (response.status === "missing") return "session:\n  status: missing\n";
+  let text = "";
+  await runAxiCli({
+    description: DESCRIPTION,
+    topLevelHelp: "",
+    argv: ["render"],
+    home: () => "",
+    commands: { render: () => createPollOutput({ file, response, agent: "generic" }) },
+    stdout: { write: (chunk) => (text += chunk) },
+  });
+  return text;
+}
+
+async function watchCommand(args) {
+  const feedFlag = flagValue(args, "--feed-dir");
+  if (!feedFlag) {
+    throw new AxiError("--feed-dir is required", "VALIDATION_ERROR", ["Run `lavish-axi watch --feed-dir <dir>`"]);
+  }
+  const feedDir = path.resolve(String(feedFlag));
+  const owner = String(flagValue(args, "--owner") || "lavish-watch").trim();
+  const page = flagValue(args, "--add");
+  if (page) {
+    await assertHtmlFile(String(page));
+    const file = await canonicalFile(String(page));
+    appendWatchLine(feedDir, file, flagValue(args, "--name") ? String(flagValue(args, "--name")) : undefined);
+    const start = !watcherRunning(feedDir);
+    if (start) {
+      spawn(process.execPath, [process.argv[1], "watch", "--feed-dir", feedDir, "--owner", owner], {
+        detached: true,
+        stdio: "ignore",
+      }).unref();
+    }
+    return { watch: { file, feed_dir: feedDir, watcher: start ? "started" : "running" } };
+  }
+  mkdirSync(feedDir, { recursive: true });
+  if (!claimWatchPid(feedDir)) return { watch: { feed_dir: feedDir, watcher: "already-running" } };
+  // One server lookup at a time: pages that re-arm together after an outage share one ensureServer.
+  let baseUrl = null;
+  let resolving = null;
+  const server = () =>
+    baseUrl
+      ? Promise.resolve(baseUrl)
+      : (resolving ??= ensureServer()
+          .then((url) => (baseUrl = url))
+          .finally(() => (resolving = null)));
+  const result = await runWatch({
+    feedDir,
+    poll: async (file, signal) => {
+      const query = new URLSearchParams({ file, owner });
+      try {
+        return await fetchJson(`${await server()}/api/poll?${query}`, { retries: 0, signal });
+      } catch (error) {
+        if (error?.httpStatus === 404) return { status: "missing" };
+        if (error?.code === "SERVER_ERROR" && !error.httpStatus) baseUrl = null;
+        throw error;
+      }
+    },
+    render: renderPollResponse,
+  });
+  return { watch: { feed_dir: feedDir, watcher: "stopped", ...result } };
 }
 
 const REPLY_VALUE_FLAGS = ["--agent-reply", "--agent-reply-file", "--done"];
@@ -2525,11 +2593,11 @@ export function createServerSpawnOptions(logFd = null, allowedHosts = undefined)
 
 /**
  * @param {string} url
- * @param {{ retries?: number, retryDelayMs?: number, onResponse?: ((response: Response) => void) | null, method?: string, headers?: Record<string, string>, body?: string }} [options]
+ * @param {{ retries?: number, retryDelayMs?: number, onResponse?: ((response: Response) => void) | null, method?: string, headers?: Record<string, string>, body?: string, signal?: AbortSignal }} [options]
  */
 export async function fetchJson(
   url,
-  { retries = 0, retryDelayMs = 250, onResponse = null, method = "GET", headers, body } = {},
+  { retries = 0, retryDelayMs = 250, onResponse = null, method = "GET", headers, body, signal } = {},
 ) {
   let response;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -2538,6 +2606,7 @@ export async function fetchJson(
         method,
         ...(headers ? { headers } : {}),
         ...(body === undefined ? {} : { body }),
+        ...(signal ? { signal } : {}),
       });
       break;
     } catch (error) {
@@ -2569,7 +2638,9 @@ export async function fetchJson(
       if (holder) Object.assign(error, { holder });
       throw error;
     }
-    throw new AxiError(`Lavish Editor request failed: ${response.status}`, "SERVER_ERROR");
+    throw Object.assign(new AxiError(`Lavish Editor request failed: ${response.status}`, "SERVER_ERROR"), {
+      httpStatus: response.status,
+    });
   }
   onResponse?.(response);
   try {
@@ -2892,6 +2963,7 @@ function createCommandHelp({ agent = "generic" } = {}) {
     design: `Usage: lavish-axi design\n\nShow a copy-pasteable CDN snippet for Tailwind CSS browser runtime v4 + DaisyUI v5 + themes, the whiteboard (Mermaid) opt-in snippet, a content-to-playbook router, an optional layout safety CSS snippet, plus technical reference for DaisyUI components. ${PLAYBOOK_ROUTER_HELP} Lavish artifacts stay portable HTML. This CDN snippet is the design fallback, not the default: inspect the subject project before falling back, and paste the layout safety CSS only when useful for dense nested grid/flex layouts, badges, wide fonts, or local media. ${DESIGN_PRIORITY_RULE}\n`,
     setup: `Usage: lavish-axi setup hooks\n       lavish-axi setup plugin\n\nhooks: install or repair agent SessionStart hooks for lavish-axi ambient context in Claude Code, Codex, OpenCode, and GitHub Copilot CLI. Restart your agent session afterward to receive the context. This is the primary integration - it carries live session state.\n\nplugin: register the installed lavish-axi package as an Agent Plugin (agent-plugins.org) in VS Code, Cursor, and GitHub Copilot CLI. The installed package directory is itself the plugin root, so nothing is downloaded and no marketplace is involved. Reload each client afterward. Codex users should use \`setup hooks\` instead.\n\nBoth actions are explicit opt-in, idempotent, and repair a stale path after a reinstall.\n`,
     server: `Usage: lavish-axi server [--port 4387] [--verbose] [--also-listen <host>...]\n\nRun the local Lavish Editor server. Pass --verbose (or set LAVISH_AXI_DEBUG=1) to log session and watcher events to stderr. Detached server output is appended to ~/.lavish-axi/server.log, or LAVISH_AXI_STATE_DIR/server.log when set, for startup and crash diagnostics.\n\nBy default Lavish binds to 127.0.0.1 and, when Tailscale is running, this machine's Tailscale IPv4. Any explicit LAVISH_AXI_HOST overrides automatic Tailscale binding; wildcard values such as 0.0.0.0 or :: are restricted to loopback. An explicit non-wildcard LAVISH_AXI_HOST sets the bind address, and the server also listens on 127.0.0.1 so every local CLI finds it; --also-listen adds further concrete addresses (the CLI passes it when it replaces a server, to keep every address the old one served). An address that cannot be bound is retried in the background and reported as network_warning. Binding beyond loopback exposes an unauthenticated server that can read and serve arbitrary local files to anything that can reach it, so only do so on a trusted network. With automatic binding enabled, a successfully bound Tailscale listener uses its MagicDNS name in generated session links; otherwise LAVISH_AXI_LINK_HOST can set the link hostname. See README's Allowed hosts section for Host allowlisting and LAVISH_AXI_ALLOWED_HOSTS. LAVISH_AXI_NO_OPEN=1 (or --no-open) suppresses the local browser launch.\n`,
+    watch: `Usage: lavish-axi watch --feed-dir <dir> [--owner <label>] [--add <html-file> [--name <log-name>]]\n\nOne process holds the poll listener of every page added to <dir>/watch.list, so N watched pages cost one process instead of N. With --add, append the page to the list and start the watcher if none is running, then exit. Without --add, run the watcher in the foreground. Every poll return is appended to <dir>/<log-name>.log in the format \`lavish-axi poll\` prints. A page leaves the watch when its session ends or no longer exists; the watcher exits when no page is left.`,
   };
 }
 

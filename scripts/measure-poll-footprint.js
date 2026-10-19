@@ -3,7 +3,10 @@
 // Everything runs against a throwaway server on a free port with its own state directory, so a
 // live Lavish server and its sessions are never touched.
 //
-//   node scripts/measure-poll-footprint.js [--cli dist/cli.mjs] [--polls 5] [--window-ms 10000]
+//   node scripts/measure-poll-footprint.js [--cli dist/cli.mjs] [--polls 5] [--window-ms 10000] [--mode poll|watch]
+//
+// --mode poll (default) runs one `lavish-axi poll` process per page; --mode watch runs one
+// `lavish-axi watch` process that listens on every page.
 //
 // Prints one JSON object: rss_mb per poll process (min/median/max), cpu_pct summed over all polls
 // during the window, and the server's own rss_mb.
@@ -20,6 +23,7 @@ const arg = (name, fallback) => {
 const cli = path.resolve(arg("--cli", "dist/cli.mjs"));
 const polls = Number(arg("--polls", "5"));
 const windowMs = Number(arg("--window-ms", "10000"));
+const mode = arg("--mode", "poll");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const port = await new Promise((resolve) => {
@@ -79,6 +83,7 @@ try {
     await sleep(100);
   }
   const pollers = [];
+  const feedDir = path.join(dir, "feed");
   for (let i = 0; i < polls; i += 1) {
     const file = path.join(dir, `page-${i}.html`);
     writeFileSync(file, `<!doctype html><title>footprint ${i}</title><p>page ${i}</p>`);
@@ -88,10 +93,21 @@ try {
       body: JSON.stringify({ file }),
     });
     if (!response.ok) throw new Error(`session ${i}: HTTP ${response.status}`);
-    pollers.push(start(["poll", file, "--owner", "footprint"]));
+    if (mode === "watch") {
+      execFileSync(process.execPath, [cli, "watch", "--feed-dir", feedDir, "--owner", "footprint", "--add", file], {
+        env,
+      });
+    } else pollers.push(start(["poll", file, "--owner", "footprint"]));
   }
   await sleep(3000);
-  const pids = pollers.map((child) => child.pid);
+  const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+  const listening = health.listeners.filter((listener) => listener.label === "footprint").length;
+  if (listening !== polls) throw new Error(`${listening} of ${polls} pages have a listener`);
+  // The first `watch --add` starts the one detached watcher; its pid is in the pidfile.
+  const pids =
+    mode === "watch"
+      ? [Number(readFileSync(path.join(feedDir, "watch.pid"), "utf8"))]
+      : pollers.map((child) => child.pid);
   const before = sample([...pids, server.pid]);
   await sleep(windowMs);
   const after = sample([...pids, server.pid]);
@@ -103,7 +119,9 @@ try {
     JSON.stringify({
       cli,
       node: process.version,
+      mode,
       polls,
+      processes: pids.length,
       window_ms: windowMs,
       poll_rss_mb: { min: round(rss[0]), median: round(rss[Math.floor(rss.length / 2)]), max: round(rss.at(-1)) },
       poll_rss_mb_total: round(rss.reduce((total, value) => total + value, 0)),
@@ -115,6 +133,12 @@ try {
     }),
   );
 } finally {
+  // The watcher re-spawns a server it loses, so it stops first.
+  try {
+    process.kill(Number(readFileSync(path.join(dir, "feed", "watch.pid"), "utf8")), "SIGKILL");
+  } catch {
+    // No watcher was started.
+  }
   for (const child of children) child.kill("SIGKILL");
   rmSync(dir, { recursive: true, force: true });
 }
