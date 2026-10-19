@@ -67,6 +67,8 @@ function baseEnv(dir, port) {
     LAVISH_AXI_LINK_HOST: "127.0.0.1",
     LAVISH_AXI_TELEMETRY: "0",
     LAVISH_AXI_NO_OPEN: "1",
+    // The hub these tests stop is not coming back, so a CLI spawns a server at once.
+    LAVISH_AXI_HUB_RESTART_GRACE_MS: "0",
   };
   delete env.LAVISH_AXI_ALLOWED_HOSTS;
   return env;

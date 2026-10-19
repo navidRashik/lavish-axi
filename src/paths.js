@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync, statSync, utimesSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import os from "node:os";
@@ -217,6 +217,70 @@ export async function allowedHostsForSpawn(env = process.env) {
   }
   if (typeof value !== "string") throw new Error(`the recorded Host allowlist ${file} is not valid`);
   return value;
+}
+
+// A server a CLI spawns carries this in its environment, so it never records itself as the hub.
+export const SPAWNED_SERVER_ENV = "LAVISH_AXI_SPAWNED_SERVER";
+// The hub refreshes its record this often while it runs.
+export const MANAGED_HUB_HEARTBEAT_MS = 5_000;
+// How long after the hub's last heartbeat a CLI still waits for it to come back instead of
+// spawning a server of its own: long enough to cover a service manager's restart delay.
+// LAVISH_AXI_HUB_RESTART_GRACE_MS overrides it with any non-negative number of milliseconds.
+const DEFAULT_MANAGED_HUB_RESTART_GRACE_MS = 30_000;
+
+export function managedHubRestartGraceMs(env = process.env) {
+  const raw = env.LAVISH_AXI_HUB_RESTART_GRACE_MS?.trim();
+  const value = raw ? Number(raw) : NaN;
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_MANAGED_HUB_RESTART_GRACE_MS;
+}
+
+// The record a `lavish-axi server` started directly (a service manager's hub, not a CLI's spawn)
+// keeps beside state.json: its pid and port, with the file's mtime as its heartbeat.
+export function managedHubFile() {
+  return path.join(stateDir(), "managed-hub.json");
+}
+
+/** @param {{ pid: number, port: number }} hub */
+export async function recordManagedHub(hub) {
+  await ensureStateDir();
+  const file = managedHubFile();
+  const partial = `${file}.${process.pid}.tmp`;
+  await writeFile(partial, `${JSON.stringify({ pid: hub.pid, port: hub.port })}\n`, "utf8");
+  await rename(partial, file);
+}
+
+export function touchManagedHub(at = new Date()) {
+  try {
+    utimesSync(managedHubFile(), at, at);
+  } catch {
+    // A record deleted by hand stays deleted.
+  }
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return /** @type {NodeJS.ErrnoException} */ (error)?.code === "EPERM";
+  }
+}
+
+// True while a CLI must leave `port` to the hub rather than spawn a server: the hub recorded for
+// this state directory and port is still running (starting, or not answering yet), or it stopped
+// so recently that its service manager is about to start it again.
+export function managedHubExpected(port, now = Date.now()) {
+  let record;
+  let heartbeatAt;
+  try {
+    heartbeatAt = statSync(managedHubFile()).mtimeMs;
+    record = JSON.parse(readFileSync(managedHubFile(), "utf8"));
+  } catch {
+    return false;
+  }
+  if (!Number.isInteger(record?.pid) || record.port !== port) return false;
+  if (processAlive(record.pid)) return true;
+  return now - heartbeatAt < managedHubRestartGraceMs();
 }
 
 export function defaultPort() {

@@ -43,11 +43,16 @@ import {
   hostForUrl,
   isWildcardHost,
   LOOPBACK_HOST,
+  MANAGED_HUB_HEARTBEAT_MS,
+  managedHubExpected,
   recordAllowedHosts,
+  recordManagedHub,
   resolveConcreteListenHosts,
   serverLogFile,
+  SPAWNED_SERVER_ENV,
   stateFile,
   stateId,
+  touchManagedHub,
 } from "./paths.js";
 import {
   computeVsCodePluginLocationsUpdate,
@@ -1849,7 +1854,18 @@ async function serverCommand(args) {
     debug,
     extraListenHosts: flagValues(args, "--also-listen"),
   });
-  await server.done;
+  // A server started directly is this state directory's hub; one a CLI spawned is not.
+  let heartbeat = null;
+  if (process.env[SPAWNED_SERVER_ENV] !== "1") {
+    await recordManagedHub({ pid: process.pid, port });
+    heartbeat = setInterval(() => touchManagedHub(), MANAGED_HUB_HEARTBEAT_MS);
+    heartbeat.unref();
+  }
+  try {
+    await server.done;
+  } finally {
+    clearInterval(heartbeat);
+  }
   return "";
 }
 
@@ -2205,9 +2221,10 @@ function resolveServerStartTimeoutMs(env = process.env) {
 // The wait for a spawned server lasts as long as that process is alive, because a cold start on a
 // loaded host has no fixed duration; `timeoutMs` only bounds a process that never answers. Once the
 // process has exited (a server that won the port makes it step aside), a short grace lets the
-// winner answer before the CLI gives up.
+// winner answer before the CLI gives up. A null child is the hub this CLI waited for instead of
+// spawning, which only needs that grace.
 /**
- * @param {import("node:child_process").ChildProcess} child
+ * @param {import("node:child_process").ChildProcess | null} child
  * @param {number} timeoutMs
  */
 function startupWindow(child, timeoutMs) {
@@ -2216,7 +2233,7 @@ function startupWindow(child, timeoutMs) {
   return () => {
     const at = Date.now();
     if (at - startedAt >= timeoutMs) return false;
-    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) return true;
+    if (child && child.pid !== undefined && child.exitCode === null && child.signalCode === null) return true;
     exitedAt ??= at;
     return at - exitedAt < SERVER_EXIT_GRACE_MS;
   };
@@ -2434,7 +2451,20 @@ function unidentifiedListenerError(baseUrl) {
   );
 }
 
+// Resolves to null, spawning nothing, once the managed hub of this state directory answers: a
+// server spawned while the hub restarts would take its port and leave it crash-looping. A hub
+// that stops being expected (gone past its restart grace) is replaced by a spawned server as before.
 async function startServer(port, { alsoListen = [] } = {}) {
+  const hubDeadline = Date.now() + resolveServerStartTimeoutMs();
+  while (managedHubExpected(port)) {
+    if ((await findRunningServer(port)).health) return null;
+    if (Date.now() >= hubDeadline) {
+      throw new AxiError(`The managed Lavish hub for port ${port} is running but not answering`, "SERVER_ERROR", [
+        "Check the hub service and its server.log; a CLI does not start a second server while the hub runs",
+      ]);
+    }
+    await delay(200);
+  }
   await ensureStateDir();
   let allowedHosts;
   try {
@@ -2487,6 +2517,7 @@ export function createServerSpawnOptions(logFd = null, allowedHosts = undefined)
     env: {
       ...process.env,
       LAVISH_AXI_NO_OPEN: "1",
+      [SPAWNED_SERVER_ENV]: "1",
       ...(allowedHosts === undefined ? {} : { LAVISH_AXI_ALLOWED_HOSTS: allowedHosts }),
     },
   };
