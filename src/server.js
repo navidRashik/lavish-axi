@@ -3006,7 +3006,7 @@ const chromeIcons = {
   ),
   reveal: chromeIcon('<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>', 13),
   dismiss: chromeIcon('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>', 13),
-  // The mobile conversation sheet's only chevron: CSS rotates it when the sheet is open.
+  // The conversation toggle's only chevron: CSS rotates it for the phone sheet and the desktop rail.
   chevronUp: chromeIcon('<polyline points="6 15 12 9 18 15"/>', 18, 2),
 };
 
