@@ -961,13 +961,13 @@ function receiptNoteText() {
 }
 
 // A transcript entry from before receipts existed (`receipt: "none"`, marked by the server once at
-// load) gets no row: nothing was ever observed about it, and an empty row would read as "never seen".
-function hasReceipt(entry) {
-  return Boolean(entry) && entry.receipt !== "none";
-}
-
+// load) shows only the Done the agent named it with (`reply --done <id>`), or no row at all. Seen
+// and Working were never recorded for it, so empty steps would read as "never seen".
 function receiptHtml(entry) {
-  if (!hasReceipt(entry)) return "";
+  if (!entry) return "";
+  if (entry.receipt === "none") {
+    return entry.done_at ? '<div class="receipt">' + receiptStepHtml("Done", entry.done_at) + "</div>" : "";
+  }
   return (
     '<div class="receipt">' +
     receiptStepHtml("Seen", entry.delivered_at) +

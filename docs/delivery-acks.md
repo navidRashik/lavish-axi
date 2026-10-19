@@ -106,8 +106,10 @@ existing `state.json` holds sessions whose user entries no take ever stamped; re
 first poll after an upgrade would mark months-old notes Seen today and the next reply would mark
 them Done. `readState`, the one load path every operation shares, therefore marks every user entry
 of a session that has no `delivery_seq` key at all as `receipt: "none"` and persists that at once,
-before any take can run. Those entries are skipped by every stamp helper and render no receipt row:
-nothing was observed about them, and an empty row would read as "never seen".
+before any take can run. Those entries are skipped by every positional stamp helper and by
+`reply --done all`, and render no receipt row: nothing was observed about them, and an empty row
+would read as "never seen". The one exception is `reply --done <prompt_id>` naming such a note: the
+agent said that exact note is done, so it gets `done_at` and renders the Done step alone.
 
 ## Open issues for Igor
 
