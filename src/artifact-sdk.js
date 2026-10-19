@@ -2,7 +2,7 @@
 
 import { readArtifactRevisions } from "./artifact-revisions.js";
 import * as mermaidHelpers from "./mermaid-node.js";
-import { applyLavishState, lavishStateQuestionAnswer } from "./state-bindings.js";
+import { applyLavishState, lavishStateQuestionAnswer, lavishStateRefOf } from "./state-bindings.js";
 import { tableCellTarget } from "./table-cell.js";
 
 export const LAVISH_INTERNAL_QUEUE_KEY = "_lavishQueueKey";
@@ -1253,10 +1253,9 @@ export function createArtifactSdk(
     postArtifactMessage("lavish:queuePrompt", { prompt: item });
     // A queued answer inside a store-bound question is also the shared answer: every page and tab
     // showing that q ref then disables its controls and shows it (docs/shared-state.md).
-    const question = originElement?.closest?.("[data-lavish-question][data-lavish-ref^='q:']");
-    if (question) {
-      answerQuestion(question.getAttribute("data-lavish-ref"), lavishStateQuestionAnswer(question) || item.prompt);
-    }
+    const question = originElement?.closest?.("[data-lavish-question]");
+    const ref = lavishStateRefOf(question);
+    if (ref?.startsWith("q:")) answerQuestion(ref, lavishStateQuestionAnswer(question) || item.prompt);
   }
 
   function sendQueuedPrompts() {
