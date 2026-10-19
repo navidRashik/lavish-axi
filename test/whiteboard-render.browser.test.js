@@ -160,6 +160,8 @@ async function runBrowserFixture(t, fixtureName) {
           "--disable-dev-shm-usage",
           "--no-sandbox",
           `--user-data-dir=${profile}`,
+          "--use-mock-keychain",
+          "--password-store=basic",
           "--run-all-compositor-stages-before-draw",
           "--virtual-time-budget=20000",
           "--dump-dom",
