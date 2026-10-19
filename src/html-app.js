@@ -108,13 +108,19 @@ export function createUnpublishedPageHtml() {
 }
 
 /**
+ * The call signature of fetch only. `typeof fetch` also carries runtime-specific statics (Bun's
+ * `fetch.preconnect`), which a plain test stub cannot satisfy.
+ * @typedef {(input: string | URL | Request, init?: RequestInit) => Promise<Response>} FetchLike
+ */
+
+/**
  * Publish HTML to the third-party ht-ml.app service and return the live site.
  * @param {string} html The (ideally self-contained) HTML to send to the host.
  * @param {object} [options]
  * @param {string} [options.password] Make the site private behind this password.
  * @param {string} [options.token] Optional bearer token (never required to create a site).
  * @param {string} [options.apiUrl] Override the API base (defaults to LAVISH_AXI_HTML_APP_API_URL or ht-ml.app).
- * @param {typeof fetch} [options.fetch] Injected fetch for testing.
+ * @param {FetchLike} [options.fetch] Injected fetch for testing.
  * @param {NodeJS.ProcessEnv} [options.env]
  * @param {number} [options.timeoutMs]
  * @returns {Promise<{ url: string, site_id: string, update_key: string, status: string }>}
@@ -182,7 +188,7 @@ function echoedSiteId(echoed, fallback) {
  *   supplies one the returned `url` is empty rather than guessed: the API base is configurable, so
  *   a synthesized host would name somewhere the page was never published.
  * @param {string} [options.apiUrl]
- * @param {typeof fetch} [options.fetch]
+ * @param {FetchLike} [options.fetch]
  * @param {NodeJS.ProcessEnv} [options.env]
  * @param {number} [options.timeoutMs]
  * @returns {Promise<{ url: string, site_id: string, status: string }>}
