@@ -2587,6 +2587,16 @@ export function createArtifactSdk(
     },
     true,
   );
+  // Cmd/Ctrl+\ asks the chrome to fold its desktop conversation panel, the same way.
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.shiftKey || event.altKey || !(event.metaKey || event.ctrlKey) || event.key !== "\\") return;
+      event.preventDefault();
+      postArtifactMessage("lavish:togglePanel");
+    },
+    true,
+  );
 
   // Report scroll position to the chrome so it can be restored across hot reloads.
   // The iframe is sandboxed without same-origin, so the chrome can't read scrollY directly.

@@ -1076,6 +1076,41 @@ body.lavish {
 .panel-scrim {
   display: none;
 }
+/* Shared by the phone dock and the desktop rail; each layout decides whether they are shown. */
+.panel-toggle {
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.panel-summary {
+  color: var(--fg-faint);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.panel-summary.is-accent {
+  color: var(--accent);
+  font-weight: var(--w-semi);
+}
+.panel-summary.is-unread::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  vertical-align: 1px;
+}
 .panel h2 {
   font-size: 15px;
   line-height: 1.3;
@@ -1683,6 +1718,64 @@ body.layout-gate-active iframe#artifact {
     max-height: min(70vh, 460px);
   }
 }
+/* Desktop conversation collapse: the chevron in the heading folds the panel into a rail that
+   keeps the dock's one-line summary, and the artifact takes the freed width. Below 861px the
+   phone sheet owns the same toggle, so none of this applies there. */
+@media (min-width: 861px) {
+  :root {
+    --rail-w: 44px;
+  }
+  .panel-head-row {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+  .panel-head-row h2 {
+    flex: 1 1 auto;
+  }
+  .panel-toggle {
+    display: flex;
+    flex: 0 0 auto;
+    margin: 8px 12px 0 0;
+  }
+  .panel-toggle svg {
+    display: block;
+    transform: rotate(90deg);
+  }
+  body.panel-collapsed .layout {
+    grid-template-columns: minmax(0, 1fr) var(--rail-w);
+  }
+  body.panel-collapsed .panel {
+    width: var(--rail-w);
+    cursor: pointer;
+  }
+  body.panel-collapsed .panel > :not(.panel-head),
+  body.panel-collapsed .panel h2 {
+    display: none;
+  }
+  body.panel-collapsed .panel-head-row {
+    flex-direction: column;
+    gap: 12px;
+    padding-top: 8px;
+  }
+  body.panel-collapsed .panel-toggle {
+    order: -1;
+    margin: 0;
+  }
+  body.panel-collapsed .panel-toggle svg {
+    transform: rotate(-90deg);
+  }
+  body.panel-collapsed .panel-summary {
+    display: block;
+    max-height: 60vh;
+    writing-mode: vertical-rl;
+  }
+}
+@media (min-width: 861px) and (prefers-reduced-motion: no-preference) {
+  body.panel-collapsed .panel-head.is-fresh .panel-toggle {
+    animation: dock-pulse 700ms var(--ease);
+  }
+}
 /* Phone-width chrome: the artifact takes the whole viewport above a persistent conversation dock,
    and the conversation itself is a bottom sheet the dock raises over a scrim. A side-by-side or
    stacked split leaves neither half usable on a phone - the composer alone is taller than the
@@ -1782,44 +1875,14 @@ body.layout-gate-active iframe#artifact {
     display: block;
     flex: 1 1 auto;
     min-width: 0;
-    color: var(--fg-faint);
-    font-size: 12px;
-    line-height: 1.35;
     text-align: right;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .panel-summary:empty {
     display: none;
   }
-  .panel-summary.is-accent {
-    color: var(--accent);
-    font-weight: var(--w-semi);
-  }
-  .panel-summary.is-unread::before {
-    content: "";
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    margin-right: 6px;
-    border-radius: var(--radius-pill);
-    background: var(--accent);
-    vertical-align: 1px;
-  }
   .panel-toggle {
     display: flex;
     flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-pill);
-    background: var(--bg-elevated);
-    color: var(--fg-muted);
-    cursor: pointer;
   }
   .panel-toggle svg {
     display: block;
