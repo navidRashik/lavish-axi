@@ -440,6 +440,16 @@ export async function serve({
     return false;
   }
 
+  // A review window that has sent its close frame is already leaving, even though the socket's
+  // `close` event - which runs the cleanup in attachLiveEventClient - can land several event-loop
+  // turns later on a busy machine.
+  function hasOpenLiveEventClient(key) {
+    for (const [client, clientKey] of liveEventClients) {
+      if (clientKey === key && !client.isClosed()) return true;
+    }
+    return false;
+  }
+
   function clearBrowserDisconnectTimer(key) {
     const timer = browserDisconnectTimers.get(key);
     if (!timer) return;
@@ -449,7 +459,10 @@ export async function serve({
 
   function scheduleBrowserDisconnect(key) {
     clearBrowserDisconnectTimer(key);
-    if (shuttingDown || hasLiveEventClient(key) || !activePolls.has(key)) return;
+    // The grace period is for a review window that was watching this poll. One that was already
+    // closing when the poll started left before it, so that poll keeps its own full wait even
+    // when the socket's late `close` event lands after the poll was claimed.
+    if (shuttingDown || hasLiveEventClient(key) || !activePolls.get(key)?.browserAttached) return;
     const timer = setTimeout(() => {
       browserDisconnectTimers.delete(key);
       if (!hasLiveEventClient(key) && activePolls.has(key)) {
@@ -465,6 +478,8 @@ export async function serve({
     clearBrowserDisconnectTimer(key);
     browserDisconnectPending.delete(key);
     liveEventClients.set(client, key);
+    const holder = activePolls.get(key);
+    if (holder) holder.browserAttached = true;
     refreshIdleTimer();
     let cleanedUp = false;
     const cleanup = () => {
@@ -970,7 +985,14 @@ export async function serve({
       const { holder, previousPresence, conflict, missing } = await pollOwnershipLock.runExclusive(async () => {
         const currentHolder = activePolls.get(key);
         if (currentHolder && !takeover) return { conflict: listenerConflict(currentHolder, "LISTENER_ACTIVE") };
-        const nextHolder = { key, owner, startedAt: Date.now(), replaced: false, replace: null };
+        const nextHolder = {
+          key,
+          owner,
+          startedAt: Date.now(),
+          replaced: false,
+          replace: null,
+          browserAttached: hasOpenLiveEventClient(key),
+        };
         claimedHolder = nextHolder;
         const priorPresence = presenceSignature(key, activePolls, deliveredFeedback);
         if (currentHolder) {

@@ -99,12 +99,17 @@ async function startPresenceStream(base, key) {
       return (await stream.next()).state;
     },
     close: stream.close,
+    closed: stream.closed,
   };
 }
 
 async function startEventStream(base, key, eventName) {
   const socket = new WebSocket(`${base.replace(/^http/, "ws")}/events/${key}`, { origin: base });
   const messages = on(socket, "message");
+  // `close` fires only after the server echoed the close frame, and the server marks its end
+  // closing before it echoes, so awaiting this orders a later request after the server saw the
+  // browser leave.
+  const closed = new Promise((resolve) => socket.once("close", resolve));
   await once(socket, "open");
 
   return {
@@ -127,6 +132,7 @@ async function startEventStream(base, key, eventName) {
       await messages.return();
       socket.close();
     },
+    closed,
   };
 }
 
@@ -4949,9 +4955,13 @@ test("a poll that starts after a browser disconnect receives its own full wait",
     const browser = await startPresenceStream(base, opened.key);
     assert.equal(await browser.next(), "waiting");
     await browser.close();
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=80`);
+    // Wait for the close handshake rather than a fixed sleep: the server's own socket `close`
+    // event can still be pending, but the server has seen the close frame, so this poll starts
+    // after the disconnect however starved the event loop is.
+    await browser.closed;
+    // The poll's own wait outlasts the 120 ms grace, so a timer armed for the earlier disconnect
+    // would cut it short.
+    const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=200`);
     assert.deepEqual(await poll.json(), { status: "waiting" });
   } finally {
     await server.close();
