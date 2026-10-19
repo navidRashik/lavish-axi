@@ -4759,6 +4759,49 @@ test("an agent-initiated end via the file-based route reopens normally without t
   }
 });
 
+test("the agent end refuses a protected page unless forced; the browser end is never blocked", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  const keepAlive = path.join(dir, "keep-alive.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  await writeFile(keepAlive, "<!doctype html><html><body></body></html>");
+  await writeFile(path.join(dir, "protected-pages.json"), JSON.stringify({ files: [artifact] }));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const post = (route, body) =>
+    fetch(`http://127.0.0.1:${server.port}${route}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const poll = async () =>
+    (
+      await (
+        await fetch(`http://127.0.0.1:${server.port}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`)
+      ).json()
+    ).status;
+  try {
+    await post("/api/sessions", { file: keepAlive });
+    const { key } = await (await post("/api/sessions", { file: artifact })).json();
+
+    const refused = await post("/api/end", { file: artifact });
+    const refusedBody = await refused.json();
+    assert.equal(refused.status, 409);
+    assert.equal(refusedBody.code, "PROTECTED_PAGE");
+    assert.match(refusedBody.error, /protected-pages\.json/);
+    assert.equal(await poll(), "waiting", "a refused end leaves the session open");
+
+    assert.equal((await post(`/api/${key}/end`, {})).status, 200, "the user's browser end is not blocked");
+    assert.equal(await poll(), "ended");
+
+    await post("/api/sessions", { file: artifact, reopen: true });
+    assert.equal((await post("/api/end", { file: artifact, force: true })).status, 200, "--force overrides");
+    assert.equal(await poll(), "ended");
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("poll on an ended session reports who ended it", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");

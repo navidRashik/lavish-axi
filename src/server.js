@@ -1484,9 +1484,39 @@ export async function serve({
     }
   });
 
+  // Pages the user is still working in. The file is re-read on every agent end so edits apply at
+  // once; a missing, unreadable or malformed file protects nothing.
+  const protectedPagesFile = env.LAVISH_PROTECTED_FILE || path.join(path.dirname(stateFile), "protected-pages.json");
+
+  async function isProtectedPage(file) {
+    let listed;
+    try {
+      listed = JSON.parse(await readFile(protectedPagesFile, "utf8"))?.files;
+    } catch {
+      return false;
+    }
+    if (!Array.isArray(listed)) return false;
+    for (const entry of listed) {
+      if (typeof entry !== "string" || !entry) continue;
+      const resolved = await canonicalFile(entry).catch(() => path.resolve(entry));
+      if (resolved === file) return true;
+    }
+    return false;
+  }
+
+  // `lavish-axi end` is the only caller: the browser ends through /api/:key/end and the prompts
+  // route, which never consult the protected list.
   app.post("/api/end", async (req, res, next) => {
     try {
       const file = await canonicalFile(req.body.file);
+      if (!req.body.force && (await isProtectedPage(file))) {
+        res.status(409).json({
+          status: "protected",
+          code: "PROTECTED_PAGE",
+          error: `${file} is listed in ${protectedPagesFile}; the user is still using it. Pass --force to end it anyway.`,
+        });
+        return;
+      }
       const key = sessionKey(file);
       const session = await store.endSession(key, "agent");
       clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
