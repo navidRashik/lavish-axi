@@ -1,14 +1,24 @@
-import { chmod, copyFile, cp, mkdir, readFile } from "node:fs/promises";
+import { chmod, copyFile, cp, mkdir, readdir, readFile, rm } from "node:fs/promises";
 
 import * as esbuild from "esbuild";
 
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 
 await mkdir("dist", { recursive: true });
+// Chunk names carry a content hash, so a rebuild would otherwise leave the previous ones behind.
+for (const name of await readdir("dist")) {
+  if (/^chunk-.*\.mjs$/.test(name)) await rm(`dist/${name}`);
+}
 
+// Split so server-only code (and the express/chokidar/parse5 it imports) lands in a chunk the CLI
+// loads on demand. Chunks sit beside cli.mjs because server code resolves its assets
+// (chrome.css, design/, whiteboard/) relative to its own module URL.
 await esbuild.build({
-  entryPoints: ["bin/lavish-axi.js"],
-  outfile: "dist/cli.mjs",
+  entryPoints: { cli: "bin/lavish-axi.js" },
+  outdir: "dist",
+  outExtension: { ".js": ".mjs" },
+  chunkNames: "chunk-[hash]",
+  splitting: true,
   bundle: true,
   packages: "external",
   platform: "node",
