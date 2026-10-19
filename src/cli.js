@@ -2124,6 +2124,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
       if (!(await waitForPortFree(liveUrl, 3000))) break;
       starting = await startServer(port, { alsoListen });
       deadline = Date.now() + 5000;
+      answered = false;
       continue;
     }
     if (health?.network_stale === true && health.app === "lavish-axi") {
@@ -2137,6 +2138,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
       starting = await startServer(port, { alsoListen });
       networkRestarted = true;
       deadline = Date.now() + 5000;
+      answered = false;
       continue;
     }
     await delay(100);
