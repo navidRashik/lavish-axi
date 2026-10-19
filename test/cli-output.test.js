@@ -58,6 +58,7 @@ import {
   VERSION,
 } from "../src/cli.js";
 import { DESIGN_PRIORITY_RULE, DESIGN_SYSTEM_HINT } from "../src/design-reference.js";
+import { FORK_BUILD_HEADER, FORK_BUILD_ID } from "../src/fork-build.js";
 import { resolveVsCodeSettingsFile } from "../src/plugin.js";
 import { createSkillMarkdown } from "../src/skill.js";
 import { SELF_PAINT_WARNING } from "../src/self-paint.js";
@@ -3327,7 +3328,9 @@ test("opening an artifact names that session as the one to reload across a versi
     assert.deepEqual(recorder.bodies, [{ reload_key: sessionKey(await canonicalFile(artifact)), reason: "upgrade" }]);
   } finally {
     // The CLI replaced the recorder with a real server on that port; stop it again.
-    await fetch(`${base}/shutdown`, { method: "POST" }).catch(() => {});
+    await fetch(`${base}/shutdown`, { method: "POST", headers: { [FORK_BUILD_HEADER]: FORK_BUILD_ID } }).catch(
+      () => {},
+    );
     for (let i = 0; i < 30; i += 1) {
       const alive = await fetch(`${base}/health`).then(
         () => true,
