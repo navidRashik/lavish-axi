@@ -1,10 +1,14 @@
 import {
   appendFileSync,
   closeSync,
+  fstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
   readSync,
+  rmdirSync,
+  rmSync,
   statSync,
   unlinkSync,
   watch,
@@ -47,25 +51,69 @@ function pidAlive(pid) {
   }
 }
 
+const RECLAIM_LOCK_STALE_MS = 10_000;
+
 /** Claims the watcher pidfile; false when a live watcher already holds it. */
 export function claimWatchPid(feedDir, pid = process.pid) {
   const file = path.join(feedDir, WATCH_PID);
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      writeFileSync(file, String(pid), { flag: "wx" });
-      return true;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      const holder = Number(readFileSync(file, "utf8"));
-      if (holder && pidAlive(holder)) return false;
+  // link() publishes a pidfile that already holds its pid, so no reader ever sees it empty, and it
+  // fails with EEXIST instead of replacing a file another claimant just published.
+  const staged = `${file}.${pid}.tmp`;
+  writeFileSync(staged, String(pid));
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        unlinkSync(file);
-      } catch {
-        // Another claimant removed the stale file first; the next attempt settles it.
+        linkSync(staged, file);
+        return true;
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
       }
+      if (!removeDeadPidfile(file)) return false;
     }
+    return false;
+  } finally {
+    rmSync(staged, { force: true });
   }
-  return false;
+}
+
+// Removes the pidfile only when the pid it records is dead, and only that exact file: reclaimers
+// run one at a time under a mkdir lock and unlink only if the inode they read is still in place.
+// A dead holder never releases and a present pidfile blocks every link(), so nothing else can swap
+// the file between the check and the unlink. True means the pidfile is gone and a link may retry.
+function removeDeadPidfile(file) {
+  const lock = `${file}.lock`;
+  try {
+    mkdirSync(lock);
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    try {
+      if (Date.now() - statSync(lock).mtimeMs > RECLAIM_LOCK_STALE_MS) rmdirSync(lock);
+    } catch {
+      // The lock was released meanwhile.
+    }
+    return false;
+  }
+  try {
+    let fd;
+    try {
+      fd = openSync(file, "r");
+    } catch {
+      return true;
+    }
+    let inode;
+    let holder;
+    try {
+      inode = fstatSync(fd).ino;
+      holder = Number(readFileSync(fd, "utf8"));
+    } finally {
+      closeSync(fd);
+    }
+    if (holder > 0 && pidAlive(holder)) return false;
+    if (statSync(file, { throwIfNoEntry: false })?.ino === inode) unlinkSync(file);
+    return true;
+  } finally {
+    rmdirSync(lock);
+  }
 }
 
 export function watcherRunning(feedDir) {
