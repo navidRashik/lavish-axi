@@ -1076,16 +1076,17 @@ test("chrome shows agent working state when a previous poll has released", async
   assert.match(js, /spinner/);
 });
 
-test("the composer has exactly one action: End, which hands over everything and closes the review", async () => {
+test("the composer has two actions: End, which hands over everything and closes, and Send, which keeps the review open", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
 
   const actions = html.match(/<div class="actions" id="sendActions">(.*?)<\/div>/)?.[1] || "";
   assert.deepEqual(
     actions.match(/<button[^>]*id="[^"]+"/g)?.map((tag) => tag.match(/id="([^"]+)"/)[1]),
-    ["end"],
+    ["end", "send"],
   );
   assert.match(actions, /<span>End<\/span>/);
-  assert.doesNotMatch(html, /id="send"|id="sendAndEnd"|Send to Agent|Send &amp; End/);
+  assert.match(actions, /id="send" type="button"[^>]*>Send to Agent<\/button>/);
+  assert.doesNotMatch(html, /id="sendAndEnd"|Send &amp; End/);
 });
 
 test("chrome shows a waiting banner when no agent has attached", async () => {
@@ -3604,6 +3605,37 @@ test("/design serves local Tailwind and DaisyUI artifact assets", async () => {
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("/design serves the house theme stylesheet, Mermaid renderer and tab keeper", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const css = await fetch(`${base}/design/house.css`);
+    const mermaid = await fetch(`${base}/design/house-mermaid.js`);
+    const keep = await fetch(`${base}/design/house-keep.js`);
+
+    assert.equal(css.status, 200);
+    assert.match(css.headers.get("content-type") || "", /text\/css/);
+    assert.match(await css.text(), /--card:/);
+    assert.equal(mermaid.status, 200);
+    assert.match(mermaid.headers.get("content-type") || "", /application\/javascript/);
+    assert.match(await mermaid.text(), /window\.houseMermaid/);
+    assert.equal(keep.status, 200);
+    assert.match(keep.headers.get("content-type") || "", /application\/javascript/);
+    assert.match(await keep.text(), /lavish-keep:/);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an export can inline the house theme from its /design path", () => {
+  for (const asset of ["house.css", "house-mermaid.js", "house-keep.js"]) {
+    const resolved = resolveDesignAssetPath(`/design/${asset}`);
+    assert.ok(resolved && resolved.endsWith(asset), `${asset} resolves to ${resolved}`);
   }
 });
 
@@ -6884,7 +6916,7 @@ test("the live transcript carries rendered html for agent replies and never for 
   }
 });
 
-test("chat-sync stamps a note seen when a poll takes it, working when the artifact changes, and done on reply", async () => {
+test("chat-sync stamps a note seen when a poll takes it, working when the artifact changes, and done on a reply naming it", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body><h1>Hello</h1></body></html>");
@@ -6925,16 +6957,25 @@ test("chat-sync stamps a note seen when a poll takes it, working when the artifa
       assert.ok(working.chat[0].working_at, "an artifact change after delivery stamps working");
       assert.equal("done_at" in working.chat[0], false);
 
+      const progress = await fetch(`${base}/api/${key}/agent-reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Making it blue." }),
+      });
+      assert.equal(progress.status, 200);
+      const open = await stream.next();
+      assert.equal("done_at" in open.chat[0], false, "a reply without done leaves the note open");
+
       const replied = await fetch(`${base}/api/${key}/agent-reply`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: "It is blue now." }),
+        body: JSON.stringify({ text: "It is blue now.", done: "all" }),
       });
       assert.equal(replied.status, 200);
       const done = await stream.next();
       assert.ok(done.chat[0].done_at, "the reply stamps the note done");
-      assert.equal(done.chat[1].role, "agent");
-      assert.equal(done.chat[0].done_at, done.chat[1].at);
+      assert.equal(done.chat[2].role, "agent");
+      assert.equal(done.chat[0].done_at, done.chat[2].at);
     } finally {
       await stream.close();
     }

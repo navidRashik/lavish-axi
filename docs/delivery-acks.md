@@ -20,17 +20,17 @@ Every state below is a fact the server records anyway. None of them asks the age
 | no poll in `activePolls` | `computePresence` is `waiting`; the chrome already shows "Your agent is not listening" | nobody is there to receive it                    |
 | `takeFeedback` succeeded | the store drained the batch for a poll; a poll that closed before the write undoes it  | **Seen** - the batch was handed to a poll        |
 | artifact file changed    | chokidar `reload` for the session key after a delivery                                 | **Working** - the agent is editing the artifact  |
-| `addAgentReply`          | `lavish-axi reply` / `poll --agent-reply`, or `/api/:key/agent-reply`                  | **Done** - the agent handed something back       |
+| `addAgentReply` + `done` | `lavish-axi reply --done <id,...\|all>`, or `/api/:key/agent-reply` with `done`        | **Done** - the agent said this note is handled   |
 
-Two of Wally's three acks ("I saw it", "I'm done") fall straight out of the existing protocol.
-"I'm working on it" has no explicit message, but the file watcher sees the agent's saves. A request
-that is answered without touching the artifact goes Seen -> Done with Working never ticked, which is
-true, not a gap.
+Two of Wally's three acks ("I saw it", "I'm done") fall straight out of the protocol; "I'm done" is
+the agent naming the note with `reply --done`. "I'm working on it" has no explicit message, but the
+file watcher sees the agent's saves. A request that is answered without touching the artifact goes
+Seen -> Done with Working never ticked, which is true, not a gap.
 
 ## States per request
 
 ```
-queued ──send──> sent ──poll takes it──> seen ──artifact changes──> working ──agent reply──> done
+queued ──send──> sent ──poll takes it──> seen ──artifact changes──> working ──reply --done──> done
  (tab)          (server)                 (agent)                    (agent)                  (agent)
 ```
 
@@ -41,7 +41,7 @@ queued ──send──> sent ──poll takes it──> seen ──artifact cha
   while a poll is attached, which lasts milliseconds.
 - **seen**: `delivered_at` set by `takeFeedback`.
 - **working**: `working_at` set by the first artifact `reload` after delivery. Optional evidence.
-- **done**: `done_at` set by the next agent reply.
+- **done**: `done_at` set by the first agent reply whose `--done` names the note (or `--done all`).
 
 ## Storage and stamping rules
 
@@ -62,15 +62,15 @@ the stamps with no new wire shape.
   stamps off: the note is lost, and a Seen left on it would claim a delivery that never happened.
 - **Working stamps delivered-and-not-done entries.** `markWorking(key)` runs on the `reload` event. A
   reload with nothing delivered changes nothing and writes nothing.
-- **Done stamps delivered-and-not-done entries.** `addAgentReply` does it in the same write as the
-  reply. An entry that was sent but never delivered is not marked done: the agent has not seen it.
-  `reply --done <id,...|all>` stamps exactly the named notes instead, and records the prompt ids it
-  stamped on its own agent entry as `done_ids`, so a reader of `state.json` can tell that reply from
-  a plain one; a plain reply, or a `--done` that stamped nothing, carries no `done_ids`.
-- **Working and Done stay inside one review round.** Reopening an ended session records the last
-  take so far as `session.closed_delivery_seq`, and neither stamp lands on an entry delivered at or
-  before it. A note `lavish-axi end` left at Seen stays Seen: a later round's edit or reply is about
-  that round's notes.
+- **Done stamps only the notes a reply names.** `addAgentReply` stamps `reply --done <id,...|all>`
+  in the same write as the reply; a reply without `--done` (a progress note, a correction,
+  `poll --agent-reply`) stamps nothing, because Lavish cannot tell which note it answered. A named id
+  that matches no note in the session, visible or evicted to `chat_ack_ids`, refuses the whole reply
+  with `UNKNOWN_DONE_ID` and nothing is written. The reply records the prompt ids it stamped on its
+  own agent entry as `done_ids`; a plain reply carries none.
+- **Working stays inside one review round.** Reopening an ended session records the last take so far
+  as `session.closed_delivery_seq`, and Working never lands on an entry delivered at or before it. A
+  note `lavish-axi end` left at Seen stays Seen until a reply names it.
 - **Every stamp change bumps `chat_revision`.** `syncChat` in the chrome accepts a same-revision sync
   only when it contains the displayed entries; a higher revision is what makes it take the
   authoritative replacement.
@@ -95,16 +95,16 @@ The rest of the bubble is left alone, so a thumbnail already replaced by "Image 
 
 ## CLI and API changes
 
-None required for the automatic path. `lavish-axi poll`, `reply`, and the `/api/*` routes keep their
-shapes. Two guidance strings gain one sentence each: `reply --help` and the poll `--agent-reply` row
-in README say that a reply marks every request delivered to you as Done.
+`reply --done` is the only way a note becomes Done. `reply --help` and the poll `--agent-reply` row in
+README say a reply without `--done` closes no note. `/api/:key/agent-reply` answers 422
+`{ code: "UNKNOWN_DONE_ID", unknown_done_ids }` for a `done` id no note carries.
 
 ## Transcripts from before receipts
 
 The positional rule is only true for sessions the receipt code has written from the start. An
 existing `state.json` holds sessions whose user entries no take ever stamped; read naively, the
-first poll after an upgrade would mark months-old notes Seen today and the next reply would mark
-them Done. `readState`, the one load path every operation shares, therefore marks every user entry
+first poll after an upgrade would mark months-old notes Seen today and the next `reply --done all`
+would mark them Done. `readState`, the one load path every operation shares, therefore marks every user entry
 of a session that has no `delivery_seq` key at all as `receipt: "none"` and persists that at once,
 before any take can run. Those entries are skipped by every positional stamp helper and by
 `reply --done all`, and render no receipt row: nothing was observed about them, and an empty row
@@ -113,9 +113,8 @@ agent said that exact note is done, so it gets `done_at` and renders the Done st
 
 ## Open issues for Igor
 
-- **A progress reply reads as Done.** `poll --agent-reply "still working on it"` stamps Done on
-  every delivered note, exactly as it already clears the session-wide Working state. If a progress
-  channel is wanted, it is a reply flag that posts without concluding; not built here.
+- **A progress reply does not read as Done.** A reply without `--done` stamps nothing, so a progress
+  or correction reply leaves every note open; the agent closes each note by naming it.
 - **Working means "the file changed", not "the agent is on your note".** An agent editing the
   artifact for an unrelated reason also ticks Working on every delivered, unanswered note. It is the
   honest automatic signal available; an explicit ack would be more precise and more work for agents.
@@ -126,8 +125,7 @@ agent said that exact note is done, so it gets `done_at` and renders the Done st
 
 - **An explicit `lavish-axi ack <file> --working` command.** It is a new duty for every agent and
   harness, and the file watcher already supplies the signal for the common case. The upgrade path, if
-  a progress channel is wanted, is a reply flag that posts a message without concluding the round;
-  today `poll --agent-reply "still working"` stamps Done, exactly as it already clears Working.
+  a progress channel is wanted, is a reply flag that posts a message without concluding the round.
 - **Stamping on the poll's HTTP 200.** The take is destructive and the response can fail to write;
   stamping before the write and reverting on restore keeps one source of truth (`state.json`) and
   avoids a second bookkeeping path.
