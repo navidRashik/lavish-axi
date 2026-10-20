@@ -11,7 +11,6 @@ import {
   renderChatMarkdown,
   serializeChat,
   stampDelivered,
-  stampDone,
   stampDoneByIds,
   stampWorking,
   storedChatBytes,
@@ -442,7 +441,7 @@ test("unstamping a take deletes that take's stamps and leaves other takes and un
   assert.equal(unstampDelivery(chat, 9), false);
 });
 
-test("working and done stamp delivered entries once and never an undelivered one", () => {
+test("working stamps delivered entries once, never an undelivered or a done one", () => {
   const chat = [userEntry("A", { delivered_at: at, delivered_seq: 1 }), userEntry("B")];
   assert.equal(stampWorking(chat, "2026-09-15T12:03:00.000Z"), true);
   assert.equal(chat[0].working_at, "2026-09-15T12:03:00.000Z");
@@ -450,11 +449,8 @@ test("working and done stamp delivered entries once and never an undelivered one
   assert.equal(stampWorking(chat, "2026-09-15T12:04:00.000Z"), false);
   assert.equal(chat[0].working_at, "2026-09-15T12:03:00.000Z");
 
-  assert.equal(stampDone(chat, "2026-09-15T12:05:00.000Z"), true);
-  assert.equal(chat[0].done_at, "2026-09-15T12:05:00.000Z");
-  assert.equal("done_at" in chat[1], false);
-  assert.equal(stampDone(chat, "2026-09-15T12:06:00.000Z"), false);
-  assert.equal(stampWorking(chat, "2026-09-15T12:07:00.000Z"), false, "a done entry is not re-marked working");
+  const done = [userEntry("C", { delivered_at: at, delivered_seq: 1, done_at: at })];
+  assert.equal(stampWorking(done, "2026-09-15T12:07:00.000Z"), false, "a done entry is not re-marked working");
 });
 
 test("serializeChat carries the delivery stamps to the chrome", () => {
@@ -477,7 +473,7 @@ test("pre-receipt entries are marked once and excluded from every stamp", () => 
   assert.equal("delivered_at" in chat[0], false);
   assert.equal(chat[3].delivered_seq, 1);
   assert.equal(stampWorking(chat, at), true);
-  assert.equal(stampDone(chat, at), true);
+  assert.equal(stampDoneByIds(chat, at, "all"), true);
   assert.deepEqual(chat[0], userEntry("Old", { receipt: RECEIPT_NONE }));
 });
 
