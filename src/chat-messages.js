@@ -628,18 +628,6 @@ export function stampWorking(chat, at, closedSeq = 0) {
   return changed;
 }
 
-// An agent reply answers everything the agent has seen this round. An entry that was sent but never
-// delivered is not done - the agent has not read it - and stays for the next poll.
-export function stampDone(chat, at, closedSeq = 0) {
-  let changed = false;
-  for (const entry of Array.isArray(chat) ? chat : []) {
-    if (!isOpenDelivery(entry, closedSeq)) continue;
-    entry.done_at = String(at);
-    changed = true;
-  }
-  return changed;
-}
-
 // The agent names the notes it handled (`reply --done`): each listed `prompt_id`, or every user note
 // for "all", is marked Done whatever round it came from and whether or not a poll delivered it.
 // A named id is explicit, so it reaches a pre-receipt note too; "all" leaves pre-receipt notes alone.

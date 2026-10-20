@@ -99,7 +99,7 @@ import {
   readMarkdownRoots,
   readMarkdownShellHtml,
 } from "./markdown-page.js";
-import { canonicalFile, END_EVENT, SessionStore, sessionKey } from "./session-store.js";
+import { canonicalFile, END_EVENT, SessionStore, sessionKey, UnknownDoneIdsError } from "./session-store.js";
 import { AsyncMutex } from "./async-mutex.js";
 import { FORK_ADOPT_VERSION, FORK_BUILD_ID, isForkBuildRequest } from "./fork-build.js";
 import { generateSharePassword } from "./share-password.js";
@@ -1543,6 +1543,10 @@ export async function serve({
       }
       res.json({ status: "sent" });
     } catch (error) {
+      if (error instanceof UnknownDoneIdsError) {
+        res.status(422).json({ status: "error", code: "UNKNOWN_DONE_ID", unknown_done_ids: error.ids });
+        return;
+      }
       next(error);
     }
   });
