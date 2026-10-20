@@ -1,0 +1,292 @@
+/* Lavish house theme: calm, readable, system fonts only.
+   Colours are the single source of truth: house-mermaid.js reads these
+   custom properties to theme Mermaid diagrams, so change them only here.
+   Contrast (WCAG 2.2, measured against --card): body text >= 7:1,
+   muted and status text >= 4.5:1. ok / warn / problem differ in hue AND
+   lightness so they stay apart under protan, deutan and tritan vision. */
+
+:root {
+  color-scheme: light dark;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* light: soft grey page, near-white cards, near-black text */
+  --bg: #f4f5f7;
+  --card: #fbfbfc;
+  --fg: #1f2329;
+  --mut: #4f5967;
+  --line: #d9dde3;
+  --code-bg: #eef0f3;
+  --acc: #2b5797;
+  --on-acc: #ffffff;
+  --ok: #0b6e8a;
+  --ok-bg: #e2f0f4;
+  --warn: #8f5a00;
+  --problem: #c0254a;
+  --problem-bg: #fce8ec;
+  --problem-ink: #1f2329;
+  /* diagram nodes and edges */
+  --node: #eef1f6;
+  --node-line: #7d8ba0;
+  --edge: #5f6b7a;
+  --cluster: #f3f5f8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* dark: charcoal, not black; off-white text, not pure white */
+    --bg: #17191d;
+    --card: #1e2126;
+    --fg: #e4e6ea;
+    --mut: #a9b0bb;
+    --line: #323741;
+    --code-bg: #272b31;
+    --acc: #8fb3ec;
+    --on-acc: #16191e;
+    --ok: #6cc0d8;
+    --ok-bg: #1b3038;
+    --warn: #e2b35a;
+    --problem: #f07f95;
+    --problem-bg: #3d2129;
+    --problem-ink: #f5e4e8;
+    --node: #272c34;
+    --node-line: #76839a;
+    --edge: #97a1ae;
+    --cluster: #22262c;
+  }
+}
+
+/* DaisyUI bridge: pages built on Tailwind + DaisyUI take the house palette
+   instead of a DaisyUI theme (remove any data-theme attribute from <html>). */
+:root:not([data-theme]), :root[data-theme] {
+  --color-base-100: var(--bg);
+  --color-base-200: var(--card);
+  --color-base-300: var(--code-bg);
+  --color-base-content: var(--fg);
+  --color-primary: var(--acc);
+  --color-primary-content: var(--on-acc);
+  --color-secondary: var(--acc);
+  --color-secondary-content: var(--on-acc);
+  --color-accent: var(--acc);
+  --color-accent-content: var(--on-acc);
+  --color-neutral: var(--mut);
+  --color-neutral-content: var(--card);
+  --color-info: var(--acc);
+  --color-info-content: var(--on-acc);
+  --color-success: var(--ok);
+  --color-success-content: var(--card);
+  --color-warning: var(--warn);
+  --color-warning-content: var(--card);
+  --color-error: var(--problem);
+  --color-error-content: var(--card);
+}
+
+/* Element and component rules sit in a low-priority layer so a page's own
+   framework (e.g. Tailwind utilities) still wins where it sets something. */
+@layer house {
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+main {
+  width: min(96vw, 1800px);
+  margin: 0 auto;
+  padding: 28px 0 64px;
+}
+
+h1, h2, h3, h4 { line-height: 1.3; font-weight: 600; letter-spacing: 0; }
+h1 { font-size: 28px; margin: 0 0 6px; }
+h2 { font-size: 21px; margin: 40px 0 12px; }
+h3 { font-size: 18px; margin: 28px 0 10px; }
+h4 { font-size: 16px; }
+
+p { margin: 0 0 12px; max-width: 80ch; }
+
+a { color: var(--acc); text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+
+.sub { color: var(--mut); margin: 0 0 24px; }
+.back { color: var(--mut); text-decoration: none; font-size: 15px; }
+.back:hover { color: var(--fg); }
+.take { margin-top: 40px; font-size: 17px; }
+
+.card {
+  width: 100%;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 18px 20px;
+  overflow-x: auto;
+}
+.card + .card { margin-top: 14px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 15px; }
+th, td {
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+tr:last-child > td { border-bottom: 0; }
+th { color: var(--mut); font-weight: 600; }
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.pill {
+  display: inline-block;
+  padding: 1px 9px;
+  border-radius: 99px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+}
+
+/* status: always paired with an icon or word in the text, never colour alone */
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.problem { color: var(--problem); }
+
+form:not(.card) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  align-items: center;
+  margin-top: 16px;
+}
+fieldset { min-width: 0; }
+label { cursor: pointer; }
+input[type="radio"], input[type="checkbox"] { accent-color: var(--acc); }
+
+button {
+  font: inherit;
+  font-weight: 600;
+  background: var(--acc);
+  color: var(--on-acc);
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.55; cursor: default; }
+:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+.card:has(.house-diagram, .mermaid) { padding: 14px; }
+.card:has(.house-diagram, .mermaid) > table { margin-top: 14px; }
+}
+
+/* Diagrams (unlayered so frameworks cannot shrink them): natural size, never
+   shrunk; wide ones scroll inside their card.
+   house-mermaid.js renders .mermaid into .house-diagram. */
+.mermaid, .house-diagram {
+  margin: 0;
+  display: flex;
+  justify-content: safe center;
+  max-width: 100%;
+  overflow-x: auto;
+  font-family: var(--font-sans);
+  background: none;
+}
+.house-diagram svg {
+  max-width: none !important;
+  height: auto;
+  flex-shrink: 0;
+}
+/* hide raw Mermaid source only while the renderer is running */
+.house-pending .mermaid:not(.whiteboard),
+.house-pending .house-diagram:not(:has(svg)) { visibility: hidden; }
+
+/* Full-screen view (house-mermaid.js): a slim toolbar row above every rendered
+   diagram (never on top of it), and one viewport overlay that pans and zooms a copy. */
+.house-diagram-frame { display: flex; flex-direction: column; }
+.house-diagram-bar { display: flex; justify-content: flex-end; gap: 6px; margin: 0 0 6px; min-height: 0; }
+.house-diagram-bar:not(:has(button:not([hidden]))) { display: none; }
+.house-fs-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  margin: 0;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--mut);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.house-fs-open:hover, .house-fs-open:focus-visible { opacity: 1; color: var(--fg); border-color: var(--acc); }
+.house-fs-open[hidden] { display: none; }
+.house-fs-active { overflow: hidden; }
+.house-fs {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: flex;
+  padding: clamp(12px, 2.5vw, 28px);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(3px);
+  font-family: var(--font-sans);
+  color: var(--fg);
+}
+.house-fs[hidden] { display: none; }
+.house-fs:fullscreen { background: var(--bg); }
+.house-fs-shell {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: 0 12px 40px color-mix(in srgb, var(--fg) 18%, transparent);
+}
+.house-fs-stage { position: relative; flex: 1; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+.house-fs-stage.is-dragging { cursor: grabbing; }
+.house-fs-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+.house-fs-canvas svg { display: block; max-width: none !important; }
+.house-fs-tools {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+}
+.house-fs-tools button {
+  min-width: 30px;
+  height: 30px;
+  margin: 0;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  color: var(--fg);
+  font: 500 15px/1 var(--font-sans);
+  cursor: pointer;
+}
+.house-fs-tools button:hover { border-color: var(--line); background: var(--code-bg); }
+.house-fs-zoom { min-width: 4.5ch; text-align: center; font: 13px/1 var(--font-sans); color: var(--mut); font-variant-numeric: tabular-nums; }
+.house-fs-hint { position: absolute; left: 14px; bottom: 10px; margin: 0; font-size: 13px; color: var(--mut); pointer-events: none; }
