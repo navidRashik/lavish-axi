@@ -17,7 +17,7 @@ const servedChromeIds = new Set(
   ),
 );
 
-/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, initialDraft?: { prompts?: any[], composer?: string } | null, revisionPalette?: { hex: string, borderStyle: string, pattern: string }[] }} HarnessSessionData */
+/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, initialDraft?: { prompts?: any[], composer?: string } | null, initialDraftSeq?: number, revisionPalette?: { hex: string, borderStyle: string, pattern: string }[] }} HarnessSessionData */
 /** @type {HarnessSessionData} */
 const defaultSessionData = {
   key: "abc",
@@ -82,6 +82,8 @@ async function createChromeHarness({
   localStore = new Map(),
   beginLoadResponses = [],
   handoffResponses = [],
+  // Answers for draft saves, in order; once used up every save answers 200 with an empty body.
+  draftResponses = [],
   storedQueue = null,
   // Opt-in frozen clock. `reloadChromeAfterServerRestart` waits on wall-clock deadlines, so a
   // test that needs one to expire has to own `Date.now()` rather than sleep through it.
@@ -362,6 +364,7 @@ async function createChromeHarness({
     // `draftRequests` rather than finding them interleaved with the prompt posts.
     if (String(url).endsWith("/draft")) {
       draftRequests.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+      if (draftResponses.length > 0) return draftResponses.shift();
       return { ok: true, status: 200, json: async () => ({}) };
     }
     if (String(url).includes("/chrome-loads/begin")) {
@@ -9659,6 +9662,48 @@ test("the closing beacon carries a revision above the save it may overtake", asy
   assert.equal(beacon.tab, save.tab);
   assert.ok(typeof save.tab === "string" && save.tab.length > 0);
   assert.ok(beacon.revision > save.revision, `beacon revision ${beacon.revision} must exceed save ${save.revision}`);
+});
+
+test("a tab told another tab changed the draft stops saving over it and says so", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, initialDraftSeq: 4 },
+    draftResponses: [{ ok: false, status: 409, json: async () => ({ status: "stale", draft_seq: 5 }) }],
+  });
+  chrome.element("chatInput").value = "older-tab text";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  assert.equal(chrome.draftRequests.length, 1);
+  assert.equal(chrome.draftRequests[0].body.base, 4, "a save names the draft it was based on");
+  assert.match(chrome.element("sendHint").textContent, /Another tab changed this page's unsent notes/);
+
+  chrome.element("chatInput").value = "older-tab text, more";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(6000);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  chrome.dispatchWindowEvent("pagehide");
+  assert.equal(chrome.draftRequests.length, 1, "no further save overwrites the other tab's draft");
+  assert.equal(chrome.beacons.length, 0, "the closing beacon does not overwrite it either");
+});
+
+test("a saved draft moves the tab's base to the draft_seq the server answered", async () => {
+  const chrome = await createChromeHarness({
+    draftResponses: [{ ok: true, status: 200, json: async () => ({ status: "saved", draft_seq: 7 }) }],
+  });
+  chrome.element("chatInput").value = "first";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  chrome.element("chatInput").value = "second";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  assert.deepEqual(
+    chrome.draftRequests.map((request) => request.body.base),
+    [0, 7],
+  );
 });
 
 test("a tab with no queue of its own starts from the draft a closed tab left on the server", async () => {

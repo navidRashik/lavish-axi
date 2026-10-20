@@ -6926,8 +6926,24 @@ test("the draft route takes a closing tab's beacon body and refuses other origin
       body: JSON.stringify({ prompts: [], composer: "typed before closing" }),
     });
     assert.equal(beacon.status, 200);
+    assert.equal((await beacon.json()).draft_seq, 1);
     const state = JSON.parse(await readFile(path.join(dir, "state.json"), "utf8"));
     assert.equal(state.sessions[key].draft.composer, "typed before closing");
+
+    // A tab that opened before that save still holds draft_seq 0; its save is refused and says so.
+    const stale = await fetch(`${base}/api/${key}/draft`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({ composer: "older tab", tab: "tab-old", revision: 1, base: 0 }),
+    });
+    assert.equal(stale.status, 409);
+    assert.deepEqual(await stale.json(), {
+      status: "stale",
+      error: "draft changed since this save was based on it",
+      draft_seq: 1,
+    });
+    const kept = JSON.parse(await readFile(path.join(dir, "state.json"), "utf8"));
+    assert.equal(kept.sessions[key].draft.composer, "typed before closing");
 
     const foreign = await fetch(`${base}/api/${key}/draft`, {
       method: "POST",
