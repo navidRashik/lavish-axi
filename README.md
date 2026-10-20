@@ -52,6 +52,7 @@ npx skills add kunchenguid/lavish-axi --skill lavish
 ```
 
 This fork is installed globally (`lavish-axi` on PATH), never fetched through npx: `npx lavish-axi` resolves the upstream npm release instead.
+`scripts/fork-update.sh` builds origin/main of a clone, installs it with npm and copies the packaged skill to `~/.agents/skills/lavish/SKILL.md`; `--dry-run` prints every mutating step, and `LAVISH_FORK_REPO`, `LAVISH_NPM`, `LAVISH_SKILL_DEST` and `LAVISH_FORK_STATE` override the defaults.
 The skill teaches your agent to run the global `lavish-axi`.
 It stays a short stub and sends the agent to `lavish-axi --help`, `reply --help`, `design`, and `playbook` for current instructions, so an installed copy cannot go stale against a newer CLI.
 Its frontmatter also includes Hermes Agent metadata, so Hermes-compatible harnesses can categorize and surface it as a first-class productivity skill.
