@@ -3608,6 +3608,37 @@ test("/design serves local Tailwind and DaisyUI artifact assets", async () => {
   }
 });
 
+test("/design serves the house theme stylesheet, Mermaid renderer and tab keeper", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const css = await fetch(`${base}/design/house.css`);
+    const mermaid = await fetch(`${base}/design/house-mermaid.js`);
+    const keep = await fetch(`${base}/design/house-keep.js`);
+
+    assert.equal(css.status, 200);
+    assert.match(css.headers.get("content-type") || "", /text\/css/);
+    assert.match(await css.text(), /--card:/);
+    assert.equal(mermaid.status, 200);
+    assert.match(mermaid.headers.get("content-type") || "", /application\/javascript/);
+    assert.match(await mermaid.text(), /window\.houseMermaid/);
+    assert.equal(keep.status, 200);
+    assert.match(keep.headers.get("content-type") || "", /application\/javascript/);
+    assert.match(await keep.text(), /lavish-keep:/);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an export can inline the house theme from its /design path", () => {
+  for (const asset of ["house.css", "house-mermaid.js", "house-keep.js"]) {
+    const resolved = resolveDesignAssetPath(`/design/${asset}`);
+    assert.ok(resolved && resolved.endsWith(asset), `${asset} resolves to ${resolved}`);
+  }
+});
+
 test("design asset resolver only trusts exact packaged design asset paths", () => {
   assert.equal(resolveDesignAssetPath("/design/daisyui.css/extra"), null);
   assert.equal(resolveDesignAssetPath("/design/tailwindcss-browser.js/extra"), null);

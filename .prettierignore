@@ -9,5 +9,7 @@ CHANGELOG.md
 plugin.json
 .agents
 .claude/settings.local.json
+# Vendored house theme, kept byte-identical to its upstream copy.
+assets/house
 # Canonical two-line @AGENTS.md pointer; prettier would add a blank line.
 CLAUDE.md
