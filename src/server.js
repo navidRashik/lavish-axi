@@ -808,6 +808,13 @@ export async function serve({
   const attachmentConfig = resolveAttachmentConfig();
   // Attachment bytes are content-addressed on disk alongside the whiteboard sidecars.
   const attachmentStateRoot = path.dirname(stateFile);
+  // The resolver and caps every image handed to an agent goes through: a sent batch's, and a
+  // stored draft's that an end hands over.
+  const promptAttachmentOptions = {
+    resolveAttachment: (sessionKeyValue, id) => resolveAttachment(attachmentStateRoot, sessionKeyValue, id),
+    maxPerPrompt: attachmentConfig.maxPerPrompt,
+    maxPromptBytes: attachmentConfig.maxPromptBytes,
+  };
   // The store owns the ONE shared lock covering BOTH state consistency AND the
   // attachment lifecycle. It serializes every state.json read-modify-write
   // internally (E1); the server routes its attachment disk sections - upload
@@ -1241,11 +1248,7 @@ export async function serve({
       const hasLayoutWarningPrompt = Array.isArray(req.body?.prompts)
         ? req.body.prompts.some((prompt) => prompt?.tag === "layout-warnings")
         : false;
-      const result = await store.queuePrompts(req.params.key, req.body || {}, {
-        resolveAttachment: (sessionKeyValue, id) => resolveAttachment(attachmentStateRoot, sessionKeyValue, id),
-        maxPerPrompt: attachmentConfig.maxPerPrompt,
-        maxPromptBytes: attachmentConfig.maxPromptBytes,
-      });
+      const result = await store.queuePrompts(req.params.key, req.body || {}, promptAttachmentOptions);
       if (!result) {
         res.status(404).json({ error: "session not found" });
         return;
@@ -1397,10 +1400,12 @@ export async function serve({
 
   app.post("/api/:key/end", async (req, res, next) => {
     try {
-      const session = await store.endSession(req.params.key, "user", {
-        tab: req.body?.draft_tab,
-        base: req.body?.draft_base,
-      });
+      const session = await store.endSession(
+        req.params.key,
+        "user",
+        { tab: req.body?.draft_tab, base: req.body?.draft_base },
+        promptAttachmentOptions,
+      );
       clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, events);
       events.emit("ended", req.params.key, session?.ended_by);
       res.json({ status: "ended" });
@@ -1617,7 +1622,7 @@ export async function serve({
         return;
       }
       const key = sessionKey(file);
-      const session = await store.endSession(key, "agent");
+      const session = await store.endSession(key, "agent", {}, promptAttachmentOptions);
       clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
       events.emit("ended", key, session?.ended_by);
       res.json({ status: "ended" });

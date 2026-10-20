@@ -3093,6 +3093,89 @@ test("an End from the tab that wrote the stored draft replaces it with its batch
   });
 });
 
+// A resolver that knows exactly the uploads in `known`; any other id is an expired upload.
+const draftImageResolver = (known) => ({
+  resolveAttachment: async (_key, id) =>
+    known.includes(id)
+      ? { id, type: "image", path: "/tmp/" + id, mime: "image/png", bytes: 10, width: 1, height: 1 }
+      : null,
+  maxPerPrompt: 4,
+  maxPromptBytes: 25 * 1024 * 1024,
+});
+
+const draftShot = (id) => ({ ...draftNote("see the screenshot", "img-1"), attachments: [{ id, name: "shot.png" }] });
+
+test("a draft's uploaded image arrives when a tab behind that draft ends the review", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    const image = unknownAttachmentId(1);
+    await store.saveDraft(key, { prompts: [draftShot(image)], composer: "", tab: "tab-new", revision: 1, base: 0 });
+    await store.queuePrompts(
+      key,
+      {
+        endSession: true,
+        draft_tab: "tab-old",
+        draft_base: 0,
+        prompts: [
+          { uid: "", prompt: "older", selector: "", tag: "message", text: "Freeform message", prompt_id: "o-1" },
+        ],
+      },
+      draftImageResolver([image]),
+    );
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["older", "see the screenshot"],
+    );
+    const shot = taken.prompts[1];
+    assert.deepEqual(
+      shot.attachments.map((attachment) => [attachment.id, attachment.name, attachment.path]),
+      [[image, "shot.png", "/tmp/" + image]],
+    );
+  });
+});
+
+test("a draft's uploaded image arrives when an empty End from a stale tab or the agent hands the draft over", async () => {
+  for (const [endedBy, from] of [
+    ["user", { tab: "tab-old", base: 0 }],
+    ["agent", {}],
+  ]) {
+    await withSyntheticSession(async ({ store, key }) => {
+      const image = unknownAttachmentId(2);
+      await store.saveDraft(key, { prompts: [draftShot(image)], composer: "", tab: "tab-new", revision: 1, base: 0 });
+      await store.endSession(key, endedBy, from, draftImageResolver([image]));
+
+      const [shot] = feedbackResult(await store.takeFeedback(key)).prompts;
+      assert.equal(shot.prompt, "see the screenshot", `${endedBy} end`);
+      assert.deepEqual(
+        shot.attachments.map((attachment) => attachment.path),
+        ["/tmp/" + image],
+        `${endedBy} end`,
+      );
+    });
+  }
+});
+
+test("a draft image whose upload is gone is left out with a note, and the End still lands", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    const kept = unknownAttachmentId(3);
+    const gone = unknownAttachmentId(4);
+    await store.saveDraft(key, {
+      prompts: [{ ...draftShot(kept), attachments: [{ id: kept }, { id: gone }] }],
+      composer: "",
+    });
+    await store.endSession(key, "agent", {}, draftImageResolver([kept]));
+
+    const [shot] = feedbackResult(await store.takeFeedback(key)).prompts;
+    assert.equal(shot.prompt, "see the screenshot\n[1 image(s) from the unsent draft were not attached]");
+    assert.deepEqual(
+      shot.attachments.map((attachment) => attachment.id),
+      [kept],
+    );
+    assert.equal((await store.findByKey(key)).status, "ended");
+  });
+});
+
 test("a send takes the notes and message it delivered out of the stored draft", async () => {
   await withSyntheticSession(async ({ store, key }) => {
     await store.saveDraft(key, { prompts: [draftNote("sent", "d-1"), draftNote("kept", "d-2")], composer: "hello" });
