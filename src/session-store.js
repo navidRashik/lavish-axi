@@ -172,6 +172,7 @@ export class SessionStore {
         typeof existing.draft_revision?.tab === "string" && Number.isSafeInteger(existing.draft_revision?.revision)
           ? existing.draft_revision
           : null,
+      draft_sent: draftSent(existing),
       // The one `session_ended_by_navid` poll event belongs to the round that ended; a reopened
       // session starts a round whose end has not been reported, and has not ended.
       end_reported: false,
@@ -352,17 +353,16 @@ export class SessionStore {
       if (JSON.stringify(nextDraft) !== JSON.stringify(session.draft ?? null))
         session.draft_seq = draftSeq(session) + 1;
       session.draft = nextDraft;
-      // A send raises its tab's applied draft revision to the last one that tab stamped before
-      // sending, so a save of that tab's still in flight (made before the send, possibly carrying
-      // the sent words) is refused when it lands. Another tab's applied revision is left alone:
-      // that tab's saves are checked by draft_seq, which the prune above has already moved.
+      // A send records the last draft revision its tab stamped before sending, so a save of that
+      // tab's still in flight (made before the send, possibly carrying the sent words) is refused
+      // when it lands, whichever tab owns the stored draft. Other tabs' saves are untouched.
       const sentTab = typeof payload.draft_tab === "string" ? payload.draft_tab.slice(0, 64) : "";
-      const applied = session.draft_revision;
-      if (sentTab && Number.isSafeInteger(payload.draft_revision) && (!applied || applied.tab === sentTab)) {
-        session.draft_revision = {
-          tab: sentTab,
-          revision: Math.max(applied?.revision ?? 0, payload.draft_revision),
-        };
+      if (sentTab && Number.isSafeInteger(payload.draft_revision)) {
+        const sent = draftSent(session);
+        const revision = Math.max(sent[sentTab] ?? 0, payload.draft_revision);
+        delete sent[sentTab];
+        sent[sentTab] = revision;
+        session.draft_sent = Object.fromEntries(Object.entries(sent).slice(-DRAFT_SENT_TABS));
       }
     }
     if (restoring) {
@@ -803,7 +803,9 @@ export class SessionStore {
   // was based on, and one based on an older draft is refused: another tab changed the draft since
   // this tab last saw it, and storing this tab's copy would drop that tab's words. The tab that made
   // the last applied save may keep saving on its own numbering (its saves arrive out of order around
-  // the closing beacon), and a save of its numbered below the last applied one is refused too.
+  // the closing beacon), and a save of its numbered below the last applied one is refused too. A
+  // save numbered at or below the revision its tab had stamped when it last sent is refused: it was
+  // made before that send.
   async saveDraft(key, payload) {
     return this.runExclusive(async () => {
       const state = await this.readState();
@@ -816,7 +818,11 @@ export class SessionStore {
       const base = Number.isSafeInteger(payload?.base) ? payload.base : 0;
       const applied = session.draft_revision;
       const sameTab = Boolean(tab) && applied?.tab === tab;
-      if (sameTab ? revision <= applied.revision : base !== seq) {
+      const sentRevision = tab ? draftSent(session)[tab] : undefined;
+      if (
+        (sentRevision !== undefined && revision <= sentRevision) ||
+        (sameTab ? revision <= applied.revision : base !== seq)
+      ) {
         return { stale: true, draft: session.draft, draft_seq: seq };
       }
       session.draft = pruneDraft(normalizeDraft(payload), session, []);
@@ -1018,9 +1024,22 @@ function normalizePrompt(prompt) {
 // without limit. The prompts are normalized like a queued batch; nothing in them is trusted.
 const MAX_DRAFT_PROMPTS = 200;
 const MAX_DRAFT_COMPOSER_CHARS = 100_000;
+// How many sending tabs keep a sent-revision mark; a tab past this many later senders has long
+// since had its pre-send saves land.
+const DRAFT_SENT_TABS = 16;
 
 function draftSeq(session) {
   return Number.isSafeInteger(session.draft_seq) && session.draft_seq >= 0 ? session.draft_seq : 0;
+}
+
+// The tabs that sent most recently, each with the last draft revision it stamped before sending.
+function draftSent(session) {
+  const sent = session.draft_sent && typeof session.draft_sent === "object" ? session.draft_sent : {};
+  return Object.fromEntries(
+    Object.entries(sent)
+      .filter(([tab, revision]) => tab && Number.isSafeInteger(revision))
+      .slice(-DRAFT_SENT_TABS),
+  );
 }
 
 // True when the stored draft holds another tab's words that the tab named by `from` never saw:

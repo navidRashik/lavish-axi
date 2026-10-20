@@ -3450,3 +3450,34 @@ test("an in-flight draft save that lands after a send of the same words does not
     assert.equal(after.status, "ended");
   });
 });
+
+test("a tab's in-flight draft save that lands after its send is refused while another tab owns the draft", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    // Tab B owns the stored draft (draft_seq 0 -> 1). Tab A, based on draft_seq 1, stamps a save of
+    // "from a" (revision 1) and sends "from a" before that save lands. B's draft does not hold A's
+    // words, so the send leaves the draft and draft_seq as they were.
+    await store.saveDraft(key, { composer: "from b", tab: "tab-b", revision: 1, base: 0 });
+    await store.queuePrompts(key, {
+      draft_tab: "tab-a",
+      draft_revision: 1,
+      prompts: [
+        { uid: "", prompt: "from a", selector: "", tag: "message", text: "Freeform message", prompt_id: "m-1" },
+      ],
+    });
+    assert.deepEqual(
+      feedbackResult(await store.takeFeedback(key)).prompts.map((prompt) => prompt.prompt),
+      ["from a"],
+    );
+
+    const late = await store.saveDraft(key, { composer: "from a", tab: "tab-a", revision: 1, base: 1 });
+    assert.equal(late.stale, true);
+
+    // B keeps typing on the same base: A's send did not make B's draft stale.
+    const fromB = await store.saveDraft(key, { composer: "from b, more", tab: "tab-b", revision: 2, base: 1 });
+    assert.equal(fromB.stale, undefined);
+    await store.endSession(key, "agent");
+
+    const handedOver = ((await store.findByKey(key)).prompts || []).map((prompt) => prompt.prompt);
+    assert.deepEqual(handedOver, ["from b, more"], `the agent End handed over ${JSON.stringify(handedOver)}`);
+  });
+});
