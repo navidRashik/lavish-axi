@@ -6885,7 +6885,7 @@ test("the live transcript carries rendered html for agent replies and never for 
   }
 });
 
-test("chat-sync stamps a note seen when a poll takes it, working when the artifact changes, and done on reply", async () => {
+test("chat-sync stamps a note seen when a poll takes it, working when the artifact changes, and done on a reply naming it", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body><h1>Hello</h1></body></html>");
@@ -6926,16 +6926,25 @@ test("chat-sync stamps a note seen when a poll takes it, working when the artifa
       assert.ok(working.chat[0].working_at, "an artifact change after delivery stamps working");
       assert.equal("done_at" in working.chat[0], false);
 
+      const progress = await fetch(`${base}/api/${key}/agent-reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Making it blue." }),
+      });
+      assert.equal(progress.status, 200);
+      const open = await stream.next();
+      assert.equal("done_at" in open.chat[0], false, "a reply without done leaves the note open");
+
       const replied = await fetch(`${base}/api/${key}/agent-reply`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: "It is blue now." }),
+        body: JSON.stringify({ text: "It is blue now.", done: "all" }),
       });
       assert.equal(replied.status, 200);
       const done = await stream.next();
       assert.ok(done.chat[0].done_at, "the reply stamps the note done");
-      assert.equal(done.chat[1].role, "agent");
-      assert.equal(done.chat[0].done_at, done.chat[1].at);
+      assert.equal(done.chat[2].role, "agent");
+      assert.equal(done.chat[0].done_at, done.chat[2].at);
     } finally {
       await stream.close();
     }
