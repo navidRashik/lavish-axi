@@ -529,35 +529,56 @@ function currentDraftJson() {
   return JSON.stringify(draftBody(queued, chatInput.value));
 }
 
+// Another tab changed this page's draft after this tab last saw it. This tab stops saving so it
+// cannot overwrite that tab's words; its own End still hands over everything it holds.
+const DRAFT_CONFLICT_COPY =
+  "Another tab changed this page's unsent notes, so this tab stopped saving its draft. Click End to hand over what this tab holds, or reload to continue from the other tab.";
+let draftConflict = false;
+
 function scheduleDraftSave(delayMs = DRAFT_SAVE_DELAY_MS) {
   if (ended) return;
+  if (draftConflict) {
+    showSendHint(DRAFT_CONFLICT_COPY, null, false);
+    return;
+  }
   clearTimeout(draftTimer);
   draftTimer = setTimeout(saveDraft, delayMs);
 }
 
-// Every save carries this tab's id and a revision that only grows, so the server can drop a save
-// that arrives after a newer one from the same tab (the closing beacon overtaking a debounced save).
+// Every save names the page's draft_seq it was based on, so the server refuses a save made from a
+// draft another tab has since changed. It also carries this tab's id and a revision that only
+// grows, so the server can drop a save that arrives after a newer one from this same tab (the
+// closing beacon overtaking a debounced save).
 const draftTab = Math.random().toString(36).slice(2) + Date.now().toString(36);
 let draftRevision = 0;
+let draftBase = Number.isSafeInteger(sessionData.initialDraftSeq) ? sessionData.initialDraftSeq : 0;
 
 function stampedDraft(body) {
   draftRevision += 1;
-  return JSON.stringify({ ...JSON.parse(body), tab: draftTab, revision: draftRevision });
+  return JSON.stringify({ ...JSON.parse(body), tab: draftTab, revision: draftRevision, base: draftBase });
 }
 
 function saveDraft() {
   draftTimer = undefined;
   draftSaving = draftSaving.then(async () => {
     const body = currentDraftJson();
-    if (ended || body === lastSavedDraft) return;
+    if (ended || draftConflict || body === lastSavedDraft) return;
     try {
       const response = await fetch("/api/" + key + "/draft", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: stampedDraft(body),
       });
-      if (response.ok) lastSavedDraft = body;
-      else if (response.status !== 409) scheduleDraftSave(DRAFT_RETRY_DELAY_MS);
+      const result = await response.json().catch(() => ({}));
+      if (response.ok) {
+        lastSavedDraft = body;
+        if (Number.isSafeInteger(result?.draft_seq)) draftBase = result.draft_seq;
+      } else if (response.status === 409 && result?.status === "stale") {
+        draftConflict = true;
+        showSendHint(DRAFT_CONFLICT_COPY, null, false);
+      } else if (response.status !== 409) {
+        scheduleDraftSave(DRAFT_RETRY_DELAY_MS);
+      }
     } catch {
       scheduleDraftSave(DRAFT_RETRY_DELAY_MS);
     }
@@ -568,7 +589,7 @@ function saveDraft() {
 // The last chance for words typed after the latest save: a beacon outlives the closing page. Its
 // revision is above every save this tab sent, so it wins even if an earlier save lands after it.
 function saveDraftOnExit() {
-  if (ended || typeof navigator.sendBeacon !== "function") return;
+  if (ended || draftConflict || typeof navigator.sendBeacon !== "function") return;
   const body = currentDraftJson();
   if (body === lastSavedDraft) return;
   if (navigator.sendBeacon("/api/" + key + "/draft", new Blob([stampedDraft(body)], { type: "text/plain" }))) {

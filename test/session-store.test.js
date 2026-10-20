@@ -3102,9 +3102,29 @@ test("a draft save overtaken by a newer one from the same tab does not overwrite
     // A save carrying the same revision again is no newer either.
     assert.equal((await store.saveDraft(key, { composer: "again", tab: "tab-a", revision: 2 })).stale, true);
 
-    // Another tab's save is not ordered against tab-a's and is applied.
-    await store.saveDraft(key, { composer: "from another tab", tab: "tab-b", revision: 1 });
+    // A tab that has seen tab-a's draft (draft_seq 1) may replace it.
+    const other = await store.saveDraft(key, { composer: "from another tab", tab: "tab-b", revision: 1, base: 1 });
+    assert.equal(other.draft_seq, 2);
     assert.equal((await store.findByKey(key)).draft.composer, "from another tab");
+  });
+});
+
+test("a save from a tab that has not seen another tab's newer draft is refused, not stored", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    // Both tabs opened on draft_seq 0. The newer tab saves first; the older tab's save lands later.
+    const newer = await store.saveDraft(key, { composer: "newer-tab text", tab: "tab-new", revision: 1, base: 0 });
+    assert.equal(newer.draft_seq, 1);
+    const older = await store.saveDraft(key, { composer: "older-tab text", tab: "tab-old", revision: 1, base: 0 });
+    assert.equal(older.stale, true);
+    assert.equal(older.draft_seq, 1);
+    const session = await store.findByKey(key);
+    assert.equal(session.draft.composer, "newer-tab text");
+    assert.deepEqual(session.draft_revision, { tab: "tab-new", revision: 1 });
+
+    // The older tab's closing beacon is refused the same way.
+    const beacon = await store.saveDraft(key, { composer: "older-tab more", tab: "tab-old", revision: 2, base: 0 });
+    assert.equal(beacon.stale, true);
+    assert.equal((await store.findByKey(key)).draft.composer, "newer-tab text");
   });
 });
 

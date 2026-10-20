@@ -1424,7 +1424,17 @@ export async function serve({
         res.status(409).json({ status: "ended", error: "session already ended", ended_by: result.ended_by });
         return;
       }
-      res.json({ status: "saved" });
+      if (result.stale) {
+        res
+          .status(409)
+          .json({
+            status: "stale",
+            error: "draft changed since this save was based on it",
+            draft_seq: result.draft_seq,
+          });
+        return;
+      }
+      res.json({ status: "saved", draft_seq: result.draft_seq });
     } catch (error) {
       next(error);
     }
@@ -3303,6 +3313,8 @@ export function createChromeHtml(
     // The reviewer's unsent notes and composer text as last saved, so a reload or a reopened tab
     // picks up where the closed one stopped.
     initialDraft: session.status === "ended" ? null : session.draft || null,
+    // The draft_seq the restored draft carries; this tab's first save is based on it.
+    initialDraftSeq: Number.isSafeInteger(session.draft_seq) && session.draft_seq >= 0 ? session.draft_seq : 0,
     initialChatAckIds: serializeChatAckIds(session.chat_ack_ids),
     initialChatRevision:
       Number.isSafeInteger(session.chat_revision) && session.chat_revision >= 0 ? session.chat_revision : 0,

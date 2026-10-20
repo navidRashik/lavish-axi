@@ -331,7 +331,10 @@ export class SessionStore {
     // The draft holds only what has not reached the server: an end hands everything over, and any
     // other batch takes out the notes and composer text it delivered.
     if (!restoring) {
-      session.draft = shouldEndSession ? null : pruneDraft(session.draft, session, normalizedPrompts);
+      const nextDraft = shouldEndSession ? null : pruneDraft(session.draft, session, normalizedPrompts);
+      if (JSON.stringify(nextDraft) !== JSON.stringify(session.draft ?? null))
+        session.draft_seq = draftSeq(session) + 1;
+      session.draft = nextDraft;
     }
     if (restoring) {
       const restoredFailures = Array.isArray(payload.artifact_failures)
@@ -743,7 +746,10 @@ export class SessionStore {
           session = state.sessions[key];
         }
       }
-      if (endedBy === "user") session.draft = null;
+      if (endedBy === "user" && session.draft) {
+        session.draft = null;
+        session.draft_seq = draftSeq(session) + 1;
+      }
       const nextEndedBy = endedBy === "user" || existingEndedBy === "user" ? "user" : "agent";
       session.status = "ended";
       session.ended_by = nextEndedBy;
@@ -756,25 +762,31 @@ export class SessionStore {
 
   // The open tab's unsent words, stored as they are written so neither a closed tab nor an End
   // from elsewhere loses them. An ended session takes no draft: nothing would ever hand it over.
-  // Each tab numbers its saves; a save from a tab whose number is not above the last one applied
-  // is older than what is stored (a debounced save overtaken by the closing beacon) and is dropped.
-  // The applied number outlives the draft, so a late save cannot bring back delivered words.
+  // draft_seq numbers the page's draft and grows with every change. A save names the draft_seq it
+  // was based on, and one based on an older draft is refused: another tab changed the draft since
+  // this tab last saw it, and storing this tab's copy would drop that tab's words. The tab that made
+  // the last applied save may keep saving on its own numbering (its saves arrive out of order around
+  // the closing beacon), and a save of its numbered below the last applied one is refused too.
   async saveDraft(key, payload) {
     return this.runExclusive(async () => {
       const state = await this.readState();
       const session = state.sessions[key];
       if (!session) return null;
       if (session.status === "ended") return { ended: true, ended_by: session.ended_by };
+      const seq = draftSeq(session);
       const tab = typeof payload?.tab === "string" ? payload.tab.slice(0, 64) : "";
       const revision = Number.isSafeInteger(payload?.revision) ? payload.revision : 0;
+      const base = Number.isSafeInteger(payload?.base) ? payload.base : 0;
       const applied = session.draft_revision;
-      if (tab && applied?.tab === tab && revision <= applied.revision) {
-        return { stale: true, draft: session.draft };
+      const sameTab = Boolean(tab) && applied?.tab === tab;
+      if (sameTab ? revision <= applied.revision : base !== seq) {
+        return { stale: true, draft: session.draft, draft_seq: seq };
       }
       session.draft = pruneDraft(normalizeDraft(payload), session, []);
-      if (tab) session.draft_revision = { tab, revision };
+      session.draft_seq = seq + 1;
+      session.draft_revision = tab ? { tab, revision } : null;
       await this.writeState(state);
-      return { draft: session.draft };
+      return { draft: session.draft, draft_seq: session.draft_seq };
     });
   }
 
@@ -957,6 +969,10 @@ function normalizePrompt(prompt) {
 // without limit. The prompts are normalized like a queued batch; nothing in them is trusted.
 const MAX_DRAFT_PROMPTS = 200;
 const MAX_DRAFT_COMPOSER_CHARS = 100_000;
+
+function draftSeq(session) {
+  return Number.isSafeInteger(session.draft_seq) && session.draft_seq >= 0 ? session.draft_seq : 0;
+}
 
 function normalizeDraft(value) {
   if (!value || typeof value !== "object") return null;
