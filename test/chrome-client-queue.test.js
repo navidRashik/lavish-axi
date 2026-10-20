@@ -9827,6 +9827,64 @@ test("a send names the tab and the last draft revision it stamped before sending
   assert.ok(lastSave.body.revision >= 1);
 });
 
+test("a follow-up typed while a send waits on its snapshot keeps saving after the send", async () => {
+  /** @type {{ url: string, body: any }[]} */
+  const posts = [];
+  /** @type {(response: any) => void} */
+  let answerFollowUpSave = () => {};
+  const followUpSave = new Promise((resolve) => {
+    answerFollowUpSave = resolve;
+  });
+  const saved = (draftSeq) => ({ ok: true, status: 200, json: async () => ({ status: "saved", draft_seq: draftSeq }) });
+  const chrome = await createChromeHarness({
+    draftResponses: [saved(1), followUpSave],
+    fetchImpl: async (url, init) => {
+      posts.push({ url, body: JSON.parse(init.body) });
+      return { ok: true, status: 200, json: async () => ({}) };
+    },
+  });
+  chrome.element("chatInput").value = "hello";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  // Enter sends "hello"; the page is slow to answer the snapshot, and meanwhile the reviewer types
+  // a follow-up that this tab saves.
+  chrome.submit();
+  chrome.element("chatInput").value = "follow-up";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  const followUp = chrome.draftRequests.at(-1).body;
+  assert.equal(followUp.composer, "follow-up");
+
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  const sent = posts.find((post) => post.url === "/api/abc/prompts");
+  assert.ok(sent, JSON.stringify(posts.map((post) => post.url)));
+
+  // The follow-up save lands after the send. The server refuses a save at or below the revision the
+  // send named; this one was stamped after Enter, so it is kept.
+  answerFollowUpSave(
+    followUp.revision <= sent.body.draft_revision
+      ? { ok: false, status: 409, json: async () => ({ status: "stale", draft_seq: 2 }) }
+      : saved(2),
+  );
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  chrome.element("chatInput").value = "follow-up, more";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  assert.doesNotMatch(chrome.element("sendHint").textContent, /Another tab changed this page's unsent notes/);
+  assert.equal(chrome.draftRequests.at(-1).body.composer, "follow-up, more", "the tab keeps saving the follow-up");
+  assert.equal(
+    sent.body.draft_revision,
+    chrome.draftRequests[0].body.revision,
+    "the send names the revision stamped at Enter",
+  );
+});
+
 test("a tab with no queue of its own starts from the draft a closed tab left on the server", async () => {
   const chrome = await createChromeHarness({
     sessionData: {
