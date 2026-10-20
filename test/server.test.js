@@ -1076,16 +1076,17 @@ test("chrome shows agent working state when a previous poll has released", async
   assert.match(js, /spinner/);
 });
 
-test("the composer has exactly one action: End, which hands over everything and closes the review", async () => {
+test("the composer has two actions: End, which hands over everything and closes, and Send, which keeps the review open", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
 
   const actions = html.match(/<div class="actions" id="sendActions">(.*?)<\/div>/)?.[1] || "";
   assert.deepEqual(
     actions.match(/<button[^>]*id="[^"]+"/g)?.map((tag) => tag.match(/id="([^"]+)"/)[1]),
-    ["end"],
+    ["end", "send"],
   );
   assert.match(actions, /<span>End<\/span>/);
-  assert.doesNotMatch(html, /id="send"|id="sendAndEnd"|Send to Agent|Send &amp; End/);
+  assert.match(actions, /id="send" type="button"[^>]*>Send to Agent<\/button>/);
+  assert.doesNotMatch(html, /id="sendAndEnd"|Send &amp; End/);
 });
 
 test("chrome shows a waiting banner when no agent has attached", async () => {
