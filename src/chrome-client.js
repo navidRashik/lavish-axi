@@ -4597,6 +4597,7 @@ window.addEventListener("message", (event) => {
   if (msg.type === "lavish:togglePanel") togglePanelCollapsed();
   if (msg.type === "lavish:editQueuedAnchor") editQueuedAnchor(String(msg.selector || ""));
   if (msg.type === "lavish:answerQuestion") answerSharedQuestion(msg);
+  if (msg.type === "lavish:openInEditor") openInEditor(msg);
 });
 
 // Shared state (docs/shared-state.md). The frame cannot reach the server, so a question answered
@@ -4612,6 +4613,30 @@ function answerSharedQuestion(message) {
   }).catch(() => {
     // The answer still went out as a queued prompt; only the cross-page mirror is lost.
   });
+}
+
+// The server confines the path and builds the vscode:// URI for the viewer's machine; navigating
+// the chrome (not the sandboxed frame) to it hands the URI to the OS so VS Code opens the file.
+async function openInEditor(message) {
+  let result;
+  try {
+    const response = await fetch("/api/" + key + "/editor-link", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        path: String(message.path || ""),
+        root: String(message.root || ""),
+        line: String(message.line || ""),
+      }),
+    });
+    const body = await response.json().catch(() => ({}));
+    result =
+      response.ok && typeof body.uri === "string" ? { ok: true, uri: body.uri } : { ok: false, error: body.error };
+  } catch (error) {
+    result = { ok: false, error: String(error instanceof Error ? error.message : error) };
+  }
+  if (result.ok && /^vscode:\/\//.test(result.uri)) window.location.href = result.uri;
+  postToFrame({ type: "lavish:editorLinkResult", ok: result.ok, error: result.ok ? "" : String(result.error || "") });
 }
 
 // The sandboxed artifact iframe can't reach the loopback server (opaque origin),
