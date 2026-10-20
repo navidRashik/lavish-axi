@@ -16,9 +16,10 @@
 //      still running against an ENDED session is killed: an ended session is never re-armed.
 //   3. Ack (received). A Navid entry (role user, not layout-warnings) newer than the first run, not yet
 //      answered, gets ONE reply after ACK_AFTER: `📥 received HH:MM · routed to <owner>` (Dhaka time).
-//      The ack never ticks the note and never counts as an answer: it is posted with
-//      `reply --done <ACK_NOTICK>`, an id no note has, so no done_at is stamped (a plain reply would tick
-//      every delivered note). With `reply --ended-ok` a Send & End message on an ended page is acked too,
+//      The ack never ticks the note and never counts as an answer. On an install whose `reply --help`
+//      says a reply without --done closes no note (PLAIN_REPLY_CLOSES_NOTHING) it is a plain reply; on
+//      an older install, where a plain reply ticks every delivered note, it passes `--done <ACK_NOTICK>`,
+//      an id no note has. With `reply --ended-ok` a Send & End message on an ended page is acked too,
 //      without reopening it. Flags are probed once per process (restart after an upgrade).
 //      An "ANSWER <...> <qid>: <answer>" prompt also sets shared state q:<qid> status=answered in the
 //      page's directory, so every page binding that question disables it and shows the pick, and the
@@ -55,8 +56,10 @@ import { pathToFileURL } from "node:url";
 
 export const ACK_MARK = "📥 received";
 export const PICK_MARK = "✅ YOUR PICK";
-// The --done target the ack passes: it matches no note, so the ack ticks nothing.
+// The --done target the ack passes on an older install: it matches no note, so the ack ticks nothing.
 export const ACK_NOTICK = "lavish-sla-ack-notick";
+// The `reply --help` sentence of an install where a reply without --done closes no note.
+export const PLAIN_REPLY_CLOSES_NOTHING = "A reply without --done closes no note";
 const TEST_PAGE = /^(negctl|relaytest)-|^test\.html$|^rt\d+\.html$|^cutover-rt\.html$/;
 const ANSWER = /^ANSWER\b([\s\S]*?)(?:\n|$)/;
 const DHAKA_MS = 6 * 3600 * 1000;
@@ -233,6 +236,8 @@ export class Sla {
     this.noListener = new Map();
     /** @type {Set<string> | null} */
     this.flagSet = null;
+    // Whether this install's plain reply ticks every delivered note (probed with flagSet).
+    this.plainTicks = true;
   }
 
   log(message) {
@@ -356,15 +361,16 @@ export class Sla {
       const h = spawnSync(this.c.lavish, ["reply", "--help"], { encoding: "utf8", timeout: 30_000 });
       const out = `${h.stdout || ""}${h.stderr || ""}`;
       this.flagSet = new Set(["--done", "--ended-ok"].filter((f) => out.includes(f)));
+      this.plainTicks = !out.includes(PLAIN_REPLY_CLOSES_NOTHING);
     }
     return this.flagSet;
   }
 
-  // Posts a reply. `--done` ticks exactly that prompt id (the ack passes ACK_NOTICK, so it ticks
-  // nothing); `--ended-ok` answers a Send & End message on an ended page without reopening it.
-  reply(file, text, promptId, ended) {
+  // Posts the ack, which must close no note: plain where a plain reply closes nothing, else with
+  // `--done ACK_NOTICK`. `--ended-ok` answers a Send & End message on an ended page without reopening it.
+  reply(file, text, ended) {
     const cmd = ["reply", file, "--agent-reply", text];
-    if (promptId && this.flags().has("--done")) cmd.push("--done", promptId);
+    if (this.flags().has("--done") && this.plainTicks) cmd.push("--done", ACK_NOTICK);
     if (ended) cmd.push("--ended-ok");
     const r = spawnSync(this.c.lavish, cmd, { encoding: "utf8", timeout: 30_000 });
     return { rc: r.status ?? 1, out: `${r.stdout || ""}${r.stderr || ""}`.trim().slice(-200) };
@@ -427,9 +433,8 @@ export class Sla {
           if (owner !== "captain") {
             const pid = e.prompt_id;
             const how = pid
-              ? `prompt id ${pid}. Handle it, then answer him on the page with exactly this command, which ticks only ` +
-                `this prompt (a reply without --done ticks every open prompt on the page): ` +
-                `lavish-axi reply ${s.file} --done ${pid} --agent-reply "${pid}: <one line>".`
+              ? `prompt id ${pid}. Handle it, then answer him on the page with exactly this command, which closes only ` +
+                `this prompt: lavish-axi reply ${s.file} --done ${pid} --agent-reply "${pid}: <one line>".`
               : `Handle it, then answer him on the page: lavish-axi reply ${s.file} --agent-reply "<one line>".`;
             append(c.macQueue, {
               id: randomUUID().replace(/-/g, "").slice(0, 12),
@@ -465,7 +470,7 @@ export class Sla {
             );
             text = `${PICK_MARK} ${qid}: ${head(answer, 120)} · routed to ${owner}`;
           } else text = `${ACK_MARK} ${dhaka(e.at)} · routed to ${owner}`;
-          const { rc, out } = this.reply(s.file, text, ACK_NOTICK, !live);
+          const { rc, out } = this.reply(s.file, text, !live);
           st.acked[eid] = { at: t.toISOString(), rc };
           save(c.stateFile, st);
           this.log(`ack ${eid} rc=${rc} ${quote(text)} ${rc ? out : ""}`);
