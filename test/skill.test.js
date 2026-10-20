@@ -107,7 +107,7 @@ test("createSkillMarkdown does not bake CLI-owned guidance into the skill", () =
     assert.ok(!md.includes(item), `must not copy poll wake-path rule: ${item.slice(0, 48)}...`);
   }
 
-  assert.ok(!md.includes(POLL_SEND_AND_END_RULE), "must not copy the Send & End rule");
+  assert.ok(!md.includes(POLL_SEND_AND_END_RULE), "must not copy the End rule");
   assert.ok(!md.includes(PLAYBOOK_ROUTER_HELP), "must not copy playbook-router help");
   assert.ok(!md.includes(DESIGN_PRIORITY_RULE), "must not copy the design-priority rule");
   assert.doesNotMatch(md, /self_paint_warning/);
