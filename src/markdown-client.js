@@ -56,7 +56,7 @@ const marked = new Marked({
  * Markdown source to sanitized HTML. The only function whose output is assigned to innerHTML.
  * @param {string} source
  */
-export function renderMarkdown(source) {
+function renderMarkdown(source) {
   return DOMPurify.sanitize(/** @type {string} */ (marked.parse(source, { async: false })));
 }
 
@@ -97,7 +97,7 @@ async function renderMermaid(root) {
   await mermaid.run({ nodes, suppressErrors: true });
 }
 
-export async function renderMarkdownBlocks(root = document) {
+async function renderMarkdownBlocks(root = document) {
   for (const el of root.querySelectorAll(BLOCK_SELECTOR)) {
     if (el.hasAttribute(RENDERED_ATTR)) continue;
     const html = renderMarkdown(blockSource(el));

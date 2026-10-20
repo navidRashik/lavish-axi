@@ -27,12 +27,21 @@ export async function inlineMarkdownSources(html, resolve) {
     last = end;
     const relative = match[2].trim();
     if (!/\.(md|markdown)$/i.test(relative)) continue;
-    const file = await resolve(relative).catch(() => null);
-    const source = file ? await readFile(file, "utf8").catch(() => null) : null;
+    const file = await resolve(relative).catch(nullWhenMissing);
+    const source = file ? await readFile(file, "utf8").catch(nullWhenMissing) : null;
     if (source !== null) parts.push(`<script type="text/markdown">\n${escapeMarkdownScriptBody(source)}\n</script>`);
   }
   parts.push(html.slice(last));
   return parts.join("");
+}
+
+/**
+ * A missing path is an expected answer (null); any other filesystem error propagates.
+ * @param {NodeJS.ErrnoException} error
+ */
+function nullWhenMissing(error) {
+  if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+  throw error;
 }
 
 /**
@@ -62,7 +71,7 @@ function escapeHtml(value) {
  * @param {string} source
  * @param {string} file
  */
-export function markdownTitle(source, file) {
+function markdownTitle(source, file) {
   const heading = /^#[ \t]+(.+?)[ \t#]*$/m.exec(source);
   return heading ? heading[1] : path.basename(file);
 }
@@ -118,19 +127,17 @@ export function markdownRootsFile(stateDirectory) {
 }
 
 /**
- * Configured roots as alias -> absolute directory. A missing or unreadable file means no roots:
- * the route then serves nothing. Entries with an invalid alias or a relative path are dropped.
+ * Configured roots as alias -> absolute directory. A missing file means no roots, so the route
+ * serves nothing; a file that cannot be parsed throws rather than silently disabling every root.
+ * Entries with an invalid alias or a relative path are dropped.
  * @param {string} file
  * @returns {Promise<Map<string, string>>}
  */
 export async function readMarkdownRoots(file) {
   const roots = new Map();
-  let parsed;
-  try {
-    parsed = JSON.parse(await readFile(file, "utf8"));
-  } catch {
-    return roots;
-  }
+  const text = await readFile(file, "utf8").catch(nullWhenMissing);
+  if (text === null) return roots;
+  const parsed = JSON.parse(text);
   const entries = parsed && typeof parsed.roots === "object" && parsed.roots ? Object.entries(parsed.roots) : [];
   for (const [alias, dir] of entries) {
     if (isValidMarkdownRootAlias(alias) && typeof dir === "string" && path.isAbsolute(dir)) roots.set(alias, dir);
@@ -163,7 +170,7 @@ export async function writeMarkdownRoot(file, alias, dir) {
 export async function markdownRoutePath(roots, file) {
   let best = null;
   for (const [alias, dir] of roots) {
-    const realDir = await realpath(dir).catch(() => null);
+    const realDir = await realpath(dir).catch(nullWhenMissing);
     if (!realDir) continue;
     const relative = path.relative(realDir, file);
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;

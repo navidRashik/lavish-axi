@@ -177,9 +177,9 @@ export function defaultWhiteboardAssetsDir() {
   return fileURLToPath(new URL("../dist/whiteboard", import.meta.url));
 }
 
-// The Markdown renderer bundle (marked + DOMPurify + highlight.js, mermaid in lazy chunks),
+// The Markdown renderer bundle (markdown.js: marked + DOMPurify + highlight.js; mermaid.js on demand),
 // produced by `scripts/build.js` into dist/markdown and located like the whiteboard bundle.
-export function defaultMarkdownAssetsDir() {
+function defaultMarkdownAssetsDir() {
   const packaged = fileURLToPath(new URL("./markdown", import.meta.url));
   if (existsSync(packaged)) return packaged;
   return fileURLToPath(new URL("../dist/markdown", import.meta.url));
@@ -1996,7 +1996,10 @@ export async function serve({
         res.status(400).json({ error: "an absolute .md path is required" });
         return;
       }
-      const file = await realpath(requested).catch(() => null);
+      const file = await realpath(requested).catch((error) => {
+        if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+        throw error;
+      });
       if (!file) {
         res.status(404).json({ error: "file not found" });
         return;
