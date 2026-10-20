@@ -43,8 +43,10 @@ import {
   hostForUrl,
   isWildcardHost,
   LOOPBACK_HOST,
-  MANAGED_HUB_HEARTBEAT_MS,
+  clearManagedHub,
+  forgetManagedHub,
   managedHubExpected,
+  managedHubFile,
   recordAllowedHosts,
   recordManagedHub,
   resolveConcreteListenHosts,
@@ -52,7 +54,6 @@ import {
   SPAWNED_SERVER_ENV,
   stateFile,
   stateId,
-  touchManagedHub,
 } from "./paths.js";
 import {
   computeVsCodePluginLocationsUpdate,
@@ -1397,7 +1398,9 @@ export async function stopCommand(args) {
   const { baseUrl, duplicates, foreign } = await findRunningServer(port);
   if (foreign) throw otherInstallationError(port, foreign);
   await stopDuplicateServers(duplicates, { reason: "stop" });
-  return shutdownServerOnPort(port, { baseUrl, currentVersion: VERSION });
+  const stopped = await shutdownServerOnPort(port, { baseUrl, currentVersion: VERSION });
+  await clearManagedHub();
+  return stopped;
 }
 
 export async function shutdownServerOnPort(
@@ -1922,17 +1925,14 @@ async function serverCommand(args) {
     debug,
     extraListenHosts: flagValues(args, "--also-listen"),
   });
-  // A server started directly is this state directory's hub; one a CLI spawned is not.
-  let heartbeat = null;
-  if (process.env[SPAWNED_SERVER_ENV] !== "1") {
-    await recordManagedHub({ pid: process.pid, port });
-    heartbeat = setInterval(() => touchManagedHub(), MANAGED_HUB_HEARTBEAT_MS);
-    heartbeat.unref();
-  }
+  // A server started directly is this state directory's hub; one a CLI spawned is not. The record
+  // goes when the hub exits on its own and stays when a signal ends it.
+  const managed = process.env[SPAWNED_SERVER_ENV] !== "1";
+  if (managed) await recordManagedHub({ pid: process.pid, port });
   try {
     await server.done;
   } finally {
-    clearInterval(heartbeat);
+    if (managed) await forgetManagedHub(process.pid);
   }
   return "";
 }
@@ -2520,16 +2520,21 @@ function unidentifiedListenerError(baseUrl) {
 }
 
 // Resolves to null, spawning nothing, once the managed hub of this state directory answers: a
-// server spawned while the hub restarts would take its port and leave it crash-looping. A hub
-// that stops being expected (gone past its restart grace) is replaced by a spawned server as before.
+// server spawned while the hub restarts would take its port and leave it crash-looping. While the
+// hub's record exists a CLI never spawns; it waits for the hub up to the start timeout.
 async function startServer(port, { alsoListen = [] } = {}) {
   const hubDeadline = Date.now() + resolveServerStartTimeoutMs();
   while (managedHubExpected(port)) {
     if ((await findRunningServer(port)).health) return null;
     if (Date.now() >= hubDeadline) {
-      throw new AxiError(`The managed Lavish hub for port ${port} is running but not answering`, "SERVER_ERROR", [
-        "Check the hub service and its server.log; a CLI does not start a second server while the hub runs",
-      ]);
+      throw new AxiError(
+        `A managed Lavish hub owns port ${port} (${managedHubFile()}) but is not answering`,
+        "SERVER_ERROR",
+        [
+          "Start or check the hub service and its server.log; a CLI does not start a server while that record exists",
+          "If no hub should own this state directory, run `lavish-axi stop` or delete that file",
+        ],
+      );
     }
     await delay(200);
   }
