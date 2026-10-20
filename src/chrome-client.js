@@ -584,10 +584,6 @@ function saveDraft() {
       } else if (response.status === 409 && result?.status === "stale") {
         draftConflict = true;
         showSendHint(DRAFT_CONFLICT_COPY, null, false);
-      } else if (response.status === 409 && result?.status === "sent") {
-        // The save was made before this tab's last send and was not stored; what the tab holds
-        // now (the words typed since) is saved next.
-        scheduleDraftSave();
       } else if (response.status !== 409) {
         scheduleDraftSave(DRAFT_RETRY_DELAY_MS);
       }
