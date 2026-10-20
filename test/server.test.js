@@ -6366,6 +6366,89 @@ test("concurrent same-session opens create only one file watcher", async () => {
   }
 });
 
+async function serveSingleSession(dir, artifact) {
+  const key = sessionKey(artifact);
+  const stateFile = path.join(dir, "state.json");
+  await writeFile(
+    stateFile,
+    `${JSON.stringify({
+      sessions: {
+        [key]: {
+          key,
+          file: artifact,
+          url: `http://localhost:0/session/${key}`,
+          status: "open",
+          pending_prompts: 0,
+          prompts: [],
+          dom_snapshot: "",
+          chat: [],
+          updated_at: new Date().toISOString(),
+        },
+      },
+    })}\n`,
+  );
+  const logs = [];
+  const server = await serve({
+    port: 0,
+    stateFile,
+    version: "9.9.9-test",
+    debug: true,
+    log: (line) => logs.push(line),
+  });
+  return { key, logs, server, base: `http://127.0.0.1:${server.port}` };
+}
+
+test("a session whose artifact directory is gone gets no watcher until the directory returns", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-watch-gone-"));
+  const pageDir = path.join(dir, "page");
+  const artifact = path.join(pageDir, "artifact.html");
+  const { key, logs, server, base } = await serveSingleSession(dir, artifact);
+  try {
+    await fetch(`${base}/session/${key}`).then((response) => response.arrayBuffer());
+    assert.equal(logs.filter((line) => line.includes(`watch session=${key}`)).length, 0);
+
+    await mkdir(pageDir);
+    await writeFile(artifact, "<!doctype html><html><body>back</body></html>");
+    await fetch(`${base}/session/${key}`).then((response) => response.arrayBuffer());
+    assert.equal(logs.filter((line) => line.includes(`watch session=${key}`)).length, 1);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("deleting a watched artifact's directory closes its watcher instead of climbing to the parent", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-watch-unlinkdir-"));
+  const pageDir = path.join(dir, "page");
+  const artifact = path.join(pageDir, "artifact.html");
+  await mkdir(pageDir);
+  await writeFile(artifact, "<!doctype html><html><body>here</body></html>");
+  const { key, logs, server, base } = await serveSingleSession(dir, artifact);
+  try {
+    await fetch(`${base}/session/${key}`).then((response) => response.arrayBuffer());
+    assert.equal(logs.filter((line) => line.includes(`watch session=${key}`)).length, 1);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    await rm(pageDir, { recursive: true, force: true });
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !logs.some((line) => line.includes(`watch closed session=${key}`))) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(
+      logs.some((line) => line.includes(`watch closed session=${key}`)),
+      "watcher should close once its directory is gone",
+    );
+
+    await mkdir(pageDir);
+    await writeFile(artifact, "<!doctype html><html><body>back</body></html>");
+    await fetch(`${base}/session/${key}`).then((response) => response.arrayBuffer());
+    assert.equal(logs.filter((line) => line.includes(`watch session=${key}`)).length, 2);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("/health and the landing page stay responsive after opening two back-to-back sessions", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-back-to-back-"));
   const a = path.join(dir, "a.html");
