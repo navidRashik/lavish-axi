@@ -9,7 +9,7 @@ import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { Marked } from "marked";
 
-import { mermaidThemeFor } from "./markdown-theme.js";
+import { mermaidConfigFor, mermaidThemeFor } from "./markdown-theme.js";
 
 const BLOCK_SELECTOR = 'script[type="text/markdown"], [data-lavish-markdown]';
 const RENDERED_ATTR = "data-lavish-markdown-rendered";
@@ -147,17 +147,7 @@ async function syncSurfaceThemes() {
   mermaid ??= (await import(new URL("./mermaid.js", import.meta.url).href)).default;
   for (const [theme, group] of Object.entries(byTheme)) {
     if (!group.length) continue;
-    // Natural size, not shrunk to the column: a wide flowchart scrolls instead of becoming unreadable.
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme,
-      flowchart: { useMaxWidth: false },
-      sequence: { useMaxWidth: false },
-      class: { useMaxWidth: false },
-      state: { useMaxWidth: false },
-      er: { useMaxWidth: false },
-    });
+    mermaid.initialize(mermaidConfigFor(/** @type {"dark" | "default"} */ (theme)));
     await mermaid.run({ nodes: group, suppressErrors: true });
     for (const node of group) mermaidThemes.set(node, theme);
   }
