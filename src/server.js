@@ -142,6 +142,17 @@ const BROWSER_DISCONNECT_GRACE_MS = 10_000;
 // so active documents stay opaque-origin even when they are top-level.
 const ARTIFACT_CONTENT_SECURITY_POLICY =
   "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads";
+// A document request whose load token is not the current one (the frame reloaded itself, a link
+// inside the artifact pointed back at its own document, or another tab took the review over).
+// The page asks the chrome around it to begin a fresh load, which puts the current artifact back
+// without the reviewer doing anything; the text is what a frame with no chrome around it shows.
+const EXPIRED_ARTIFACT_LOAD_HTML =
+  '<!doctype html><title>Artifact load expired</title><p>This artifact load is no longer current. Reload Lavish to continue.</p><script>parent.postMessage({ type: "lavish:artifactLoadExpired" }, "*");</script>';
+
+/** @param {import("express").Response} res */
+function sendExpiredArtifactLoad(res) {
+  res.status(409).type("html").send(EXPIRED_ARTIFACT_LOAD_HTML);
+}
 // Sweep orphaned/expired attachments periodically, not just at startup: a
 // detached server can run for days, and an upload whose /prompts follow-up never
 // arrived would otherwise linger until the next restart.
@@ -1681,23 +1692,13 @@ export async function serve({
       }
       if (refuseNonHtmlArtifact(beforeRead.session, res)) return;
       if (!beforeRead.valid) {
-        res
-          .status(409)
-          .type("html")
-          .send(
-            "<!doctype html><title>Artifact load expired</title><p>This artifact load is no longer current. Reload Lavish to continue.</p>",
-          );
+        sendExpiredArtifactLoad(res);
         return;
       }
       const html = await readFile(beforeRead.session.file, "utf8");
       const verified = await store.verifyArtifactLoad(key, token, revision);
       if (!verified?.valid) {
-        res
-          .status(409)
-          .type("html")
-          .send(
-            "<!doctype html><title>Artifact load expired</title><p>This artifact load is no longer current. Reload Lavish to continue.</p>",
-          );
+        sendExpiredArtifactLoad(res);
         return;
       }
       res.type("html").send(injectLavishSdk(html, key, verified.artifact_revision, verified.artifact_load_token));
