@@ -83,6 +83,26 @@ await esbuild.build({
   },
 });
 
+// Markdown renderer: marked + DOMPurify + highlight.js in markdown.js, and mermaid in one mermaid.js
+// that markdown.js imports only when a page has a mermaid fence. Neither is split, so a viewer makes
+// at most two script requests. Served from /markdown-assets/ so rendering needs no network.
+await rm("dist/markdown", { recursive: true, force: true });
+await esbuild.build({
+  entryPoints: { markdown: "src/markdown-client.js", mermaid: "src/markdown-mermaid.js" },
+  outdir: "dist/markdown",
+  bundle: true,
+  minify: true,
+  format: "esm",
+  platform: "browser",
+  define: { "process.env.NODE_ENV": '"production"' },
+});
+await esbuild.build({
+  entryPoints: { markdown: "src/markdown.css" },
+  outdir: "dist/markdown",
+  bundle: true,
+  minify: true,
+});
+
 // Excalidraw lazily fetches canvas fonts from `EXCALIDRAW_ASSET_PATH/fonts/`.
 // Vendor every family except Xiaolai (12 MB of CJK glyphs; those fall back to
 // Excalidraw's CDN fallback or the system font when missing locally).
