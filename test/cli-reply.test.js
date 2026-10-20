@@ -384,6 +384,11 @@ test("a reply closes only the notes --done names, and refuses a --done id that m
       assert.doesNotMatch(refused.stdout, /p-one/, "only the unmatched id is named");
       assert.doesNotMatch(refused.stdout, /status: sent/);
     }
+    const mixed = await runCli(["reply", artifact, "--agent-reply", "Should not land.", "--done", "all,q-unknown"], {
+      env,
+    });
+    assert.notEqual(mixed.status, 0, "--done all mixed with an id is refused, not widened to all");
+    assert.match(mixed.stdout, /cannot be combined/);
     assert.deepEqual(await state(), { open: ["p-one", "p-two"], replies: ["Working on both."] });
 
     const answered = await runCli(["reply", artifact, "--agent-reply", "p-one: done.", "--done", "p-one"], { env });
