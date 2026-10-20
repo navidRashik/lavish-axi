@@ -1,0 +1,28 @@
+# One long-lived Lavish server as a systemd user service, so review pages and agents always find it
+# on the same port and it never shuts itself down while idle.
+#
+# Install:
+#   cp lavish-hub.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now lavish-hub
+# Keep it running after logout: loginctl enable-linger "$USER"
+#
+# PATH must reach `lavish-axi` and the `node` it runs on; adjust it to your install.
+# To serve beyond loopback, put LAVISH_AXI_HOST / LAVISH_AXI_ALLOWED_HOSTS in a drop-in
+# (systemctl --user edit lavish-hub) rather than here; see the README's Allowed hosts section.
+
+[Unit]
+Description=Lavish Editor server
+
+[Service]
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LAVISH_AXI_PORT=4387
+Environment=LAVISH_AXI_IDLE_TIMEOUT_MS=off
+Environment=LAVISH_AXI_NO_OPEN=1
+Environment=LAVISH_AXI_TELEMETRY=0
+ExecStart=/usr/bin/env lavish-axi server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
