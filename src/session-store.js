@@ -720,13 +720,25 @@ export class SessionStore {
       // Done (docs/delivery-acks.md), stamped in the same write as the reply with the reply's time.
       // Named notes (`reply --done`) are exactly what gets stamped; otherwise the reply answers what
       // the agent has seen this round, never an entry no poll has delivered.
-      // The agent entry names the notes this `--done` stamped (`done_ids`), so a reader of state.json
-      // can tell a deliberate multi-note reply from a plain one; a plain reply carries none.
+      // The agent entry names the notes this `--done` answered (`done_ids`), so a reader of state.json
+      // can tell a deliberate multi-note reply from a plain one; a plain reply carries none. A named
+      // note a plain reply already ticked keeps that stamp and is listed here: the plain stamp says
+      // nothing about which note it answered. A note an earlier `done_ids` lists is not listed again.
       const doneIds = [];
       if (done) {
-        const open = new Set((session.chat || []).filter((entry) => entry?.role === "user" && !entry.done_at));
-        stampDoneByIds(session.chat, at, done);
-        for (const entry of open)
+        const chat = session.chat || [];
+        const named = Array.isArray(done) ? new Set(done) : null;
+        const listedBefore = new Set();
+        for (const entry of chat)
+          if (entry?.role === "agent" && Array.isArray(entry.done_ids))
+            for (const id of entry.done_ids) listedBefore.add(id);
+        const listed = chat.filter(
+          (entry) =>
+            entry?.role === "user" &&
+            (!entry.done_at || (named?.has(entry.prompt_id) && !listedBefore.has(entry.prompt_id))),
+        );
+        stampDoneByIds(chat, at, done);
+        for (const entry of listed)
           if (entry.done_at && typeof entry.prompt_id === "string") doneIds.push(entry.prompt_id);
       } else stampDone(session.chat, at, normalizeRevision(session.closed_delivery_seq));
       const reply = { role: "agent", text: String(text || ""), at, ...(doneIds.length ? { done_ids: doneIds } : {}) };
