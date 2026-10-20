@@ -234,6 +234,8 @@ export class SessionStore {
       return { ended: true, ended_by: session.ended_by };
     }
     let normalized = prompts.map(normalizePrompt);
+    // Prompts an end took from the stored draft rather than from this request.
+    const fromDraft = new Set(normalized.slice(sent.length).map((entry) => entry.prompt));
     if (!restoring) {
       const acknowledgedIds = new Set(
         [
@@ -305,6 +307,9 @@ export class SessionStore {
           continue;
         }
         const plan = planLayoutWarningPrompt(warnings, prompt, revision);
+        // A draft's layout-warning fix prepared on an older artifact revision is out of date, and
+        // nobody is left to re-prepare it: it is dropped so the draft's other words still go over.
+        if (plan.conflicts.length > 0 && fromDraft.has(prompt)) continue;
         for (const id of plan.conflicts) conflicts.add(id);
         layoutPlans.push({ prompt, ...plan });
       }
@@ -752,18 +757,19 @@ export class SessionStore {
       const wasOpen = session.status !== "ended";
       // The reviewer's End comes from the tab that holds their words and sends them itself, so the
       // draft it leaves behind is already handed over, unless the draft is another tab's newer one
-      // the ending tab never saw. Any other end hands the draft over with it; a draft the queue
-      // refuses (a layout warning that changed) stays stored rather than dropped.
+      // the ending tab never saw. Any other end hands the draft over with it. A handover the queue
+      // refuses ends nothing: the session stays open and the draft stored, so no words are lost.
       if (session.status !== "ended" && session.draft && (endedBy !== "user" || draftIsAnotherTabs(session, from))) {
         const committed = await this.#queuePromptsLocked(
           key,
           { prompts: [], endSession: true },
           { ...attachmentOptions, withDraft: true },
         );
-        if (committed && !committed.conflict && !committed.rejected) {
-          state = await this.readState();
-          session = state.sessions[key];
+        if (!committed || committed.conflict || committed.rejected) {
+          return { refused: true, warning_ids: committed?.warning_ids, rejected: committed?.rejected };
         }
+        state = await this.readState();
+        session = state.sessions[key];
       }
       if (endedBy === "user" && session.draft) {
         session.draft = null;

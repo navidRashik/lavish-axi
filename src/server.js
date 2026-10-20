@@ -815,6 +815,14 @@ export async function serve({
     maxPerPrompt: attachmentConfig.maxPerPrompt,
     maxPromptBytes: attachmentConfig.maxPromptBytes,
   };
+  // An end whose draft handover the queue refused ended nothing; the reviewer's words are still
+  // stored and the session is still open.
+  const refusedEndBody = (refusal) => ({
+    status: "refused",
+    error: "the unsent draft could not be handed over, so the session was not ended",
+    warning_ids: refusal.warning_ids,
+    rejected: refusal.rejected,
+  });
   // The store owns the ONE shared lock covering BOTH state consistency AND the
   // attachment lifecycle. It serializes every state.json read-modify-write
   // internally (E1); the server routes its attachment disk sections - upload
@@ -1406,6 +1414,10 @@ export async function serve({
         { tab: req.body?.draft_tab, base: req.body?.draft_base },
         promptAttachmentOptions,
       );
+      if (session?.refused) {
+        res.status(409).json(refusedEndBody(session));
+        return;
+      }
       clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, events);
       events.emit("ended", req.params.key, session?.ended_by);
       res.json({ status: "ended" });
@@ -1623,6 +1635,10 @@ export async function serve({
       }
       const key = sessionKey(file);
       const session = await store.endSession(key, "agent", {}, promptAttachmentOptions);
+      if (session?.refused) {
+        res.status(409).json(refusedEndBody(session));
+        return;
+      }
       clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
       events.emit("ended", key, session?.ended_by);
       res.json({ status: "ended" });

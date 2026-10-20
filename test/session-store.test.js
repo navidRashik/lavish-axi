@@ -3176,6 +3176,102 @@ test("a draft image whose upload is gone is left out with a note, and the End st
   });
 });
 
+// A draft holding composer text and a layout-warning fix request prepared on an artifact revision
+// the page has since moved past (the warning resolved on the next load).
+async function saveDraftWithStaleLayoutFix(store, key, extra = {}) {
+  const firstLoad = await beginArtifactLoad(store, key);
+  const recorded = await store.recordLayoutDiagnostics(
+    key,
+    diagnosticPayload(firstLoad, 1, {
+      complete: true,
+      viewport_width: 1440,
+      findings: [{ selector: "p", kind: "clipped-text", axis: "vertical", overflowPx: 27, severity: "error" }],
+    }),
+  );
+  const prepared = await store.prepareLayoutWarningFixes(key, [recorded.warnings[0].id]);
+  const layoutFix = { ...prepared.prompt, uid: "", selector: "", tag: "layout-warnings", prompt_id: "lw-1" };
+  await store.saveDraft(key, { prompts: [layoutFix], composer: "unrelated words", ...extra });
+  const secondLoad = await beginArtifactLoad(store, key);
+  await store.recordLayoutDiagnostics(
+    key,
+    diagnosticPayload(secondLoad, 1, {
+      complete: true,
+      target_presence_complete: true,
+      viewport_width: 1440,
+      findings: [],
+    }),
+  );
+}
+
+test("an End that hands over a draft delivers its text and drops only a stale layout-warning fix", async () => {
+  for (const { label, end } of [
+    { label: "agent End", end: (store, key) => store.endSession(key, "agent") },
+    {
+      label: "empty End from a stale tab",
+      end: (store, key) => store.endSession(key, "user", { tab: "tab-old", base: 0 }),
+    },
+    {
+      label: "End with a batch from a stale tab",
+      end: (store, key) =>
+        store.queuePrompts(key, {
+          endSession: true,
+          draft_tab: "tab-old",
+          draft_base: 0,
+          prompts: [draftNote("own note", "o-1")],
+        }),
+    },
+  ]) {
+    await withSyntheticSession(async ({ store, key }) => {
+      await saveDraftWithStaleLayoutFix(store, key, { tab: "tab-new", revision: 1, base: 0 });
+      const result = await end(store, key);
+      assert.equal(result.conflict, undefined, label);
+
+      const delivered = feedbackResult(await store.takeFeedback(key)).prompts.map((prompt) => prompt.prompt);
+      assert.ok(delivered.includes("unrelated words"), `${label}: ${JSON.stringify(delivered)}`);
+      assert.equal(
+        delivered.some((text) => /layout/i.test(text)),
+        false,
+        `${label}: ${JSON.stringify(delivered)}`,
+      );
+      const session = await store.findByKey(key);
+      assert.equal(session.status, "ended", label);
+      assert.equal(session.draft, null, label);
+    });
+  }
+});
+
+test("an End whose draft handover is refused leaves the session open and the draft stored", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    const image = unknownAttachmentId(5);
+    await store.saveDraft(key, {
+      prompts: [draftShot(image)],
+      composer: "keep me",
+      tab: "tab-new",
+      revision: 1,
+      base: 0,
+    });
+    // The upload resolves when the draft is read and is gone by the time the batch is validated.
+    let calls = 0;
+    const vanishing = {
+      ...draftImageResolver([image]),
+      resolveAttachment: async (_key, id) =>
+        ++calls === 1 ? draftImageResolver([image]).resolveAttachment(_key, id) : null,
+    };
+
+    for (const [endedBy, from] of [
+      ["agent", {}],
+      ["user", { tab: "tab-old", base: 0 }],
+    ]) {
+      calls = 0;
+      const result = await store.endSession(key, endedBy, from, vanishing);
+      assert.equal(result.refused, true, `${endedBy} end`);
+      const session = await store.findByKey(key);
+      assert.equal(session.status, "open", `${endedBy} end`);
+      assert.equal(session.draft.composer, "keep me", `${endedBy} end`);
+    }
+  });
+});
+
 test("a send takes the notes and message it delivered out of the stored draft", async () => {
   await withSyntheticSession(async ({ store, key }) => {
     await store.saveDraft(key, { prompts: [draftNote("sent", "d-1"), draftNote("kept", "d-2")], composer: "hello" });

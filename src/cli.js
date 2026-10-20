@@ -844,6 +844,11 @@ async function endCommand(args) {
       `Run \`lavish-axi end ${file} --force\` only if the user asked you to end it`,
     ]);
   }
+  if (payload?.status === "refused") {
+    throw new AxiError(payload.error, "END_REFUSED", [
+      `The session is still open and the reviewer's unsent draft is kept; run \`lavish-axi poll ${file}\` to keep listening`,
+    ]);
+  }
   if (!response.ok) throw new AxiError(`Lavish Editor request failed: ${response.status}`, "SERVER_ERROR");
   return { session: { file: absolute, status: payload.status || "ended" } };
 }
