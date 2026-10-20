@@ -4503,10 +4503,50 @@ async function reloadChromeForOutdatedBanner() {
   }
 }
 
+// The frame is showing the server's expired-load page instead of the artifact. Begin a fresh load:
+// a tab that still owns the review gets a current token and the artifact back; a tab another one
+// took the review from takes it back, because this tab is the one the reviewer is looking at and
+// its frame is empty. Queued prompts live in sessionStorage and survive the takeover reload.
+// The takeovers this tab made are kept in sessionStorage too, because the reload resets every
+// module variable: at most one per cooldown and three per span, after which the takeover banner
+// stays up for the reviewer. Without that, a self-refreshing artifact under a tab that keeps
+// taking the review over would reload this chrome every few seconds.
+const EXPIRED_LOAD_RECOVERY_WINDOW_MS = 10_000;
+const EXPIRED_LOAD_TAKEOVER_LIMIT = 3;
+const EXPIRED_LOAD_TAKEOVER_SPAN_MS = 5 * 60_000;
+const expiredLoadTakeoverStorageKey = "lavish-axi:expired-load-recovery:" + key;
+let lastExpiredLoadRecoveryAt = -Infinity;
+function recentExpiredLoadTakeovers(now) {
+  const stored = loadJsonState(expiredLoadTakeoverStorageKey, []);
+  return (Array.isArray(stored) ? stored : []).filter(
+    (at) => typeof at === "number" && at <= now && now - at < EXPIRED_LOAD_TAKEOVER_SPAN_MS,
+  );
+}
+async function recoverExpiredArtifactLoad() {
+  if (ended) return;
+  const now = Date.now();
+  if (now - lastExpiredLoadRecoveryAt < EXPIRED_LOAD_RECOVERY_WINDOW_MS) return;
+  lastExpiredLoadRecoveryAt = now;
+  const reloaded = await resetFrame().catch(() => false);
+  if (reloaded || ended || !handoffBanner || handoffBanner.hidden) return;
+  const takeovers = recentExpiredLoadTakeovers(now);
+  if (takeovers.length >= EXPIRED_LOAD_TAKEOVER_LIMIT) return;
+  if (now - (takeovers.at(-1) ?? -Infinity) < EXPIRED_LOAD_RECOVERY_WINDOW_MS) return;
+  saveJsonState(expiredLoadTakeoverStorageKey, [...takeovers, now]);
+  await flushWhiteboardsBeforeChromeReload();
+  location.reload();
+}
+
 window.addEventListener("message", (event) => {
   if (event.source !== frame.contentWindow) return;
 
   const msg = event.data || {};
+  // The expired-load page carries no token by construction: it is what the server answers when
+  // the frame asked with one that is no longer current.
+  if (msg.type === "lavish:artifactLoadExpired") {
+    recoverExpiredArtifactLoad();
+    return;
+  }
   const messageToken = String(msg.artifact_load_token || "");
   if (messageToken !== artifactLoadToken) {
     // A pass can be stamped by the load that just lost a token race. Ask the current artifact
