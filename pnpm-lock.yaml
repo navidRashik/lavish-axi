@@ -50,6 +50,9 @@ importers:
       c8:
         specifier: ^12.0.0
         version: 12.0.0
+      dompurify:
+        specifier: 3.4.17
+        version: 3.4.17
       esbuild:
         specifier: ^0.28.0
         version: 0.28.0
@@ -62,6 +65,12 @@ importers:
       globals:
         specifier: ^17.6.0
         version: 17.6.0
+      highlight.js:
+        specifier: 11.12.0
+        version: 11.12.0
+      marked:
+        specifier: 18.1.1
+        version: 18.1.1
       mermaid:
         specifier: 11.12.1
         version: 11.12.1
@@ -1372,6 +1381,10 @@ packages:
     resolution:
       { integrity: sha512-zhlUV12GsaRzMsf9q5M254YhA4+VuF0fG+QFqu6aYpoGlKtz+w8//jBcGVYBgQkR5GHjUomejY84AV+/uPbWdw== }
 
+  dompurify@3.4.17:
+    resolution:
+      { integrity: sha512-B/pSlYVHQ58kqISD/yDjuJ1yfzI34m1gF4lAod2bwSRhiN4K5Cl3H8Af7hqB2PmTL911tdEudnnXn5FnhRoz0w== }
+
   dunder-proto@1.0.1:
     resolution:
       { integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A== }
@@ -1652,6 +1665,11 @@ packages:
       { integrity: sha512-ej4AhfhfL2Q2zpMmLo7U1Uv9+PyhIZpgQLGT1F9miIGmiCJIoCgSmczFdrc97mWT4kVY72KA+WnnhJ5pghSvSg== }
     engines: { node: ">= 0.4" }
 
+  highlight.js@11.12.0:
+    resolution:
+      { integrity: sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg== }
+    engines: { node: ">=12.0.0" }
+
   html-escaper@2.0.2:
     resolution:
       { integrity: sha512-H2iMtd0I4Mt5eYiapRdIDjp+XzelXQ0tFE4JS7YFwFevXXMmOp9myNrUvCg0D6ws8iqkRPBfKHgbwig1SmlLfg== }
@@ -1877,6 +1895,12 @@ packages:
   marked@16.4.2:
     resolution:
       { integrity: sha512-TI3V8YYWvkVf3KJe1dRkpnjs68JUPyEa5vjKrp1XEEJUAOaQc+Qj+L1qWbPd0SJuAdQkFU0h73sXXqwDYxsiDA== }
+    engines: { node: ">= 20" }
+    hasBin: true
+
+  marked@18.1.1:
+    resolution:
+      { integrity: sha512-zEGgrtUG8crk+TrMacJSVABU4DYDDkS8uqgU3ohrn/2fW9C2AEfUrO3m6IhpIpQpl7YcVpiXXC9cSMWDANT3dg== }
     engines: { node: ">= 20" }
     hasBin: true
 
@@ -3521,6 +3545,10 @@ snapshots:
     optionalDependencies:
       "@types/trusted-types": 2.0.7
 
+  dompurify@3.4.17:
+    optionalDependencies:
+      "@types/trusted-types": 2.0.7
+
   dunder-proto@1.0.1:
     dependencies:
       call-bind-apply-helpers: 1.0.2
@@ -3792,6 +3820,8 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
+  highlight.js@11.12.0: {}
+
   html-escaper@2.0.2: {}
 
   http-errors@2.0.1:
@@ -3936,6 +3966,8 @@ snapshots:
       semver: 7.8.5
 
   marked@16.4.2: {}
+
+  marked@18.1.1: {}
 
   math-intrinsics@1.1.0: {}
 

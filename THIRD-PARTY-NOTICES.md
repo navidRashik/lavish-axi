@@ -50,6 +50,17 @@ SOFTWARE.
 
 The Xiaolai family (CJK glyphs) is intentionally not vendored; Excalidraw falls back to its CDN or the system font for those glyphs.
 
+## Bundled into `dist/markdown/` (Markdown renderer)
+
+| Package                                         | License               | Copyright                                                    |
+| ----------------------------------------------- | --------------------- | ------------------------------------------------------------ |
+| `marked`                                        | MIT                   | Copyright (c) 2018+, MarkedJS; 2011-2018 Christopher Jeffrey |
+| `dompurify`                                     | Apache-2.0 OR MPL-2.0 | Copyright (c) Cure53 and other contributors                  |
+| `highlight.js` (`lib/common`, `github` themes)  | BSD-3-Clause          | Copyright (c) 2006, Ivan Sagalaev                            |
+| `mermaid` (exact 11.12.1, lazily loaded chunks) | MIT                   | Copyright (c) 2014 - 2022 Knut Sveidqvist                    |
+
+DOMPurify is used under its Apache-2.0 option. highlight.js is distributed under the BSD 3-Clause license: redistributions must retain the copyright notice above, this condition, and the disclaimer that the software is provided "as is" without warranty of any kind, and the names of its contributors may not be used to endorse derived products without permission.
+
 ## Bundled into `dist/design/` (pre-existing)
 
 | Asset                                             | License |

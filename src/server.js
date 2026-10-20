@@ -82,7 +82,23 @@ import {
   stateId,
 } from "./paths.js";
 import { detectTailscale } from "./tailscale.js";
-import { artifactTreeRoot, isArtifactPathError, isHtmlPath, resolveAllowedArtifactFile } from "./artifact-path.js";
+import {
+  artifactTreeRoot,
+  isArtifactPath,
+  isArtifactPathError,
+  isHtmlPath,
+  isMarkdownPath,
+  resolveAllowedArtifactFile,
+} from "./artifact-path.js";
+import {
+  inlineMarkdownSources,
+  isServableMarkdownRoutePath,
+  isValidMarkdownRootAlias,
+  markdownRootsFile,
+  markdownRoutePath,
+  readMarkdownRoots,
+  readMarkdownShellHtml,
+} from "./markdown-page.js";
 import { canonicalFile, SessionStore, sessionKey } from "./session-store.js";
 import { AsyncMutex } from "./async-mutex.js";
 import { FORK_ADOPT_VERSION, FORK_BUILD_ID, isForkBuildRequest } from "./fork-build.js";
@@ -177,6 +193,14 @@ export function defaultWhiteboardAssetsDir() {
   const packaged = fileURLToPath(new URL("./whiteboard", import.meta.url));
   if (existsSync(packaged)) return packaged;
   return fileURLToPath(new URL("../dist/whiteboard", import.meta.url));
+}
+
+// The Markdown renderer bundle (markdown.js: marked + DOMPurify + highlight.js; mermaid.js on demand),
+// produced by `scripts/build.js` into dist/markdown and located like the whiteboard bundle.
+function defaultMarkdownAssetsDir() {
+  const packaged = fileURLToPath(new URL("./markdown", import.meta.url));
+  if (existsSync(packaged)) return packaged;
+  return fileURLToPath(new URL("../dist/markdown", import.meta.url));
 }
 
 // Whiteboard scene saves carry full Excalidraw scenes (and, at queue time, a
@@ -317,6 +341,7 @@ export async function serve({
   extraListenHosts = [],
   bindRecoveryDelaysMs = BIND_RECOVERY_DELAYS_MS,
   whiteboardAssetsDir = defaultWhiteboardAssetsDir(),
+  markdownAssetsDir = defaultMarkdownAssetsDir(),
 } = {}) {
   // Keep the transport dependency off fast metadata paths such as `--version`.
   const { WebSocket, WebSocketServer } = await import("ws");
@@ -761,12 +786,30 @@ export async function serve({
     });
   }
 
-  // Pre-fix state.json can still name a non-HTML path. Never read that file back to a caller.
-  function refuseNonHtmlArtifact(session, res) {
-    if (isHtmlPath(session.file)) return false;
+  // Pre-fix state.json can still name a non-artifact path. Never read that file back to a caller.
+  function refuseNonArtifact(session, res) {
+    if (isArtifactPath(session.file)) return false;
     res.status(403).send("Forbidden");
     return true;
   }
+
+  // Export and share inline an HTML file's local assets; a Markdown artifact has no such file.
+  function refuseNonHtmlArtifact(session, res) {
+    if (refuseNonArtifact(session, res)) return true;
+    if (isHtmlPath(session.file)) return false;
+    res.status(409).json({ error: "export and share support HTML artifacts only" });
+    return true;
+  }
+
+  // The HTML a session's artifact is served as: the rendered shell for Markdown, else the file with
+  // each data-lavish-markdown-src element's .md (confined to the artifact tree) inlined.
+  async function readArtifactHtml(file) {
+    if (isMarkdownPath(file)) return readMarkdownShellHtml(file);
+    const root = artifactTreeRoot(file);
+    return inlineMarkdownSources(await readFile(file, "utf8"), (relative) => resolveArtifactAsset(root, relative));
+  }
+
+  const markdownRoots = () => readMarkdownRoots(markdownRootsFile(path.dirname(stateFile)));
 
   if (!allowAnyHostname) {
     app.use((req, res, next) => {
@@ -1600,10 +1643,10 @@ export async function serve({
         return;
       }
       const session = chromeLoad.session;
-      if (refuseNonHtmlArtifact(session, res)) return;
+      if (refuseNonArtifact(session, res)) return;
       await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
       trackStateDir(session);
-      const artifactHtml = await readFile(session.file, "utf8").catch(() => "");
+      const artifactHtml = await readArtifactHtml(session.file).catch(() => "");
       const { faviconTag, title } = extractArtifactHead(artifactHtml);
       // Nothing legitimately frames the review chrome - it is the top-level
       // page, and shares/exports ship standalone HTML rather than embedding it.
@@ -1690,12 +1733,12 @@ export async function serve({
         sendSessionNotFound(req, res);
         return;
       }
-      if (refuseNonHtmlArtifact(beforeRead.session, res)) return;
+      if (refuseNonArtifact(beforeRead.session, res)) return;
       if (!beforeRead.valid) {
         sendExpiredArtifactLoad(res);
         return;
       }
-      const html = await readFile(beforeRead.session.file, "utf8");
+      const html = await readArtifactHtml(beforeRead.session.file);
       const verified = await store.verifyArtifactLoad(key, token, revision);
       if (!verified?.valid) {
         sendExpiredArtifactLoad(res);
@@ -1717,11 +1760,17 @@ export async function serve({
         sendSessionNotFound(req, res);
         return;
       }
-      if (refuseNonHtmlArtifact(session, res)) return;
+      if (refuseNonArtifact(session, res)) return;
       const root = artifactTreeRoot(session.file);
       const file = await resolveArtifactAsset(root, assetPath);
       if (!file) {
         res.status(403).send("Forbidden");
+        return;
+      }
+      // A navigation to a Markdown file beside the artifact (a link in any page) opens rendered;
+      // a script fetch still gets the raw text.
+      if (isMarkdownPath(file) && wantsHtml(req) && existsSync(file)) {
+        res.type("html").send(await readMarkdownShellHtml(file));
         return;
       }
       res.sendFile(file, { dotfiles: "allow" });
@@ -1919,6 +1968,96 @@ export async function serve({
     }
   });
 
+  // Markdown renderer bundle. Module scripts and their chunks are fetched with CORS from the
+  // artifact's opaque origin, so this public static route answers Access-Control-Allow-Origin: *.
+  app.get(/^\/markdown-assets\/(.+)$/, async (req, res, next) => {
+    try {
+      const file = await resolveArtifactAsset(markdownAssetsDir, req.params[0]);
+      if (!file) {
+        res.status(403).send("Forbidden");
+        return;
+      }
+      if (!existsSync(file)) {
+        res
+          .status(404)
+          .send(existsSync(markdownAssetsDir) ? "Not found" : "Markdown bundle missing - run `pnpm run build`");
+        return;
+      }
+      res.setHeader("access-control-allow-origin", "*");
+      res.setHeader("cache-control", "no-cache");
+      res.sendFile(file, { dotfiles: "allow" });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Read-only Markdown viewer: `/md/<alias>/<path>` renders a .md file (or serves an image it
+  // references) from a directory listed in md-roots.json, with no review session. Hidden
+  // segments, traversal and symlinks leaving the root are refused.
+  app.get(/^\/md\/([^/]+)\/(.+)$/, async (req, res, next) => {
+    try {
+      res.setHeader("content-security-policy", ARTIFACT_CONTENT_SECURITY_POLICY);
+      let alias;
+      let relative;
+      try {
+        alias = decodeURIComponent(req.params[0]);
+        relative = decodeURIComponent(req.params[1]);
+      } catch {
+        res.status(400).send("Bad path");
+        return;
+      }
+      const rootDir = isValidMarkdownRootAlias(alias) ? (await markdownRoots()).get(alias) : undefined;
+      if (!rootDir) {
+        res.status(404).send("Unknown Markdown root");
+        return;
+      }
+      const file = isServableMarkdownRoutePath(relative) ? await resolveArtifactAsset(rootDir, relative) : null;
+      if (!file) {
+        res.status(403).send("Forbidden");
+        return;
+      }
+      if (!existsSync(file)) {
+        res.status(404).send("Not found");
+        return;
+      }
+      if (isMarkdownPath(file)) {
+        res.type("html").send(await readMarkdownShellHtml(file));
+        return;
+      }
+      res.sendFile(file, { dotfiles: "allow" });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // The tailnet URL `/md/` serves a Markdown file at, for `lavish-axi view`. Resolves only against
+  // roots already in md-roots.json; it never adds one.
+  app.get("/api/markdown-url", async (req, res, next) => {
+    try {
+      const requested = String(req.query.file || "");
+      if (!isMarkdownPath(requested) || !path.isAbsolute(requested)) {
+        res.status(400).json({ error: "an absolute .md path is required" });
+        return;
+      }
+      const file = await realpath(requested).catch((error) => {
+        if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+        throw error;
+      });
+      if (!file) {
+        res.status(404).json({ error: "file not found" });
+        return;
+      }
+      const routePath = await markdownRoutePath(await markdownRoots(), file);
+      if (!routePath) {
+        res.status(404).json({ error: "no Markdown root holds this file" });
+        return;
+      }
+      res.json({ url: `http://${hostForUrl(resolvedLinkHost)}:${publicPort}${routePath}` });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   // Mermaid sources for a session's artifact, extracted from the HTML on disk
   // in document order so `index` matches the browser's `.mermaid` element
   // order. The hash feeds whiteboard staleness detection.
@@ -1929,7 +2068,7 @@ export async function serve({
         res.status(404).json({ error: "session not found" });
         return;
       }
-      if (refuseNonHtmlArtifact(session, res)) return;
+      if (refuseNonArtifact(session, res)) return;
       const html = await readFile(session.file, "utf8").catch(() => "");
       const extracted = extractMermaidSources(html);
       const usesLibraries = extracted.some(({ source }) => parseLibraryIconDirectives(source).length > 0);
