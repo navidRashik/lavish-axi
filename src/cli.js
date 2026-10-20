@@ -34,6 +34,7 @@ import {
   updateHtmlApp,
 } from "./html-app.js";
 import { localInterfaceAddresses } from "./local-address.js";
+import { openReviewUrl } from "./browser-open.js";
 import { FORK_BUILD_HEADER, FORK_BUILD_ID, forkServerVersion } from "./fork-build.js";
 import {
   allowedHostsForSpawn,
@@ -363,6 +364,7 @@ export function createOpenOutput({
   selfPaintWarning = undefined,
   sendPathWarning = undefined,
   networkWarning = undefined,
+  openError = undefined,
 }) {
   const selfPaintPrefix = selfPaintWarning
     ? `First fix the unpainted page surface flagged in self_paint_warning and save - Lavish live-reloads the artifact automatically, so you do not need to re-run \`lavish-axi ${file}\`. `
@@ -372,13 +374,20 @@ export function createOpenOutput({
   const sendPathPrefix = sendPathWarning
     ? `Check send_path_warning: if the artifact's own controls should deliver feedback right away, call \`window.lavish.sendQueuedPrompts()\` after queueing (or \`window.lavish.answerQuestion()\` for a store-bound question) and save - Lavish live-reloads the artifact automatically, so you do not need to re-run \`lavish-axi ${file}\`. `
     : "";
-  // A failed bind is invisible to the person holding a review link at that address - the page
-  // simply does not load - so the agent is told to pass it on rather than leave it in a field.
-  const networkPrefix = networkWarning
-    ? "Lavish could not serve every address it was asked to (see network_warning): when you next message the user, tell them, because review links at that address will not load until it clears. "
+  // A page that did not open, or a failed bind, is invisible to the person holding the review link,
+  // so the agent is told to pass it on rather than leave it in a field - the unopened page first,
+  // because until the user has the URL nothing else matters.
+  const openPrefix = openError
+    ? "The page did not open for the user (see open_error): give them session.url when you next message them. "
     : "";
+  const networkPrefix = `${openPrefix}${
+    networkWarning
+      ? "Lavish could not serve every address it was asked to (see network_warning): when you next message the user, tell them, because review links at that address will not load until it clears. "
+      : ""
+  }`;
   return {
     session: { file, url, status },
+    ...(openError ? { open_error: openError } : {}),
     ...(networkWarning ? { network_warning: networkWarning } : {}),
     ...(selfPaintWarning ? { self_paint_warning: selfPaintWarning } : {}),
     ...(sendPathWarning ? { send_path_warning: sendPathWarning } : {}),
@@ -420,12 +429,13 @@ async function openCommand(args) {
       networkWarning: response.network_warning,
     });
   }
+  let openError;
   if (shouldOpenBrowser(args, process.env)) {
-    try {
-      const open = (await import("open")).default;
-      await open(response.url);
-    } catch {
+    const opened = await openReviewUrl(response.url, process.env);
+    if ("error" in opened) {
       response.status = "ready";
+      openError = opened.error;
+      process.stderr.write(`${response.url}\n${openError}\n`);
     }
   }
   return createOpenOutput({
@@ -436,6 +446,7 @@ async function openCommand(args) {
     selfPaintWarning,
     sendPathWarning,
     networkWarning: response.network_warning,
+    openError,
   });
 }
 
