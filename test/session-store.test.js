@@ -3090,3 +3090,33 @@ test("ended_at marks the moment a round ended and stays put through later writes
     assert.notEqual((await store.findByKey(key)).ended_at, endedAt);
   });
 });
+
+test("a draft save overtaken by a newer one from the same tab does not overwrite it", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    // The closing beacon (revision 2) lands before the debounced save it overtook (revision 1).
+    await store.saveDraft(key, { composer: "final words before closing", tab: "tab-a", revision: 2 });
+    const late = await store.saveDraft(key, { composer: "final wo", tab: "tab-a", revision: 1 });
+    assert.equal(late.stale, true);
+    assert.equal((await store.findByKey(key)).draft.composer, "final words before closing");
+
+    // A save carrying the same revision again is no newer either.
+    assert.equal((await store.saveDraft(key, { composer: "again", tab: "tab-a", revision: 2 })).stale, true);
+
+    // Another tab's save is not ordered against tab-a's and is applied.
+    await store.saveDraft(key, { composer: "from another tab", tab: "tab-b", revision: 1 });
+    assert.equal((await store.findByKey(key)).draft.composer, "from another tab");
+  });
+});
+
+test("a late draft save cannot bring back words a send already delivered", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { composer: "hello", tab: "tab-a", revision: 3 });
+    await store.queuePrompts(key, {
+      prompts: [{ uid: "", prompt: "hello", selector: "", tag: "message", text: "Freeform message", prompt_id: "m-1" }],
+    });
+    assert.equal((await store.findByKey(key)).draft, null);
+
+    await store.saveDraft(key, { composer: "hell", tab: "tab-a", revision: 2 });
+    assert.equal((await store.findByKey(key)).draft, null);
+  });
+});

@@ -535,6 +535,16 @@ function scheduleDraftSave(delayMs = DRAFT_SAVE_DELAY_MS) {
   draftTimer = setTimeout(saveDraft, delayMs);
 }
 
+// Every save carries this tab's id and a revision that only grows, so the server can drop a save
+// that arrives after a newer one from the same tab (the closing beacon overtaking a debounced save).
+const draftTab = Math.random().toString(36).slice(2) + Date.now().toString(36);
+let draftRevision = 0;
+
+function stampedDraft(body) {
+  draftRevision += 1;
+  return JSON.stringify({ ...JSON.parse(body), tab: draftTab, revision: draftRevision });
+}
+
 function saveDraft() {
   draftTimer = undefined;
   draftSaving = draftSaving.then(async () => {
@@ -544,7 +554,7 @@ function saveDraft() {
       const response = await fetch("/api/" + key + "/draft", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body,
+        body: stampedDraft(body),
       });
       if (response.ok) lastSavedDraft = body;
       else if (response.status !== 409) scheduleDraftSave(DRAFT_RETRY_DELAY_MS);
@@ -555,12 +565,13 @@ function saveDraft() {
   return draftSaving;
 }
 
-// The last chance for words typed after the latest save: a beacon outlives the closing page.
+// The last chance for words typed after the latest save: a beacon outlives the closing page. Its
+// revision is above every save this tab sent, so it wins even if an earlier save lands after it.
 function saveDraftOnExit() {
   if (ended || typeof navigator.sendBeacon !== "function") return;
   const body = currentDraftJson();
   if (body === lastSavedDraft) return;
-  if (navigator.sendBeacon("/api/" + key + "/draft", new Blob([body], { type: "text/plain" }))) {
+  if (navigator.sendBeacon("/api/" + key + "/draft", new Blob([stampedDraft(body)], { type: "text/plain" }))) {
     lastSavedDraft = body;
   }
 }
