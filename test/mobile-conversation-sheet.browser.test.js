@@ -83,8 +83,7 @@ const GEOMETRY = `() => {
       content: document.getElementById("chatAttachments").scrollHeight,
     },
     actions: rect(document.getElementById("sendActions")),
-    send: rect(document.getElementById("send")),
-    sendAndEnd: rect(document.getElementById("sendAndEnd")),
+    end: rect(document.getElementById("end")),
     textarea: rect(document.getElementById("chatInput")),
     summary: document.getElementById("panelSummary").textContent,
     toggleLabel: document.getElementById("panelToggle").getAttribute("aria-label"),
@@ -152,8 +151,7 @@ test(
       assert.equal(g.panel.bottom, g.viewport.height, "sheet reaches the bottom edge");
       assert.equal(g.composer.bottom, g.viewport.height, "composer ends at the viewport edge");
       for (const [name, r] of [
-        ["send", g.send],
-        ["sendAndEnd", g.sendAndEnd],
+        ["end", g.end],
         ["textarea", g.textarea],
       ]) {
         assert.ok(
@@ -191,8 +189,7 @@ test(
       assert.ok(g.composer.bottom <= g.viewport.height, `composer stays in viewport: ${JSON.stringify(g.composer)}`);
       for (const [name, rect] of [
         ["actions", g.actions],
-        ["send", g.send],
-        ["sendAndEnd", g.sendAndEnd],
+        ["end", g.end],
       ]) {
         assert.ok(
           rect.top >= g.panel.top && rect.bottom <= g.viewport.height,
@@ -284,10 +281,7 @@ test(
       assert.equal(g.panel.bottom, 240);
       assert.equal(g.composer.bottom, 240);
       assert.ok(g.chat.visible >= 0);
-      for (const [name, rect] of [
-        ["send", g.send],
-        ["sendAndEnd", g.sendAndEnd],
-      ]) {
+      for (const [name, rect] of [["end", g.end]]) {
         assert.ok(
           rect.top >= 0 && rect.bottom <= 240,
           `${name} stays inside the short visual viewport: ${JSON.stringify(rect)}`,

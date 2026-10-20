@@ -162,6 +162,12 @@ export class SessionStore {
       closed_delivery_seq: normalizeRevision(
         existing.status === "ended" ? existing.delivery_seq : existing.closed_delivery_seq,
       ),
+      // What the reviewer has written but not yet handed over (the open tab's queued notes and
+      // composer text). Carried across a reopen like the chat: it is the reviewer's words.
+      draft: normalizeDraft(existing.draft),
+      // The one `session_ended_by_navid` poll event belongs to the round that ended; a reopened
+      // session starts a round whose end has not been reported.
+      end_reported: false,
       updated_at: new Date().toISOString(),
     };
     state.sessions[key] = session;
@@ -189,8 +195,12 @@ export class SessionStore {
     if (!session) {
       return null;
     }
-    const prompts = Array.isArray(payload.prompts) ? payload.prompts : [];
+    const sent = Array.isArray(payload.prompts) ? payload.prompts : [];
     const shouldEndSession = Boolean(payload.endSession || payload.end_session);
+    // `options.withDraft` hands the stored draft over with this batch: an end that does not come
+    // from the tab holding the words. The open tab's own batch is everything it holds, so it
+    // replaces the draft instead. The id dedupe below drops a draft note the batch also carries.
+    const prompts = options.withDraft === true ? [...sent, ...draftPrompts(session.draft, sent)] : sent;
     // `options.restore` re-queues a batch `takeFeedback` already removed (a poll whose client
     // disconnected before its response was written). Those prompts were accepted once already, so
     // restoring replays them verbatim: no layout-warning plan or conflict check to re-run and no
@@ -317,6 +327,11 @@ export class SessionStore {
     session.chat = [...(session.chat || []), ...userMessages];
     applyTranscriptBound(session);
     if (userMessages.length > 0) session.chat_revision = normalizeRevision(session.chat_revision) + 1;
+    // The draft holds only what has not reached the server: an end hands everything over, and any
+    // other batch takes out the notes and composer text it delivered.
+    if (!restoring) {
+      session.draft = shouldEndSession ? null : pruneDraft(session.draft, session, normalizedPrompts);
+    }
     if (restoring) {
       const restoredFailures = Array.isArray(payload.artifact_failures)
         ? JSON.parse(JSON.stringify(payload.artifact_failures))
@@ -632,13 +647,21 @@ export class SessionStore {
       // failures can reach the agent without explicit user action.
       const artifactFailures = Array.isArray(session.artifact_failures) ? session.artifact_failures : [];
       const alreadyEnded = session.status === "ended";
+      // A reviewer's End is reported to the agent once, as one event carrying every note of the
+      // round, whether or not the take also has prompts to hand over.
+      const reportEnd = alreadyEnded && session.ended_by === "user" && session.end_reported !== true;
       if (prompts.length === 0 && artifactFailures.length === 0) {
-        return alreadyEnded ? { status: "ended", ended_by: session.ended_by } : { status: "waiting" };
+        if (!alreadyEnded) return { status: "waiting" };
+        if (!reportEnd) return { status: "ended", ended_by: session.ended_by };
+        session.end_reported = true;
+        await this.writeState(state);
+        return { status: "ended", ended_by: "user", event: END_EVENT, messages: roundMessages(session) };
       }
       // Seen (docs/delivery-acks.md): this take drains every pending prompt and `queuePrompts`
       // shares this lock, so the user entries with no stamp are exactly this batch. The sequence
       // rides on the result so a closed-poll restore can undo only this take's stamps.
       const deliverySeq = normalizeRevision(session.delivery_seq) + 1;
+      /** @type {Record<string, any>} */
       const result = {
         status: "feedback",
         dom_snapshot: session.dom_snapshot || "",
@@ -682,6 +705,11 @@ export class SessionStore {
       if (!alreadyEnded) {
         session.status = "open";
       }
+      if (reportEnd) {
+        session.end_reported = true;
+        result.event = END_EVENT;
+        result.messages = roundMessages(session);
+      }
       session.updated_at = new Date().toISOString();
       await this.writeState(state);
       return result;
@@ -693,18 +721,54 @@ export class SessionStore {
   // blocks a plain reopen - see `SessionStore` callers in server.js.
   async endSession(key, endedBy = "agent") {
     return this.runExclusive(async () => {
-      const state = await this.readState();
-      const session = state.sessions[key];
+      let state = await this.readState();
+      let session = state.sessions[key];
       if (!session) {
         return null;
       }
       const existingEndedBy = session.status === "ended" ? session.ended_by : undefined;
+      // The reviewer's End comes from the tab that holds their words and sends them itself, so the
+      // draft it leaves behind is already handed over. Any other end hands the draft over with it;
+      // a draft the queue refuses (a layout warning that changed) stays stored rather than dropped.
+      if (session.status !== "ended" && session.draft && endedBy !== "user") {
+        const committed = await this.#queuePromptsLocked(key, { prompts: [], endSession: true }, { withDraft: true });
+        if (committed && !committed.conflict && !committed.rejected) {
+          state = await this.readState();
+          session = state.sessions[key];
+        }
+      }
+      if (endedBy === "user") session.draft = null;
       const nextEndedBy = endedBy === "user" || existingEndedBy === "user" ? "user" : "agent";
       session.status = "ended";
       session.ended_by = nextEndedBy;
       session.updated_at = new Date().toISOString();
       await this.writeState(state);
       return session;
+    });
+  }
+
+  // The open tab's unsent words, stored as they are written so neither a closed tab nor an End
+  // from elsewhere loses them. An ended session takes no draft: nothing would ever hand it over.
+  async saveDraft(key, payload) {
+    return this.runExclusive(async () => {
+      const state = await this.readState();
+      const session = state.sessions[key];
+      if (!session) return null;
+      if (session.status === "ended") return { ended: true, ended_by: session.ended_by };
+      session.draft = pruneDraft(normalizeDraft(payload), session, []);
+      await this.writeState(state);
+      return { draft: session.draft };
+    });
+  }
+
+  // A poll that took the end event but closed before writing it puts the event back.
+  async unreportEnd(key) {
+    return this.runExclusive(async () => {
+      const state = await this.readState();
+      const session = state.sessions[key];
+      if (!session || session.end_reported !== true) return;
+      session.end_reported = false;
+      await this.writeState(state);
     });
   }
 
@@ -778,7 +842,7 @@ export class SessionStore {
     const state = await this.readState();
     const referenced = new Set();
     for (const session of Object.values(state.sessions)) {
-      for (const prompt of session.prompts || []) {
+      for (const prompt of [...(session.prompts || []), ...(session.draft?.prompts || [])]) {
         for (const attachment of prompt.attachments || []) {
           if (attachment && attachment.id) referenced.add(`${session.key}/${attachment.id}`);
         }
@@ -870,6 +934,82 @@ function normalizePrompt(prompt) {
   const { refs, malformed } = normalizeAttachmentRefs(prompt.attachments);
   if (refs.length > 0) normalized.attachments = refs;
   return { prompt: normalized, malformed };
+}
+
+// The draft is the reviewer's own unsent words, bounded so a crafted save cannot grow state.json
+// without limit. The prompts are normalized like a queued batch; nothing in them is trusted.
+const MAX_DRAFT_PROMPTS = 200;
+const MAX_DRAFT_COMPOSER_CHARS = 100_000;
+
+function normalizeDraft(value) {
+  if (!value || typeof value !== "object") return null;
+  const prompts = (Array.isArray(value.prompts) ? value.prompts : [])
+    .filter((prompt) => prompt && typeof prompt === "object" && !Array.isArray(prompt))
+    .slice(0, MAX_DRAFT_PROMPTS)
+    .map((prompt) => normalizePrompt(prompt).prompt);
+  const composer = typeof value.composer === "string" ? value.composer.slice(0, MAX_DRAFT_COMPOSER_CHARS) : "";
+  if (prompts.length === 0 && !composer.trim()) return null;
+  return { prompts, composer, at: typeof value.at === "string" && value.at ? value.at : new Date().toISOString() };
+}
+
+// A draft note is out of the draft once the transcript carries its id, and the composer text is
+// out once a delivered message says the same words.
+function pruneDraft(draft, session, delivered) {
+  if (!draft) return null;
+  const acknowledged = new Set(
+    [
+      ...(session.chat || []).map((entry) => normalizePromptId(entry?.prompt_id)),
+      ...(session.chat_ack_ids || []).map((id) => normalizePromptId(id)),
+    ].filter(Boolean),
+  );
+  const prompts = draft.prompts.filter((prompt) => !acknowledged.has(normalizePromptId(prompt.prompt_id)));
+  const composer = draft.composer.trim();
+  const composerDelivered =
+    composer &&
+    delivered.some((prompt) => prompt?.tag === "message" && String(prompt.prompt || "").trim() === composer);
+  return normalizeDraft({ prompts, composer: composerDelivered ? "" : draft.composer, at: draft.at });
+}
+
+// What an end adds to its batch from the stored draft. Images are left out: an upload the draft
+// names may have expired, and one unresolvable image would refuse the whole end. The note says so.
+function draftPrompts(draft, batch) {
+  if (!draft) return [];
+  const prompts = draft.prompts.map((prompt) => {
+    if (!prompt.attachments?.length) return prompt;
+    const { attachments, ...rest } = prompt;
+    const note = `[${attachments.length} image(s) from the unsent draft were not attached]`;
+    return { ...rest, prompt: rest.prompt ? `${rest.prompt}\n${note}` : note };
+  });
+  const composer = draft.composer.trim();
+  const alreadySent = batch.some(
+    (prompt) => prompt?.tag === "message" && String(prompt.prompt || "").trim() === composer,
+  );
+  if (composer && !alreadySent) {
+    prompts.push({ uid: "", prompt: composer, selector: "", tag: "message", text: "Freeform message" });
+  }
+  return prompts;
+}
+
+export const END_EVENT = "session_ended_by_navid";
+
+// Every note of the round that just ended, as the agent's record of what the reviewer said. Taken
+// after the end's own take stamped its batch, so each entry here has been delivered.
+function roundMessages(session) {
+  const closedSeq = normalizeRevision(session.closed_delivery_seq);
+  /** @type {Record<string, any>[]} */
+  const messages = [];
+  for (const entry of Array.isArray(session.chat) ? session.chat : []) {
+    if (!entry || entry.role !== "user" || entry.receipt === "none" || entry.kind === "layout-warnings") continue;
+    if (!(entry.delivered_seq > closedSeq)) continue;
+    /** @type {Record<string, any>} */
+    const message = { kind: entry.kind || "message", text: String(entry.text || ""), at: entry.at };
+    if (entry.prompt_id) message.prompt_id = entry.prompt_id;
+    if (entry.anchor) message.anchor = entry.anchor;
+    if (Array.isArray(entry.attachments) && entry.attachments.length) message.attachments = entry.attachments;
+    if (entry.delivered_at) message.delivered_at = entry.delivered_at;
+    messages.push(message);
+  }
+  return messages;
 }
 
 // Settlement identity is transcript-owned. The agent-facing prompt list must not carry it:

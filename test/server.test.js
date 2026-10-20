@@ -923,14 +923,13 @@ test("chrome can copy the full file path from the overflow menu", async () => {
   assert.match(js, /copyHintText\.textContent = "Copy"/);
 });
 
-test("overflow menu offers reload, snapshot copy, and end session actions", async () => {
+test("overflow menu offers reload and snapshot copy, and ending lives only on the End button", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
   const js = await chromeClientSource();
 
   assert.match(html, /id="reloadArtifact"[^<]*>.*Reload artifact/);
   assert.match(html, /id="copySnapshot"[^<]*>.*Copy DOM snapshot/);
-  assert.match(html, /class="menu-item danger" id="end"[^<]*>.*End session/);
-  assert.doesNotMatch(html, /End Session</);
+  assert.doesNotMatch(html, /End session/i);
   assert.match(js, /event\.key === "Escape"/);
 });
 
@@ -1077,21 +1076,16 @@ test("chrome shows agent working state when a previous poll has released", async
   assert.match(js, /spinner/);
 });
 
-test("composer offers two always-visible top-level send actions", async () => {
+test("the composer has exactly one action: End, which hands over everything and closes the review", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
-  const css = await chromeCssSource();
 
-  assert.match(html, /class="button" id="send">Send to Agent</);
-  assert.match(html, /class="button button-danger" id="sendAndEnd"[^<]*>.*Send &amp; End</);
-  assert.match(
-    html,
-    /<div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first\.<\/div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">.*<button class="button" id="send">Send to Agent<\/button><\/div>/,
+  const actions = html.match(/<div class="actions" id="sendActions">(.*?)<\/div>/)?.[1] || "";
+  assert.deepEqual(
+    actions.match(/<button[^>]*id="[^"]+"/g)?.map((tag) => tag.match(/id="([^"]+)"/)[1]),
+    ["end"],
   );
-  assert.doesNotMatch(html, /id="sendCaret"/);
-  assert.doesNotMatch(html, /id="sendMenu"/);
-  assert.doesNotMatch(html, /id="sendFromMenu"/);
-  assert.match(css, /\.button-danger\{[^}]*color:var\(--danger\)/);
-  assert.match(css, /\.actions\{[^}]*min-width:0/);
+  assert.match(actions, /<span>End<\/span>/);
+  assert.doesNotMatch(html, /id="send"|id="sendAndEnd"|Send to Agent|Send &amp; End/);
 });
 
 test("chrome only marks session ended after the end request succeeds", async () => {
@@ -4602,7 +4596,7 @@ test("a user-initiated end via the keyed route blocks a plain reopen but honors 
     });
     const { key, url: originalUrl } = await open.json();
 
-    // The browser chrome's plain "End session" hits this keyed route.
+    // The browser chrome's End with nothing written hits this keyed route.
     await fetch(`${base}/api/${key}/end`, { method: "POST" });
 
     const blocked = await fetch(`${base}/api/sessions`, {
@@ -6865,6 +6859,98 @@ test("chat-sync stamps a note seen when a poll takes it, working when the artifa
     } finally {
       await stream.close();
     }
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function openSyntheticSession(prefix) {
+  const dir = await mkdtemp(path.join(tmpdir(), prefix));
+  const artifact = path.join(dir, "synthetic.html");
+  await writeFile(artifact, "<!doctype html><html><body><h1>Synthetic</h1></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const base = `http://127.0.0.1:${server.port}`;
+  const opened = await fetch(`${base}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ file: artifact }),
+  });
+  const { key } = await opened.json();
+  return { dir, artifact, server, base, key };
+}
+
+test("an End with no poll attached keeps the server up until a poll takes the notes and the end event", async () => {
+  const { dir, artifact, server, base, key } = await openSyntheticSession("lavish-end-undelivered-");
+  let exited = false;
+  server.done.then(() => {
+    exited = true;
+  });
+  try {
+    const ended = await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({
+        endSession: true,
+        prompts: [
+          { uid: "", prompt: "parting note", selector: "", tag: "message", text: "Freeform message", prompt_id: "p-1" },
+        ],
+      }),
+    });
+    assert.equal(ended.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(exited, false, "a server holding undelivered notes must stay up for the poll that drains them");
+
+    const poll = await (await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`)).json();
+    assert.deepEqual(
+      poll.prompts.map((prompt) => prompt.prompt),
+      ["parting note"],
+    );
+    assert.equal(poll.event, "session_ended_by_navid");
+    assert.deepEqual(
+      poll.messages.map((message) => [message.prompt_id, message.text]),
+      [["p-1", "parting note"]],
+    );
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the draft route takes a closing tab's beacon body and refuses other origins and ended sessions", async () => {
+  const { dir, server, base, key } = await openSyntheticSession("lavish-draft-route-");
+  try {
+    const beacon = await fetch(`${base}/api/${key}/draft`, {
+      method: "POST",
+      headers: { "content-type": "text/plain;charset=UTF-8", origin: base },
+      body: JSON.stringify({ prompts: [], composer: "typed before closing" }),
+    });
+    assert.equal(beacon.status, 200);
+    const state = JSON.parse(await readFile(path.join(dir, "state.json"), "utf8"));
+    assert.equal(state.sessions[key].draft.composer, "typed before closing");
+
+    const foreign = await fetch(`${base}/api/${key}/draft`, {
+      method: "POST",
+      headers: { "content-type": "text/plain", origin: "http://evil.example" },
+      body: JSON.stringify({ composer: "forged" }),
+    });
+    assert.equal(foreign.status, 403);
+
+    // A second open session keeps the server from stepping down when this one ends.
+    const keepAlive = path.join(dir, "keep-alive.html");
+    await writeFile(keepAlive, "<!doctype html><html><body></body></html>");
+    await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: keepAlive }),
+    });
+    await fetch(`${base}/api/${key}/end`, { method: "POST" });
+    const late = await fetch(`${base}/api/${key}/draft`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({ composer: "after the end" }),
+    });
+    assert.equal(late.status, 409);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
