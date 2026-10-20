@@ -3067,6 +3067,12 @@ async function watchSession(session, watchers, events, logEvent, reloadDebounceM
   if (watchers.has(session.key)) {
     return;
   }
+  // chokidar watches the nearest existing ancestor of a missing path and rescans that whole
+  // directory on every change in it, so a watch exists only while its own directory does.
+  const scopeDir = target.scope === "directory" ? target.path : path.dirname(target.path);
+  if (!existsSync(scopeDir)) {
+    return;
+  }
   logEvent?.(`watch session=${session.key} scope=${target.scope} path=${target.path}`);
   const watcher = chokidar.watch(target.path, target.options);
   let timer = null;
@@ -3074,6 +3080,15 @@ async function watchSession(session, watchers, events, logEvent, reloadDebounceM
     logEvent?.(`watch event=${event} session=${session.key} file=${file ?? ""}`);
     clearTimeout(timer);
     timer = setTimeout(() => events.emit("reload", session.key), reloadDebounceMs(session.key));
+    if (
+      (event === "unlink" || event === "unlinkDir") &&
+      !existsSync(scopeDir) &&
+      watchers.get(session.key) === watcher
+    ) {
+      watchers.delete(session.key);
+      void watcher.close();
+      logEvent?.(`watch closed session=${session.key} path=${scopeDir}`);
+    }
   });
   watcher.on("error", (error) => {
     const message = error instanceof Error ? error.message : String(error);
