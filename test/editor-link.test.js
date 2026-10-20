@@ -72,8 +72,8 @@ test("a relative path without a usable root is refused", async () => {
 
 test("the URI targets Remote-SSH only when a host is given, with each segment encoded", () => {
   assert.equal(
-    buildEditorUri("/home/me/src/a b/#1.md", { sshHost: "cmp-ec2", line: "12" }),
-    "vscode://vscode-remote/ssh-remote+cmp-ec2/home/me/src/a%20b/%231.md:12",
+    buildEditorUri("/home/me/src/a b/#1.md", { sshHost: "devbox", line: "12" }),
+    "vscode://vscode-remote/ssh-remote+devbox/home/me/src/a%20b/%231.md:12",
   );
   assert.equal(buildEditorUri("/Users/me/x.md", { line: "" }), "vscode://file/Users/me/x.md");
   assert.equal(buildEditorUri("/Users/me/x.md", { line: "-3" }), "vscode://file/Users/me/x.md");
@@ -101,7 +101,7 @@ test("roots and SSH host come from the environment with home and hostname as def
     "/a",
     "/b",
   ]);
-  assert.equal(resolveEditorSshHost({ LAVISH_EDITOR_SSH_HOST: " cmp-ec2 " }), "cmp-ec2");
+  assert.equal(resolveEditorSshHost({ LAVISH_EDITOR_SSH_HOST: " devbox " }), "devbox");
   assert.ok(resolveEditorSshHost({}).length > 0);
 });
 
@@ -114,7 +114,7 @@ test("the editor-link route returns a local URI and refuses traversal and foreig
       LAVISH_AXI_HOST: "127.0.0.1",
       LAVISH_AXI_LINK_HOST: "127.0.0.1",
       LAVISH_EDITOR_ROOTS: repo,
-      LAVISH_EDITOR_SSH_HOST: "cmp-ec2",
+      LAVISH_EDITOR_SSH_HOST: "devbox",
       LAVISH_AXI_ALLOWED_HOSTS: "viewer.example.ts.net",
     };
     const server = await serve({ env, port: 0, stateFile: path.join(base, "server.json"), version: "9.9.9-test" });
@@ -147,7 +147,7 @@ test("the editor-link route returns a local URI and refuses traversal and foreig
         path: "docs/spec/plan.md",
         root: repo,
       });
-      assert.equal(forwarded.uri, buildEditorUri(path.join(repo, "docs", "spec", "plan.md"), { sshHost: "cmp-ec2" }));
+      assert.equal(forwarded.uri, buildEditorUri(path.join(repo, "docs", "spec", "plan.md"), { sshHost: "devbox" }));
       assert.equal(forwarded.remote, true);
     } finally {
       await server.close();
