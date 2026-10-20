@@ -53,12 +53,15 @@ function escapeMarkdownScriptBody(source) {
   return source.replace(/<(\/script|!--)/gi, "<\\$1");
 }
 
+// Built from a string: `<!--` inside a regex literal is an Annex B HTML comment to some JS parsers.
+const HTML_COMMENT_PATTERN = new RegExp("<!--[\\s\\S]*?-->", "g");
+
 /**
  * Whether an HTML document carries a Markdown block the renderer has to load for.
  * @param {string} html
  */
 export function hasMarkdownBlocks(html) {
-  return typeof html === "string" && MARKDOWN_BLOCK_PATTERN.test(html.replace(/<!--[\s\S]*?-->/g, ""));
+  return typeof html === "string" && MARKDOWN_BLOCK_PATTERN.test(html.replace(HTML_COMMENT_PATTERN, ""));
 }
 
 /** @param {string} value */
