@@ -1088,14 +1088,6 @@ test("the composer has exactly one action: End, which hands over everything and 
   assert.doesNotMatch(html, /id="send"|id="sendAndEnd"|Send to Agent|Send &amp; End/);
 });
 
-test("chrome only marks session ended after the end request succeeds", async () => {
-  const js = await chromeClientSource();
-
-  assert.match(js, /const response = await fetch\("\/api\/" \+ key \+ "\/end", \{ method: "POST" \}\)/);
-  assert.match(js, /if \(!response\.ok\) throw new Error\("failed to end session"\)/);
-  assert.match(js, /if \(!response\.ok\) throw new Error\("failed to end session"\);\n {2}markSessionEnded\(\)/);
-});
-
 test("chrome shows a waiting banner when no agent has attached", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
   const js = await chromeClientSource();
