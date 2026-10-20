@@ -2814,6 +2814,31 @@ test("--done all records the ids it stamped, and an already-done note is not lis
   });
 });
 
+// A plain reply ticks every delivered note at once, so its stamp says nothing about which note it
+// answered. A later `--done` naming one of those notes is the deliberate answer: it re-stamps the note
+// with its own time and lists it, so a watcher can tell the note was answered and when.
+test("--done naming a note a plain reply ticked re-stamps it and lists it; an id stamp stays", async () => {
+  await withStore(async ({ store, session, stateFile }) => {
+    const [a, b, c] = await queueNotes(store, session.key, ["A", "B", "C"]);
+    await store.takeFeedback(session.key);
+    await store.addAgentReply(session.key, "Blanket answer.");
+    const read = async () => JSON.parse(await readFile(stateFile, "utf8")).sessions[session.key].chat;
+    const blanket = (await read()).at(-1).at;
+    assert.deepEqual(
+      (await read()).filter((e) => e.role === "user").map((e) => e.done_at),
+      [blanket, blanket, blanket],
+    );
+
+    await store.addAgentReply(session.key, "About A.", { done: [a] });
+    await store.addAgentReply(session.key, "A again, and B.", { done: [a, b] });
+    const chat = await read();
+    const [toA, toB] = chat.filter((e) => e.role === "agent").slice(1);
+    assert.deepEqual([toA.done_ids, toB.done_ids], [[a], [b]]);
+    const byId = Object.fromEntries(chat.filter((e) => e.role === "user").map((e) => [e.prompt_id, e.done_at]));
+    assert.deepEqual(byId, { [a]: toA.at, [b]: toB.at, [c]: blanket });
+  });
+});
+
 test("markWorking stamps delivered entries that are not done, once, and reports whether it changed", async () => {
   await withStore(async ({ store, session }) => {
     await store.queuePrompts(session.key, {

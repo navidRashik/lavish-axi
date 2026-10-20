@@ -721,11 +721,25 @@ export class SessionStore {
       // Named notes (`reply --done`) are exactly what gets stamped; otherwise the reply answers what
       // the agent has seen this round, never an entry no poll has delivered.
       // The agent entry names the notes this `--done` stamped (`done_ids`), so a reader of state.json
-      // can tell a deliberate multi-note reply from a plain one; a plain reply carries none.
+      // can tell a deliberate multi-note reply from a plain one; a plain reply carries none. A named
+      // note whose stamp no `done_ids` vouches for (a plain reply ticked it with every other delivered
+      // note) is stamped again by the naming reply; one an earlier `--done` named keeps its stamp.
       const doneIds = [];
       if (done) {
-        const open = new Set((session.chat || []).filter((entry) => entry?.role === "user" && !entry.done_at));
-        stampDoneByIds(session.chat, at, done);
+        const chat = session.chat || [];
+        const vouched = new Set();
+        for (const entry of chat)
+          if (entry?.role === "agent" && Array.isArray(entry.done_ids))
+            for (const id of entry.done_ids) vouched.add(`${entry.at}|${id}`);
+        const named = Array.isArray(done) ? new Set(done) : null;
+        const open = new Set();
+        for (const entry of chat) {
+          if (entry?.role !== "user") continue;
+          if (entry.done_at && named?.has(entry.prompt_id) && !vouched.has(`${entry.done_at}|${entry.prompt_id}`))
+            delete entry.done_at;
+          if (!entry.done_at) open.add(entry);
+        }
+        stampDoneByIds(chat, at, done);
         for (const entry of open)
           if (entry.done_at && typeof entry.prompt_id === "string") doneIds.push(entry.prompt_id);
       } else stampDone(session.chat, at, normalizeRevision(session.closed_delivery_seq));
