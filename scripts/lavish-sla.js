@@ -9,10 +9,11 @@
 //      WATCH_DAYS, plus every file named in WATCH_FILE {"files": [...]}. The set is written to
 //      PROTECTED_FILE ({"files", "updated_at"}), which the lavish-axi fork reads to refuse an agent
 //      `lavish-axi end` on a watched page.
-//   2. Exactly one poll. A watched page with no listener for POLL_GRACE gets `lavish-poll-loop <file>`
-//      started detached (LOOP_NAME is the page stem, or "<dir>-index" for a non-hub index.html, so two
-//      index.html pages never share a pidfile). A loop or poll still running against an ENDED session
-//      is killed: an ended session is never re-armed.
+//   2. Exactly one poll. A watched page with no listener for POLL_GRACE is added to the host's one
+//      `lavish-axi watch` process: `lavish-axi watch --feed-dir <LAVISH_FEED_DIR> --add <file> --name
+//      <log name>` (the page stem, or "<dir>-index" for a non-hub index.html, so two index.html pages
+//      never share a feed log). The watcher drops a page once its session ends; a `lavish-axi poll`
+//      still running against an ENDED session is killed: an ended session is never re-armed.
 //   3. Ack (received). A Navid entry (role user, not layout-warnings) newer than the first run, not yet
 //      answered, gets ONE reply after ACK_AFTER: `📥 received HH:MM · routed to <owner>` (Dhaka time).
 //      The ack never ticks the note and never counts as an answer: it is posted with
@@ -47,7 +48,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -72,7 +73,7 @@ export function readConfig(env = process.env) {
     state: env.LAVISH_STATE || `${home}/.lavish-axi/state.json`,
     url: env.LAVISH_URL || "http://127.0.0.1:4387",
     lavish: env.LAVISH_AXI || `${home}/.local/node/bin/lavish-axi`,
-    pollLoop: env.POLL_LOOP || `${home}/.omp/agent/scripts/lavish-poll-loop`,
+    feedDir: env.LAVISH_FEED_DIR || `${home}/.lavish-axi/feed`,
     stateFile: env.SLA_STATE || `${home}/.omp/agent/state/lavish-sla.json`,
     log: env.SLA_LOG || `${home}/.omp/agent/state/lavish-sla.log`,
     watchFile: env.WATCH_FILE || `${ceo}/system/lavish-watch.json`,
@@ -297,7 +298,7 @@ export class Sla {
     return watched;
   }
 
-  // pid and args of every lavish-poll-loop and `lavish-axi poll` process.
+  // pid and args of every `lavish-axi poll` process.
   *procs() {
     const out = spawnSync("ps", ["-eo", "pid=,args="], { encoding: "utf8" }).stdout || "";
     for (const line of out.split("\n")) {
@@ -305,7 +306,7 @@ export class Sla {
       const space = trimmed.indexOf(" ");
       if (space < 0) continue;
       const args = trimmed.slice(space + 1);
-      if (args.includes("poll-loop") || args.includes(" poll ")) yield { pid: Number(trimmed.slice(0, space)), args };
+      if (args.includes(" poll ")) yield { pid: Number(trimmed.slice(0, space)), args };
     }
   }
 
@@ -318,12 +319,9 @@ export class Sla {
       }
       if (!this.noListener.has(k)) this.noListener.set(k, mono);
       if (mono - this.noListener.get(k) >= this.c.pollGraceSec * 1000) {
-        spawn(this.c.pollLoop, [s.file], {
-          env: { ...process.env, LOOP_NAME: this.loopName(s.file) },
-          stdio: "ignore",
-          detached: true,
-        }).unref();
-        this.log(`poll started: ${s.file} (${k})`);
+        const add = ["watch", "--feed-dir", this.c.feedDir, "--owner", "lavish-sla", "--add", s.file];
+        spawn(this.c.lavish, [...add, "--name", this.loopName(s.file)], { stdio: "ignore", detached: true }).unref();
+        this.log(`watch added: ${s.file} (${k})`);
         this.noListener.set(k, mono); // the next attempt waits another grace period
       }
     }
@@ -332,7 +330,7 @@ export class Sla {
     for (const { pid, args } of this.procs()) {
       const words = args.split(" --owner")[0].split(/\s+/).filter(Boolean);
       let target = words.at(-1) || "";
-      // a loop started as `lavish-poll-loop <page.html>` names a page in the hub's directory
+      // a poll started with a relative path names a page in the hub's directory
       if (target && !target.startsWith("/")) target = path.join(this.c.inbox, target);
       if (ended.has(target)) {
         try {
@@ -526,4 +524,5 @@ export async function main(argv = process.argv, env = process.env) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main();
+// npm links the `lavish-sla` bin as a symlink, so argv[1] is compared after resolving it.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) await main();
