@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { readFileSync, realpathSync, statSync, utimesSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import os from "node:os";
@@ -221,21 +221,11 @@ export async function allowedHostsForSpawn(env = process.env) {
 
 // A server a CLI spawns carries this in its environment, so it never records itself as the hub.
 export const SPAWNED_SERVER_ENV = "LAVISH_AXI_SPAWNED_SERVER";
-// The hub refreshes its record this often while it runs.
-export const MANAGED_HUB_HEARTBEAT_MS = 5_000;
-// How long after the hub's last heartbeat a CLI still waits for it to come back instead of
-// spawning a server of its own: long enough to cover a service manager's restart delay.
-// LAVISH_AXI_HUB_RESTART_GRACE_MS overrides it with any non-negative number of milliseconds.
-const DEFAULT_MANAGED_HUB_RESTART_GRACE_MS = 30_000;
-
-export function managedHubRestartGraceMs(env = process.env) {
-  const raw = env.LAVISH_AXI_HUB_RESTART_GRACE_MS?.trim();
-  const value = raw ? Number(raw) : NaN;
-  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_MANAGED_HUB_RESTART_GRACE_MS;
-}
 
 // The record a `lavish-axi server` started directly (a service manager's hub, not a CLI's spawn)
-// keeps beside state.json: its pid and port, with the file's mtime as its heartbeat.
+// keeps beside state.json while it owns the state directory: its pid and port. The hub removes it
+// when it exits on its own (`lavish-axi stop`, /shutdown, the idle timeout); a signal leaves it,
+// so a hub its service manager restarts keeps its claim on the port in between.
 export function managedHubFile() {
   return path.join(stateDir(), "managed-hub.json");
 }
@@ -249,38 +239,43 @@ export async function recordManagedHub(hub) {
   await rename(partial, file);
 }
 
-export function touchManagedHub(at = new Date()) {
-  try {
-    utimesSync(managedHubFile(), at, at);
-  } catch {
-    // A record deleted by hand stays deleted.
-  }
-}
-
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return /** @type {NodeJS.ErrnoException} */ (error)?.code === "EPERM";
-  }
-}
-
-// True while a CLI must leave `port` to the hub rather than spawn a server: the hub recorded for
-// this state directory and port is still running (starting, or not answering yet), or it stopped
-// so recently that its service manager is about to start it again.
-export function managedHubExpected(port, now = Date.now()) {
+// Removes the record only while it still names `pid`, so a hub never deletes its successor's claim.
+/** @param {number} pid */
+export async function forgetManagedHub(pid) {
+  const file = managedHubFile();
   let record;
-  let heartbeatAt;
   try {
-    heartbeatAt = statSync(managedHubFile()).mtimeMs;
-    record = JSON.parse(readFileSync(managedHubFile(), "utf8"));
+    record = JSON.parse(await readFile(file, "utf8"));
+  } catch {
+    return;
+  }
+  if (record?.pid === pid) await rm(file, { force: true });
+}
+
+// `lavish-axi stop` is an explicit stop of this state directory's server, so it drops any hub
+// record too, including one a hub killed by a signal left behind.
+export async function clearManagedHub() {
+  await rm(managedHubFile(), { force: true });
+}
+
+// True while a CLI must leave `port` to the hub rather than spawn a server: a hub record exists for
+// this state directory and names that port, whatever its age or whether its process is alive. A
+// record that cannot be parsed still counts, since only a hub writes that file.
+/** @param {number} port */
+export function managedHubExpected(port) {
+  let raw;
+  try {
+    raw = readFileSync(managedHubFile(), "utf8");
   } catch {
     return false;
   }
-  if (!Number.isInteger(record?.pid) || record.port !== port) return false;
-  if (processAlive(record.pid)) return true;
-  return now - heartbeatAt < managedHubRestartGraceMs();
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    return true;
+  }
+  return typeof record?.port !== "number" || record.port === port;
 }
 
 export function defaultPort() {

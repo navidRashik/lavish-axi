@@ -67,8 +67,6 @@ function baseEnv(dir, port) {
     LAVISH_AXI_LINK_HOST: "127.0.0.1",
     LAVISH_AXI_TELEMETRY: "0",
     LAVISH_AXI_NO_OPEN: "1",
-    // The hub these tests stop is not coming back, so a CLI spawns a server at once.
-    LAVISH_AXI_HUB_RESTART_GRACE_MS: "0",
   };
   delete env.LAVISH_AXI_ALLOWED_HOSTS;
   return env;
@@ -89,8 +87,11 @@ test("a server a client spawns keeps the Host allowlist the hub server was start
   try {
     await waitForHealth(port, t.signal);
     assert.equal(await statusFor(port, ALLOWED), 200, "fixture: the hub serves its allowed host");
-    hub.kill("SIGTERM");
-    await once(hub, "exit");
+    // A clean stop removes the hub's record, so the CLI below may spawn a server.
+    const hubExited = once(hub, "exit");
+    const stopped = await runCli(["stop"], env);
+    assert.equal(stopped.status, 0, stopped.out);
+    await hubExited;
 
     const opened = await runCli([artifact, "--no-open"], env);
     assert.equal(opened.status, 0, opened.out);

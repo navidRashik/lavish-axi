@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -76,7 +76,6 @@ test("a hub restarted under an active poll loop gets its port back and no server
     LAVISH_AXI_NO_OPEN: "1",
     LAVISH_AXI_IDLE_TIMEOUT_MS: "off",
   };
-  delete env.LAVISH_AXI_HUB_RESTART_GRACE_MS;
   const artifact = path.join(dir, "page.html");
   await writeFile(artifact, "<!doctype html><title>x</title><p>ok</p>\n", "utf8");
 
@@ -117,7 +116,51 @@ test("a hub restarted under an active poll loop gets its port back and no server
     await loop;
     first.hub.kill("SIGTERM");
     second?.hub.kill("SIGTERM");
-    await runCli(["stop"], { ...env, LAVISH_AXI_HUB_RESTART_GRACE_MS: "0" });
+    await runCli(["stop"], env);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The hub's record is the claim on the port, not its process or its age: a hub its service manager
+// is slow to restart keeps the port. Only `lavish-axi stop` (or deleting the file) releases it.
+test("an old hub record whose process is gone still stops a CLI from spawning a server until stop clears it", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "lavish-managed-hub-latch-"));
+  const port = await freePort();
+  const stateDir = path.join(dir, "state");
+  /** @type {NodeJS.ProcessEnv} */
+  const env = {
+    ...process.env,
+    LAVISH_AXI_STATE_DIR: stateDir,
+    LAVISH_AXI_PORT: String(port),
+    LAVISH_AXI_HOST: "127.0.0.1",
+    LAVISH_AXI_LINK_HOST: "127.0.0.1",
+    LAVISH_AXI_TELEMETRY: "0",
+    LAVISH_AXI_NO_OPEN: "1",
+  };
+  const artifact = path.join(dir, "page.html");
+  await writeFile(artifact, "<!doctype html><title>x</title><p>ok</p>\n", "utf8");
+  const gone = spawn(process.execPath, ["-e", ""]);
+  await once(gone, "exit");
+  await mkdir(stateDir, { recursive: true });
+  const record = path.join(stateDir, "managed-hub.json");
+  await writeFile(record, `${JSON.stringify({ pid: gone.pid, port })}\n`, "utf8");
+  const anHourAgo = new Date(Date.now() - 3_600_000);
+  await utimes(record, anHourAgo, anHourAgo);
+  try {
+    // A short start timeout only bounds how long this CLI waits for the absent hub.
+    const refused = await runCli([artifact, "--no-open"], { ...env, LAVISH_AXI_SERVER_START_TIMEOUT_MS: "1500" });
+    assert.notEqual(refused.status, 0, `a server was spawned over the hub's record:\n${refused.out}`);
+    assert.match(refused.out, /A managed Lavish hub owns port \d+ .* but is not answering/);
+    assert.equal(await serving(port), false, "a server answers on the hub's port");
+
+    const stopped = await runCli(["stop"], env);
+    assert.equal(stopped.status, 0, stopped.out);
+    await assert.rejects(stat(record), "stop left the hub record behind");
+    const opened = await runCli([artifact, "--no-open"], env);
+    assert.equal(opened.status, 0, opened.out);
+    assert.equal(await serving(port), true);
+  } finally {
+    await runCli(["stop"], env);
     await rm(dir, { recursive: true, force: true });
   }
 });
