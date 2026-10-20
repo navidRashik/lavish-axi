@@ -1535,7 +1535,11 @@ test("reload restores a completed terminal reservation after its prompt was deli
   await flushPromises();
   await flushPromises();
 
-  assert.deepEqual(reloadedRequests, [{ url: "/api/abc/end", body: null }]);
+  assert.deepEqual(
+    reloadedRequests.map((request) => request.url),
+    ["/api/abc/end"],
+  );
+  assert.equal(reloadedRequests[0].body.draft_base, 0, "the end names the draft this tab last saw");
   assert.equal(storage.has("lavish-axi:terminal:abc"), false);
   assert.equal(reloaded.element("end").disabled, true);
 });
@@ -5770,10 +5774,13 @@ test("chrome send and end carries the end intent with queued prompts", async () 
     ["/api/abc/prompts"],
   );
   assertPromptIdentity(posts[0].body.prompts[0].prompt_id);
-  assert.deepEqual(publicPostedBody(posts[0].body), {
+  const { draft_tab: endTab, ...endBody } = publicPostedBody(posts[0].body);
+  assert.ok(typeof endTab === "string" && endTab.length > 0, "the end names its tab");
+  assert.deepEqual(endBody, {
     prompts: [{ prompt: "Ship this", selector: "button#ship", tag: "choice", text: "Ship" }],
     domSnapshot: "uid=1 body",
     endSession: true,
+    draft_base: 0,
   });
   assert.equal(chrome.queued().length, 0);
   assert.equal(chrome.element("chatInput").disabled, true);
@@ -5918,7 +5925,7 @@ test("chrome send and end during an in-flight submit still ends after the submit
     prompts: [{ prompt: "Ship this", selector: "button#ship", tag: "choice", text: "Ship" }],
     domSnapshot: "uid=1 body",
   });
-  assert.equal(posts[1].body, null);
+  assert.equal(posts[1].body.draft_base, 0);
   assert.equal(chrome.queued().length, 0);
   assert.equal(chrome.element("chatInput").disabled, true);
 });

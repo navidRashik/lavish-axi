@@ -3037,6 +3037,62 @@ test("a reviewer's End clears the draft its own batch already carried, without d
   });
 });
 
+test("an End from a tab that never saw another tab's newer draft delivers that draft too", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { composer: "newer-tab text", tab: "tab-new", revision: 1, base: 0 });
+    await store.queuePrompts(key, {
+      endSession: true,
+      draft_tab: "tab-old",
+      draft_base: 0,
+      prompts: [
+        { uid: "", prompt: "older-tab text", selector: "", tag: "message", text: "Freeform message", prompt_id: "o-1" },
+      ],
+    });
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["older-tab text", "newer-tab text"],
+    );
+    assert.equal((await store.findByKey(key)).draft, null);
+  });
+});
+
+test("an End with nothing queued from a tab behind another tab's draft delivers that draft", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { composer: "newer-tab text", tab: "tab-new", revision: 1, base: 0 });
+    await store.endSession(key, "user", { tab: "tab-old", base: 0 });
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["newer-tab text"],
+    );
+    assert.equal(/** @type {any} */ (taken).event, "session_ended_by_navid");
+    assert.equal((await store.findByKey(key)).draft, null);
+  });
+});
+
+test("an End from the tab that wrote the stored draft replaces it with its batch", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { composer: "half a th", tab: "tab-a", revision: 1, base: 0 });
+    await store.queuePrompts(key, {
+      endSession: true,
+      draft_tab: "tab-a",
+      draft_base: 0,
+      prompts: [
+        { uid: "", prompt: "half a thought", selector: "", tag: "message", text: "Freeform message", prompt_id: "a-1" },
+      ],
+    });
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["half a thought"],
+    );
+  });
+});
+
 test("a send takes the notes and message it delivered out of the stored draft", async () => {
   await withSyntheticSession(async ({ store, key }) => {
     await store.saveDraft(key, { prompts: [draftNote("sent", "d-1"), draftNote("kept", "d-2")], composer: "hello" });

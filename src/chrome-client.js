@@ -2366,7 +2366,9 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
     return;
   }
   const body = { prompts: prompts.map(stripInternalPromptFields), domSnapshot: submission.domSnapshot };
-  if (shouldEndSession) body.endSession = true;
+  // An End names this tab and the draft it last saw, so the server can tell whether the stored
+  // draft is another tab's newer words that this batch does not carry.
+  if (shouldEndSession) Object.assign(body, { endSession: true, draft_tab: draftTab, draft_base: draftBase });
   let response;
   try {
     response = await fetch("/api/" + key + "/prompts", {
@@ -3394,7 +3396,11 @@ async function refreshLayoutWarnings() {
 
 async function endSession(terminal = null) {
   if (ended || (terminalSubmission && terminal !== terminalSubmission)) return;
-  const response = await fetch("/api/" + key + "/end", { method: "POST" });
+  const response = await fetch("/api/" + key + "/end", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ draft_tab: draftTab, draft_base: draftBase }),
+  });
   if (!response.ok) throw new Error("failed to end session");
   markSessionEnded();
 }

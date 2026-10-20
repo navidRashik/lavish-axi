@@ -207,8 +207,13 @@ export class SessionStore {
     const shouldEndSession = Boolean(payload.endSession || payload.end_session);
     // `options.withDraft` hands the stored draft over with this batch: an end that does not come
     // from the tab holding the words. The open tab's own batch is everything it holds, so it
-    // replaces the draft instead. The id dedupe below drops a draft note the batch also carries.
-    const prompts = options.withDraft === true ? [...sent, ...draftPrompts(session.draft, sent)] : sent;
+    // replaces the draft instead, unless the stored draft is another tab's newer one this tab never
+    // saw (`draft_tab`/`draft_base`); then that draft goes over too. The id dedupe below drops a
+    // draft note the batch also carries.
+    const withDraft =
+      options.withDraft === true ||
+      (shouldEndSession && draftIsAnotherTabs(session, { tab: payload.draft_tab, base: payload.draft_base }));
+    const prompts = withDraft ? [...sent, ...draftPrompts(session.draft, sent)] : sent;
     // `options.restore` re-queues a batch `takeFeedback` already removed (a poll whose client
     // disconnected before its response was written). Those prompts were accepted once already, so
     // restoring replays them verbatim: no layout-warning plan or conflict check to re-run and no
@@ -733,8 +738,9 @@ export class SessionStore {
 
   // `endedBy` distinguishes a human ending review from the browser chrome ("user") from an
   // agent explicitly closing the loop via `lavish-axi end` ("agent"). Only a user-initiated end
-  // blocks a plain reopen - see `SessionStore` callers in server.js.
-  async endSession(key, endedBy = "agent") {
+  // blocks a plain reopen - see `SessionStore` callers in server.js. `from` names the ending tab
+  // and the draft_seq it last saw.
+  async endSession(key, endedBy = "agent", from = {}) {
     return this.runExclusive(async () => {
       let state = await this.readState();
       let session = state.sessions[key];
@@ -744,9 +750,10 @@ export class SessionStore {
       const existingEndedBy = session.status === "ended" ? session.ended_by : undefined;
       const wasOpen = session.status !== "ended";
       // The reviewer's End comes from the tab that holds their words and sends them itself, so the
-      // draft it leaves behind is already handed over. Any other end hands the draft over with it;
-      // a draft the queue refuses (a layout warning that changed) stays stored rather than dropped.
-      if (session.status !== "ended" && session.draft && endedBy !== "user") {
+      // draft it leaves behind is already handed over, unless the draft is another tab's newer one
+      // the ending tab never saw. Any other end hands the draft over with it; a draft the queue
+      // refuses (a layout warning that changed) stays stored rather than dropped.
+      if (session.status !== "ended" && session.draft && (endedBy !== "user" || draftIsAnotherTabs(session, from))) {
         const committed = await this.#queuePromptsLocked(key, { prompts: [], endSession: true }, { withDraft: true });
         if (committed && !committed.conflict && !committed.rejected) {
           state = await this.readState();
@@ -979,6 +986,15 @@ const MAX_DRAFT_COMPOSER_CHARS = 100_000;
 
 function draftSeq(session) {
   return Number.isSafeInteger(session.draft_seq) && session.draft_seq >= 0 ? session.draft_seq : 0;
+}
+
+// True when the stored draft holds another tab's words that the tab named by `from` never saw:
+// that tab's last view of the draft (`from.base`) is older than the draft, and the last applied
+// save is not its own. A request naming no draft_seq says nothing about the draft.
+function draftIsAnotherTabs(session, from) {
+  if (!session.draft || !Number.isSafeInteger(from?.base)) return false;
+  if (typeof from.tab === "string" && from.tab && session.draft_revision?.tab === from.tab) return false;
+  return from.base !== draftSeq(session);
 }
 
 function normalizeDraft(value) {

@@ -1397,7 +1397,10 @@ export async function serve({
 
   app.post("/api/:key/end", async (req, res, next) => {
     try {
-      const session = await store.endSession(req.params.key, "user");
+      const session = await store.endSession(req.params.key, "user", {
+        tab: req.body?.draft_tab,
+        base: req.body?.draft_base,
+      });
       clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, events);
       events.emit("ended", req.params.key, session?.ended_by);
       res.json({ status: "ended" });
@@ -1425,13 +1428,11 @@ export async function serve({
         return;
       }
       if (result.stale) {
-        res
-          .status(409)
-          .json({
-            status: "stale",
-            error: "draft changed since this save was based on it",
-            draft_seq: result.draft_seq,
-          });
+        res.status(409).json({
+          status: "stale",
+          error: "draft changed since this save was based on it",
+          draft_seq: result.draft_seq,
+        });
         return;
       }
       res.json({ status: "saved", draft_seq: result.draft_seq });
