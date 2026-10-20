@@ -2721,34 +2721,31 @@ test("a note an ended round left at seen is not marked by the next round's edit 
 
     assert.deepEqual(stampsOf(await store.findByKey(session.key)), [
       { text: "First", delivered: true, seq: 1, working: false, done: false },
-      { text: "Second", delivered: true, seq: 2, working: true, done: true },
+      { text: "Second", delivered: true, seq: 2, working: true, done: false },
     ]);
   });
 });
 
-test("an agent reply marks delivered entries done and leaves undelivered ones alone", async () => {
+test("a reply without done closes no note; done closes only the named one, with the reply's time", async () => {
   await withStore(async ({ store, session }) => {
-    await store.queuePrompts(session.key, {
-      prompts: [{ uid: "A", prompt: "First", selector: "", tag: "message", text: "" }],
-    });
+    const [a, b] = await queueNotes(store, session.key, ["A", "B"]);
     feedbackResult(await store.takeFeedback(session.key));
-    await store.queuePrompts(session.key, {
-      prompts: [{ uid: "B", prompt: "Second", selector: "", tag: "message", text: "" }],
-    });
 
-    await store.addAgentReply(session.key, "Done with the first one.");
+    await store.addAgentReply(session.key, "Working on both.");
+    await store.addAgentReply(session.key, "Correction: both, in order.");
+    const progress = await store.findByKey(session.key);
+    assert.deepEqual(
+      stampsOf(progress).map((s) => [s.text, s.delivered, s.done]),
+      [
+        ["A", true, false],
+        ["B", true, false],
+      ],
+    );
+
+    await store.addAgentReply(session.key, "A is done.", { done: [a] });
     const after = await store.findByKey(session.key);
-    assert.deepEqual(stampsOf(after), [
-      { text: "First", delivered: true, seq: 1, working: false, done: true },
-      { text: "Second", delivered: false, seq: null, working: false, done: false },
-    ]);
-    const reply = after.chat.at(-1);
-    assert.equal(reply.role, "agent");
-    assert.equal(after.chat[0].done_at, reply.at, "done is stamped with the reply's own time");
-
-    // A second reply does not re-stamp an entry that is already done.
-    await store.addAgentReply(session.key, "Anything else?");
-    assert.equal((await store.findByKey(session.key)).chat[0].done_at, reply.at);
+    const byId = Object.fromEntries(after.chat.filter((e) => e.role === "user").map((e) => [e.prompt_id, e.done_at]));
+    assert.deepEqual(byId, { [a]: after.chat.at(-1).at, [b]: undefined });
   });
 });
 
@@ -2785,15 +2782,18 @@ test("a reply --done records the stamped prompt ids on the agent entry, in trans
   });
 });
 
-test("a plain reply, or a --done that stamps nothing, carries no done_ids", async () => {
+test("a plain reply carries no done_ids; a --done naming an unknown id is refused and writes nothing", async () => {
   await withStore(async ({ store, session, stateFile }) => {
     const [a] = await queueNotes(store, session.key, ["A"]);
     await store.addAgentReply(session.key, "Just talking.");
-    await store.addAgentReply(session.key, "Unknown id.", { done: ["no-such-id"] });
-    const chat = JSON.parse(await readFile(stateFile, "utf8")).sessions[session.key].chat;
-    const replies = chat.filter((entry) => entry.role === "agent");
-    assert.equal(replies.length, 2);
-    for (const reply of replies) assert.equal("done_ids" in reply, false);
+    const before = await readFile(stateFile, "utf8");
+    await assert.rejects(store.addAgentReply(session.key, "Unknown id.", { done: [a, "q-unknown", "q-other"] }), {
+      name: "Error",
+      ids: ["q-unknown", "q-other"],
+    });
+    assert.equal(await readFile(stateFile, "utf8"), before, "a refused reply leaves state.json untouched");
+    const chat = JSON.parse(before).sessions[session.key].chat;
+    assert.equal("done_ids" in chat.at(-1), false);
     assert.equal("done_at" in chat.find((entry) => entry.prompt_id === a), false);
   });
 });
@@ -2814,16 +2814,20 @@ test("--done all records the ids it stamped, and an already-done note is not lis
   });
 });
 
-// A plain reply ticks every delivered note at once, so its stamp says nothing about which note it
-// answered. A later `--done` naming one of those notes lists it in `done_ids` and leaves every stamp
-// alone, so the notes nobody named still share the plain stamp and stay distinguishable from answered ones.
-test("--done naming a note a plain reply ticked lists it and keeps every stamp", async () => {
+// A state.json written by a version whose plain reply ticked every delivered note holds one shared
+// stamp that says nothing about which note it answered. A later `--done` naming one of those notes
+// lists it in `done_ids` and leaves every stamp alone, so unnamed notes stay distinguishable.
+test("--done naming a note an older plain reply ticked lists it and keeps every stamp", async () => {
   await withStore(async ({ store, session, stateFile }) => {
     const [a, b, c] = await queueNotes(store, session.key, ["A", "B", "C"]);
     await store.takeFeedback(session.key);
-    await store.addAgentReply(session.key, "Blanket answer.");
+    const blanket = "2026-10-19T10:00:00.000Z";
+    const legacy = JSON.parse(await readFile(stateFile, "utf8"));
+    const stored = legacy.sessions[session.key];
+    for (const entry of stored.chat) entry.done_at = blanket;
+    stored.chat.push({ role: "agent", text: "Blanket answer.", at: blanket });
+    await writeFile(stateFile, JSON.stringify(legacy));
     const read = async () => JSON.parse(await readFile(stateFile, "utf8")).sessions[session.key].chat;
-    const blanket = (await read()).at(-1).at;
 
     await store.addAgentReply(session.key, "About A.", { done: [a] });
     await store.addAgentReply(session.key, "A again, and B.", { done: [a, b] });
@@ -2854,7 +2858,7 @@ test("markWorking stamps delivered entries that are not done, once, and reports 
     assert.equal(await store.markWorking(session.key), null, "a second reload changes nothing");
     assert.equal((await store.findByKey(session.key)).chat[0].working_at, workingAt);
 
-    await store.addAgentReply(session.key, "Shipped.");
+    await store.addAgentReply(session.key, "Shipped.", { done: "all" });
     assert.equal(await store.markWorking(session.key), null, "a done entry is never re-marked working");
     assert.equal(await store.markWorking("missing-session"), null);
   });
@@ -2917,7 +2921,7 @@ test("a transcript older than receipts is marked at load and never stamped", asy
       prompts: [{ uid: "A", prompt: "New note", selector: "", tag: "message", text: "" }],
     });
     feedbackResult(await store.takeFeedback(key));
-    await store.addAgentReply(key, "Handled the new one.");
+    await store.addAgentReply(key, "Handled the new one.", { done: "all" });
     const after = await store.findByKey(key);
     assert.deepEqual(stampsOf(after), [
       { text: "From last month", delivered: false, seq: null, working: false, done: false },
