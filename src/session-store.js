@@ -756,13 +756,23 @@ export class SessionStore {
 
   // The open tab's unsent words, stored as they are written so neither a closed tab nor an End
   // from elsewhere loses them. An ended session takes no draft: nothing would ever hand it over.
+  // Each tab numbers its saves; a save from a tab whose number is not above the last one applied
+  // is older than what is stored (a debounced save overtaken by the closing beacon) and is dropped.
+  // The applied number outlives the draft, so a late save cannot bring back delivered words.
   async saveDraft(key, payload) {
     return this.runExclusive(async () => {
       const state = await this.readState();
       const session = state.sessions[key];
       if (!session) return null;
       if (session.status === "ended") return { ended: true, ended_by: session.ended_by };
+      const tab = typeof payload?.tab === "string" ? payload.tab.slice(0, 64) : "";
+      const revision = Number.isSafeInteger(payload?.revision) ? payload.revision : 0;
+      const applied = session.draft_revision;
+      if (tab && applied?.tab === tab && revision <= applied.revision) {
+        return { stale: true, draft: session.draft };
+      }
       session.draft = pruneDraft(normalizeDraft(payload), session, []);
+      if (tab) session.draft_revision = { tab, revision };
       await this.writeState(state);
       return { draft: session.draft };
     });

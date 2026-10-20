@@ -9641,6 +9641,26 @@ test("closing the tab beacons words typed after the last draft save", async () =
   assert.equal(chrome.beacons.length, 1, "an unchanged draft is not beaconed twice");
 });
 
+test("the closing beacon carries a revision above the save it may overtake", async () => {
+  const chrome = await createChromeHarness();
+  chrome.element("chatInput").value = "final wo";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  chrome.element("chatInput").value = "final words before closing";
+  chrome.element("chatInput").dispatch("input");
+
+  chrome.dispatchWindowEvent("pagehide");
+
+  const save = chrome.draftRequests.at(-1).body;
+  const beacon = JSON.parse(chrome.beacons[0].blob.text);
+  assert.equal(save.composer, "final wo");
+  assert.equal(beacon.composer, "final words before closing");
+  assert.equal(beacon.tab, save.tab);
+  assert.ok(typeof save.tab === "string" && save.tab.length > 0);
+  assert.ok(beacon.revision > save.revision, `beacon revision ${beacon.revision} must exceed save ${save.revision}`);
+});
+
 test("a tab with no queue of its own starts from the draft a closed tab left on the server", async () => {
   const chrome = await createChromeHarness({
     sessionData: {
