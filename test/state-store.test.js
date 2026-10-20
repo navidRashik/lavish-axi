@@ -23,11 +23,11 @@ async function tempDir() {
 
 test("item ids follow the four documented kinds", () => {
   for (const id of [
-    "pr:newscred/opal-app#9194",
-    "ticket:OPAL-6110",
+    "pr:acme/app#123",
+    "ticket:ACME-42",
     "worker:hub-refresh",
     "q:merge-now",
-    "q:OPAL-7024 Q1 (behaviour): legacy NULL-instance PATs",
+    "q:ACME-77 Q1 (behaviour): which default applies",
   ]) {
     assert.equal(isValidItemId(id), true, id);
   }
@@ -37,7 +37,7 @@ test("item ids follow the four documented kinds", () => {
 });
 
 test("a question id copied verbatim from a page attribute survives a read", () => {
-  const id = "q:OPAL-7024 Q1 (behaviour): legacy NULL-instance PATs";
+  const id = "q:ACME-77 Q1 (behaviour): which default applies";
   const state = normalizeState({ version: 1, items: { [id]: { status: "answered", answer: "fail closed" } } });
   assert.equal(state.items[id]?.answer, "fail closed");
 });
@@ -75,10 +75,10 @@ test("the store reads the sibling-seeded contract file as-is", async () => {
       version: 1,
       staleAfterHours: 24,
       items: {
-        "pr:newscred/opal-app#9194": {
+        "pr:acme/app#123": {
           status: "merged",
           title: "Lock fix",
-          url: "https://github.com/newscred/opal-app/pull/9194",
+          url: "https://github.com/acme/app/pull/123",
           updatedAt: "2026-10-14T15:00:00Z",
           source: "github",
         },
