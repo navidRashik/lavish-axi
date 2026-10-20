@@ -1,26 +1,48 @@
-@import "highlight.js/styles/github.css" (prefers-color-scheme: light);
-@import "highlight.js/styles/github-dark.css" (prefers-color-scheme: dark);
-
 /* Rendered Markdown, scoped to .lavish-markdown so an HTML page embedding a block keeps its own
    styles. Text colour and font come from the host; rules and tints derive from currentColor so a
-   block reads on light and dark hosts alike. Code blocks carry their own background to match the
-   highlight theme chosen by the colour scheme. */
+   block reads on light and dark hosts alike. Links and code blocks carry their own colours, chosen
+   by data-lavish-md-theme, which the renderer sets from the background actually behind the block;
+   every pairing below holds at least 4.5:1 against its code background or a host of that tone. */
 .lavish-markdown {
   --lmd-muted: color-mix(in srgb, currentColor 70%, transparent);
   --lmd-border: color-mix(in srgb, currentColor 22%, transparent);
   --lmd-subtle: color-mix(in srgb, currentColor 7%, transparent);
+  --lmd-link: #0969da;
   --lmd-code-bg: #f6f8fa;
   --lmd-code-fg: #1f2328;
-  --lmd-link: #0969da;
+  --lmd-hl-keyword: #cf222e;
+  --lmd-hl-entity: #8250df;
+  --lmd-hl-constant: #0550ae;
+  --lmd-hl-string: #0a3069;
+  --lmd-hl-variable: #953800;
+  --lmd-hl-comment: #59636e;
+  --lmd-hl-tag: #116329;
+  --lmd-hl-heading: #0550ae;
+  --lmd-hl-list: #3b2300;
+  --lmd-hl-inserted: #116329;
+  --lmd-hl-inserted-bg: #dafbe1;
+  --lmd-hl-deleted: #82071e;
+  --lmd-hl-deleted-bg: #ffebe9;
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
-@media (prefers-color-scheme: dark) {
-  .lavish-markdown {
-    --lmd-code-bg: #151b23;
-    --lmd-code-fg: #f0f6fc;
-    --lmd-link: #4493f8;
-  }
+.lavish-markdown[data-lavish-md-theme="dark"] {
+  --lmd-link: #4493f8;
+  --lmd-code-bg: #151b23;
+  --lmd-code-fg: #f0f6fc;
+  --lmd-hl-keyword: #ff7b72;
+  --lmd-hl-entity: #d2a8ff;
+  --lmd-hl-constant: #79c0ff;
+  --lmd-hl-string: #a5d6ff;
+  --lmd-hl-variable: #ffa657;
+  --lmd-hl-comment: #8b949e;
+  --lmd-hl-tag: #7ee787;
+  --lmd-hl-heading: #58a6ff;
+  --lmd-hl-list: #f2cc60;
+  --lmd-hl-inserted: #aff5b4;
+  --lmd-hl-inserted-bg: #033a16;
+  --lmd-hl-deleted: #ffdcd7;
+  --lmd-hl-deleted-bg: #67060c;
 }
 .lavish-markdown > :first-child {
   margin-top: 0;
@@ -111,6 +133,74 @@
 .lavish-markdown .lavish-md-mermaid {
   overflow-x: auto;
   text-align: center;
+}
+
+/* highlight.js token classes, GitHub's syntax palette. */
+.lavish-markdown :is(.hljs-doctag, .hljs-keyword, .hljs-template-tag, .hljs-template-variable, .hljs-type) {
+  color: var(--lmd-hl-keyword);
+}
+.lavish-markdown .hljs-variable.language_ {
+  color: var(--lmd-hl-keyword);
+}
+.lavish-markdown .hljs-title {
+  color: var(--lmd-hl-entity);
+}
+.lavish-markdown
+  :is(
+    .hljs-attr,
+    .hljs-attribute,
+    .hljs-literal,
+    .hljs-meta,
+    .hljs-number,
+    .hljs-operator,
+    .hljs-variable,
+    .hljs-selector-attr,
+    .hljs-selector-class,
+    .hljs-selector-id
+  ) {
+  color: var(--lmd-hl-constant);
+}
+.lavish-markdown :is(.hljs-regexp, .hljs-string) {
+  color: var(--lmd-hl-string);
+}
+.lavish-markdown .hljs-meta .hljs-keyword {
+  color: var(--lmd-hl-keyword);
+}
+.lavish-markdown .hljs-meta .hljs-string {
+  color: var(--lmd-hl-string);
+}
+.lavish-markdown :is(.hljs-built_in, .hljs-symbol) {
+  color: var(--lmd-hl-variable);
+}
+.lavish-markdown :is(.hljs-comment, .hljs-code, .hljs-formula) {
+  color: var(--lmd-hl-comment);
+}
+.lavish-markdown :is(.hljs-name, .hljs-quote, .hljs-selector-tag, .hljs-selector-pseudo) {
+  color: var(--lmd-hl-tag);
+}
+.lavish-markdown :is(.hljs-subst, .hljs-emphasis, .hljs-strong) {
+  color: var(--lmd-code-fg);
+}
+.lavish-markdown .hljs-section {
+  color: var(--lmd-hl-heading);
+  font-weight: bold;
+}
+.lavish-markdown .hljs-bullet {
+  color: var(--lmd-hl-list);
+}
+.lavish-markdown .hljs-emphasis {
+  font-style: italic;
+}
+.lavish-markdown .hljs-strong {
+  font-weight: bold;
+}
+.lavish-markdown .hljs-addition {
+  color: var(--lmd-hl-inserted);
+  background-color: var(--lmd-hl-inserted-bg);
+}
+.lavish-markdown .hljs-deletion {
+  color: var(--lmd-hl-deleted);
+  background-color: var(--lmd-hl-deleted-bg);
 }
 
 /* Standalone page shell for a .md file. */

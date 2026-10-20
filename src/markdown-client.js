@@ -14,6 +14,7 @@ import { mermaidThemeFor } from "./markdown-theme.js";
 const BLOCK_SELECTOR = 'script[type="text/markdown"], [data-lavish-markdown]';
 const RENDERED_ATTR = "data-lavish-markdown-rendered";
 const MERMAID_CLASS = "lavish-md-mermaid";
+const THEME_ATTR = "data-lavish-md-theme";
 
 /** @param {string} value */
 function escapeHtml(value) {
@@ -122,10 +123,14 @@ function surfaceTheme(el) {
 }
 
 /**
- * Draws every mermaid fence in the theme of the surface under it, redrawing a diagram whose surface
- * changed between light and dark since it was last drawn. Mermaid never restyles a drawn SVG.
+ * Gives every rendered block the theme of the surface behind it (data-lavish-md-theme, which
+ * colours links and code), and draws every mermaid fence in that surface's theme, redrawing a
+ * diagram whose surface changed between light and dark. Mermaid never restyles a drawn SVG.
  */
-async function drawMermaid() {
+async function syncSurfaceThemes() {
+  for (const container of document.querySelectorAll(".lavish-markdown")) {
+    container.setAttribute(THEME_ATTR, surfaceTheme(container) === "dark" ? "dark" : "light");
+  }
   const nodes = [...document.querySelectorAll(`.${MERMAID_CLASS}`)];
   /** @type {Record<string, Element[]>} */
   const byTheme = { default: [], dark: [] };
@@ -158,24 +163,24 @@ async function drawMermaid() {
   }
 }
 
-let mermaidRun = Promise.resolve();
-let mermaidQueued = false;
+let themeRun = Promise.resolve();
+let themeQueued = false;
 
-/** Serialises draws; requests made while one is waiting to start share it. */
-function queueMermaid() {
-  if (mermaidQueued) return mermaidRun;
-  mermaidQueued = true;
-  mermaidRun = mermaidRun
+/** Serialises theme syncs; requests made while one is waiting to start share it. */
+function queueThemeSync() {
+  if (themeQueued) return themeRun;
+  themeQueued = true;
+  themeRun = themeRun
     .then(() => {
-      mermaidQueued = false;
-      return drawMermaid();
+      themeQueued = false;
+      return syncSurfaceThemes();
     })
     .catch((error) => console.error("Lavish Markdown: mermaid render failed", error));
-  return mermaidRun;
+  return themeRun;
 }
 
 function watchSurfaceTheme() {
-  const redraw = () => void queueMermaid();
+  const redraw = () => void queueThemeSync();
   const observer = new MutationObserver(redraw);
   for (const el of [document.documentElement, document.body]) {
     if (el) observer.observe(el, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
@@ -207,8 +212,8 @@ async function renderMarkdownBlocks(root = document) {
       el.innerHTML = html;
     }
   }
-  await queueMermaid();
-  if (document.querySelector(`.${MERMAID_CLASS}`)) watchSurfaceTheme();
+  await queueThemeSync();
+  if (document.querySelector(".lavish-markdown")) watchSurfaceTheme();
   document.documentElement.setAttribute("data-lavish-markdown-ready", "");
 }
 
