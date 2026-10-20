@@ -9552,6 +9552,55 @@ test("an End the server refuses keeps the review open with every word still queu
   assert.equal(chrome.element("end").disabled, false);
 });
 
+test("Send to Agent hands a queued note and the typed message over and keeps the review open", async () => {
+  const { state, fetchImpl } = liveFetch();
+  const ends = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/end")) ends.push(url);
+      return fetchImpl(url, init);
+    },
+  });
+  chrome.element("endedOverlay").hidden = true;
+  queueDraft(chrome, "Queued note");
+  chrome.element("chatInput").value = "Typed message";
+
+  chrome.element("send").click();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+
+  assert.equal(state.posts.length, 1);
+  assert.notEqual(state.posts[0].endSession, true);
+  assert.deepEqual(
+    state.posts[0].prompts.map((prompt) => prompt.prompt),
+    ["Queued note", "Typed message"],
+  );
+  assert.deepEqual(ends, []);
+  assert.equal(chrome.element("endedOverlay").hidden, true, "the review stays open");
+  assert.equal(chrome.element("chatInput").value, "");
+  assert.equal(chrome.element("send").disabled, false);
+  assert.equal(chrome.element("chatInput").disabled, false);
+});
+
+test("Send to Agent is disabled while an End holds its batch", async () => {
+  const chrome = await createChromeHarness({
+    storedQueue: [{ uid: "", prompt: "Final feedback", selector: "", tag: "message", text: "Freeform message" }],
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/prompts")) throw new Error("network unavailable");
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+
+  chrome.element("end").click();
+  assert.equal(chrome.element("send").disabled, true, "disabled while End is in flight");
+  chrome.sendSnapshot("");
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(chrome.element("send").disabled, true, "a failed End keeps its batch reserved for End");
+  assert.equal(chrome.element("end").disabled, false);
+});
+
 test("F1: a page opened on the ended session lists the unsent note as not sent", async () => {
   const { state, fetchImpl } = liveFetch();
   const localStore = new Map();
