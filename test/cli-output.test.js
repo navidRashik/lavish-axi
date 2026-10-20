@@ -281,8 +281,8 @@ test("home output warns agents that poll needs an observable wake path", () => {
   assert.doesNotMatch(pollHelp, /Codex/);
   assert.match(pollHelp, /re-run/);
   assert.match(pollHelp, /feedback remains queued until delivery/);
-  assert.match(pollHelp, /`Send & End` ends the session/);
-  assert.match(pollHelp, /final feedback is still delivered once/);
+  assert.match(pollHelp, /`End` ends the session/);
+  assert.match(pollHelp, /Everything the user wrote is still delivered once/);
   assert.doesNotMatch(pollHelp, /above 10 minutes/);
 });
 
@@ -1726,8 +1726,8 @@ test("poll help requires an observable wake path", () => {
   assert.match(help, /feedback remains queued until delivery/);
   assert.match(help, /Do not pass --timeout-ms/);
   assert.match(help, /tests and debugging only/);
-  assert.match(help, /`Send & End` ends the session/);
-  assert.match(help, /final feedback is still delivered once/);
+  assert.match(help, /`End` ends the session/);
+  assert.match(help, /Everything the user wrote is still delivered once/);
   assert.doesNotMatch(help, /above 10 minutes/);
 });
 
@@ -2065,6 +2065,39 @@ test("a poll reporting the session ended by the user tells the agent to stop and
   assert.match(output.next_step, /do not run `lavish-axi \/tmp\/report\.html` to reopen it/);
   assert.match(output.next_step, /deliver any remaining updates directly in this conversation/i);
   assert.match(output.next_step, /lavish-axi \/tmp\/report\.html --reopen/);
+});
+
+test("a reviewer's End reaches the agent as one event carrying every note of the round", () => {
+  const messages = [
+    { kind: "message", text: "first", prompt_id: "n-1" },
+    { kind: "annotation", text: "second", prompt_id: "n-2" },
+  ];
+  const ended = createPollOutput({
+    file: "/tmp/report.html",
+    response: { status: "ended", ended_by: "user", event: "session_ended_by_navid", messages },
+  });
+  assert.equal(ended.session.event, "session_ended_by_navid");
+  assert.deepEqual(ended.messages, messages);
+  assert.match(ended.next_step, /already delivered/);
+
+  const finalBatch = createPollOutput({
+    file: "/tmp/report.html",
+    response: {
+      status: "feedback",
+      dom_snapshot: "",
+      prompts: [{ prompt: "second" }],
+      session_ended: true,
+      ended_by: "user",
+      event: "session_ended_by_navid",
+      messages,
+    },
+  });
+  assert.equal(finalBatch.session.event, "session_ended_by_navid");
+  assert.deepEqual(finalBatch.messages, messages);
+
+  const plain = createPollOutput({ file: "/tmp/report.html", response: { status: "ended", ended_by: "user" } });
+  assert.equal(plain.session.event, undefined);
+  assert.equal(plain.messages, undefined);
 });
 
 test("a poll reporting an agent-ended session allows a plain reopen if still needed", () => {

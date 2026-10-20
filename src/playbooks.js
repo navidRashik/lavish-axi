@@ -211,7 +211,7 @@ export const PLAYBOOKS = [
       'Lavish renders every unanswered data-lavish-question as a "❓ YOUR CALL" card and counts it in a "N questions waiting" bar with jump links, so do not hand-style question cards. Name the class in the question wording (scope, behaviour or commitment) or set data-lavish-question-class; set data-lavish-asked="<ISO time>" so the bar lists the oldest question first; disable the controls (or let the store answer it) once it is answered and it collapses to one "✅ answered" line.',
       "Pass options such as tag, text, selector, target, data, queueKey, or element when they help the agent understand exactly what the user chose.",
       "For a tracked batch, queue the final selected set once in a concise, bounded data.items array; include each item's stable ID, concise label, and requested disposition, and explicitly tell the agent to account for every submitted ID before reporting completion.",
-      "Call window.lavish.sendQueuedPrompts() only when the control should immediately send committed feedback instead of waiting for the user to press Send to Agent.",
+      "Call window.lavish.sendQueuedPrompts() only when the control should immediately send committed feedback instead of waiting for the user to press Enter in the message box or End.",
       "Make queued prompts specific enough that the agent can act without asking a follow-up question.",
       "Keep native browser controls accessible and readable on mobile.",
     ],

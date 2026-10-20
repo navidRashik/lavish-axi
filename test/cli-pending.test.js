@@ -35,7 +35,7 @@ function prompt(text) {
 }
 
 // Seeds state.json with one session per scenario: an open session with no prompts, an ended
-// session whose Send & End prompt no poll ever took, and an ended session already drained.
+// session whose End prompt no poll ever took, and an ended session already drained.
 async function seed() {
   const dir = await realpath(await mkdtemp(path.join(tmpdir(), "lavish-cli-pending-")));
   const stateDir = path.join(dir, "lavish-home");
