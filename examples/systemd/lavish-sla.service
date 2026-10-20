@@ -1,0 +1,40 @@
+# lavish-sla beside the server: keeps one `lavish-axi watch` poll on every open page, acks each
+# reviewer message within ACK_AFTER_SEC, and records one alarm when a message stays unanswered
+# for SLA_SEC. See the header of scripts/lavish-sla.js for the full behaviour.
+#
+# Install after lavish-hub.service:
+#   cp lavish-sla.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now lavish-sla
+#
+# Every file it reads or writes is set below, under ~/.lavish-axi, so nothing depends on where
+# it is started. LAVISH_URL and LAVISH_AXI_PORT must match the server's port.
+
+[Unit]
+Description=lavish-sla: one poll per watched Lavish page, ack, one alarm when unanswered
+After=lavish-hub.service
+Wants=lavish-hub.service
+
+[Service]
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LAVISH_AXI_PORT=4387
+Environment=LAVISH_URL=http://127.0.0.1:4387
+Environment=LAVISH_AXI=lavish-axi
+Environment=LAVISH_STATE=%h/.lavish-axi/state.json
+Environment=LAVISH_FEED_DIR=%h/.lavish-axi/feed
+Environment=LAVISH_PROTECTED_FILE=%h/.lavish-axi/protected-pages.json
+Environment=WATCH_FILE=%h/.lavish-axi/sla/watch.json
+Environment=OWNERS_FILE=%h/.lavish-axi/sla/owners.json
+Environment=CAPTAIN_HUB=%h/.lavish-axi/sla/index.html
+Environment=SLA_STATE=%h/.lavish-axi/sla/state.json
+Environment=SLA_LOG=%h/.lavish-axi/sla/sla.log
+Environment=CAPTAIN_PUSH_SPOOL=%h/.lavish-axi/sla/alarms.jsonl
+Environment=MAC_WORKER_QUEUE=%h/.lavish-axi/sla/steer.jsonl
+WorkingDirectory=%h
+ExecStartPre=/bin/mkdir -p %h/.lavish-axi/sla %h/.lavish-axi/feed
+ExecStart=/usr/bin/env lavish-sla
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
