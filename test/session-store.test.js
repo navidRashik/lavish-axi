@@ -3436,7 +3436,7 @@ test("an in-flight draft save that lands after a send of the same words does not
 
     // The in-flight save arrives after the send with a higher revision from the same tab.
     const late = await store.saveDraft(key, { composer: "hello", tab: "tab-a", revision: 2, base: 1 });
-    assert.equal(late.stale, true);
+    assert.equal(late.sent, true);
     assert.equal((await store.findByKey(key)).draft, null);
 
     // A save the tab stamps after the send is its own words again and is kept.
@@ -3470,7 +3470,7 @@ test("a tab's in-flight draft save that lands after its send is refused while an
     );
 
     const late = await store.saveDraft(key, { composer: "from a", tab: "tab-a", revision: 1, base: 1 });
-    assert.equal(late.stale, true);
+    assert.equal(late.sent, true);
 
     // B keeps typing on the same base: A's send did not make B's draft stale.
     const fromB = await store.saveDraft(key, { composer: "from b, more", tab: "tab-b", revision: 2, base: 1 });

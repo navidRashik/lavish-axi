@@ -804,8 +804,9 @@ export class SessionStore {
   // this tab last saw it, and storing this tab's copy would drop that tab's words. The tab that made
   // the last applied save may keep saving on its own numbering (its saves arrive out of order around
   // the closing beacon), and a save of its numbered below the last applied one is refused too. A
-  // save numbered at or below the revision its tab had stamped when it last sent is refused: it was
-  // made before that send.
+  // save numbered at or below the revision its tab had stamped when it last sent is refused as
+  // `sent`: it was made before that send and may carry the sent words. That refusal says nothing
+  // about another tab, so the tab keeps saving.
   async saveDraft(key, payload) {
     return this.runExclusive(async () => {
       const state = await this.readState();
@@ -819,10 +820,8 @@ export class SessionStore {
       const applied = session.draft_revision;
       const sameTab = Boolean(tab) && applied?.tab === tab;
       const sentRevision = tab ? draftSent(session)[tab] : undefined;
-      if (
-        (sentRevision !== undefined && revision <= sentRevision) ||
-        (sameTab ? revision <= applied.revision : base !== seq)
-      ) {
+      if (sentRevision !== undefined && revision <= sentRevision) return { sent: true, draft_seq: seq };
+      if (sameTab ? revision <= applied.revision : base !== seq) {
         return { stale: true, draft: session.draft, draft_seq: seq };
       }
       session.draft = pruneDraft(normalizeDraft(payload), session, []);
