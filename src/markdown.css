@@ -114,6 +114,7 @@
   border: 0;
 }
 .lavish-markdown .lavish-md-mermaid {
+  overflow-x: auto;
   text-align: center;
 }
 

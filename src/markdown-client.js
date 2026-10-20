@@ -82,7 +82,17 @@ async function renderMermaid(root) {
   if (!nodes.length) return;
   const { default: mermaid } = await import("mermaid");
   const dark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-  mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default" });
+  // Natural size, not shrunk to the column: a wide flowchart scrolls instead of becoming unreadable.
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme: dark ? "dark" : "default",
+    flowchart: { useMaxWidth: false },
+    sequence: { useMaxWidth: false },
+    class: { useMaxWidth: false },
+    state: { useMaxWidth: false },
+    er: { useMaxWidth: false },
+  });
   await mermaid.run({ nodes, suppressErrors: true });
 }
 
