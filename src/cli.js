@@ -654,6 +654,11 @@ async function replyCommand(args) {
       "Pass --done <prompt_id>[,<prompt_id>...] or --done all",
     ]);
   }
+  if (doneIds.includes("all") && doneIds.length > 1) {
+    throw new AxiError("--done all cannot be combined with prompt ids", "VALIDATION_ERROR", [
+      "Pass either --done all or --done <prompt_id>[,<prompt_id>...]",
+    ]);
+  }
   const done = doneIds.includes("all") ? "all" : doneIds.length ? doneIds : undefined;
   const baseUrl = await ensureServer();
   const endedOk = args.includes("--ended-ok");
