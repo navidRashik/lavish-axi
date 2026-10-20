@@ -1157,7 +1157,7 @@ test("prompts queued after a session already ended are rejected, not silently st
   }
 });
 
-test("a Send & End that arrives after the session already ended is also rejected (#171)", async () => {
+test("an End that arrives after the session already ended is also rejected (#171)", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
   try {
     const stateFile = path.join(dir, "state.json");
@@ -1167,7 +1167,7 @@ test("a Send & End that arrives after the session already ended is also rejected
     const store = new SessionStore(stateFile);
     const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
     // The agent already ended the session; a browser tab that has not learned that yet clicks
-    // Send & End. That request also asking to end is not enough to make it deliverable - no
+    // End. That request also asking to end is not enough to make it deliverable - no
     // agent will ever poll for it either way, so it must be rejected the same as a plain Send.
     await store.endSession(session.key, "agent");
     const result = await store.queuePrompts(session.key, {
@@ -2907,4 +2907,164 @@ test("a transcript older than receipts is marked at load and never stamped", asy
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+async function withSyntheticSession(run) {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Synthetic</h1>");
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    await run({ store, key: session.key, stateFile });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+const draftNote = (text, id) => ({
+  uid: "",
+  prompt: text,
+  selector: "h1",
+  tag: "annotation",
+  text: "Synthetic",
+  prompt_id: id,
+});
+
+test("a reviewer's End is reported once, with every note of the round, even when nothing is left to take", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.queuePrompts(key, { prompts: [draftNote("first note", "n-1")] });
+    feedbackResult(await store.takeFeedback(key));
+    await store.queuePrompts(key, {
+      endSession: true,
+      prompts: [
+        { uid: "", prompt: "closing words", selector: "", tag: "message", text: "Freeform message", prompt_id: "n-2" },
+      ],
+    });
+
+    const taken = /** @type {any} */ (await store.takeFeedback(key));
+    assert.equal(taken.status, "feedback");
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["closing words"],
+    );
+    assert.equal(taken.event, "session_ended_by_navid");
+    assert.deepEqual(
+      taken.messages.map((message) => [message.prompt_id, message.text, typeof message.delivered_at]),
+      [
+        ["n-1", "first note", "string"],
+        ["n-2", "closing words", "string"],
+      ],
+    );
+
+    const after = /** @type {any} */ (await store.takeFeedback(key));
+    assert.deepEqual(after, { status: "ended", ended_by: "user" });
+  });
+});
+
+test("a reviewer's End with nothing queued still reports the event once", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.queuePrompts(key, { prompts: [draftNote("only note", "n-1")] });
+    feedbackResult(await store.takeFeedback(key));
+    await store.endSession(key, "user");
+
+    const taken = /** @type {any} */ (await store.takeFeedback(key));
+    assert.equal(taken.status, "ended");
+    assert.equal(taken.event, "session_ended_by_navid");
+    assert.deepEqual(
+      taken.messages.map((message) => message.prompt_id),
+      ["n-1"],
+    );
+    assert.equal(/** @type {any} */ (await store.takeFeedback(key)).event, undefined);
+  });
+});
+
+test("an agent end carries no reviewer end event", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.endSession(key, "agent");
+    assert.deepEqual(await store.takeFeedback(key), { status: "ended", ended_by: "agent" });
+  });
+});
+
+test("an unreported end event goes back for the next poll", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.endSession(key, "user");
+    assert.equal(/** @type {any} */ (await store.takeFeedback(key)).event, "session_ended_by_navid");
+    await store.unreportEnd(key);
+    assert.equal(/** @type {any} */ (await store.takeFeedback(key)).event, "session_ended_by_navid");
+  });
+});
+
+test("a draft the reviewer never sent is handed over when the agent ends the session", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    const saved = await store.saveDraft(key, {
+      prompts: [draftNote("queued in a closed tab", "d-1")],
+      composer: "typed, never sent",
+    });
+    assert.equal(saved.draft.composer, "typed, never sent");
+
+    await store.endSession(key, "agent");
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["queued in a closed tab", "typed, never sent"],
+    );
+    const session = await store.findByKey(key);
+    assert.equal(session.draft, null);
+    assert.equal(session.ended_by, "agent");
+  });
+});
+
+test("a reviewer's End clears the draft its own batch already carried, without delivering it twice", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { prompts: [draftNote("note", "d-1")], composer: "words" });
+    await store.queuePrompts(key, {
+      endSession: true,
+      prompts: [
+        draftNote("note", "d-1"),
+        { uid: "", prompt: "words", selector: "", tag: "message", text: "Freeform message", prompt_id: "d-2" },
+      ],
+    });
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["note", "words"],
+    );
+    assert.equal((await store.findByKey(key)).draft, null);
+  });
+});
+
+test("a send takes the notes and message it delivered out of the stored draft", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { prompts: [draftNote("sent", "d-1"), draftNote("kept", "d-2")], composer: "hello" });
+    await store.queuePrompts(key, {
+      prompts: [
+        draftNote("sent", "d-1"),
+        { uid: "", prompt: "hello", selector: "", tag: "message", text: "Freeform message", prompt_id: "d-3" },
+      ],
+    });
+
+    const draft = (await store.findByKey(key)).draft;
+    assert.deepEqual(
+      draft.prompts.map((prompt) => prompt.prompt_id),
+      ["d-2"],
+    );
+    assert.equal(draft.composer, "");
+  });
+});
+
+test("an ended session refuses a draft, and a reopened one keeps the draft it had", async () => {
+  await withSyntheticSession(async ({ store, key, stateFile }) => {
+    await store.saveDraft(key, { prompts: [], composer: "kept across reopen" });
+    const reopened = await store.upsertSession((await store.findByKey(key)).file, "http://localhost:4387/session/test");
+    assert.equal(reopened.draft.composer, "kept across reopen");
+
+    await store.endSession(key, "user");
+    assert.deepEqual(await store.saveDraft(key, { composer: "too late" }), { ended: true, ended_by: "user" });
+    const state = JSON.parse(await readFile(stateFile, "utf8"));
+    assert.equal(state.sessions[key].draft, null);
+  });
 });
