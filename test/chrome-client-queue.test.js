@@ -38,9 +38,14 @@ function publicQueued(chrome) {
   return chrome.queued().map(publicQueuedPrompt);
 }
 
+// A posted body without what varies per tab and per run: prompt identities and the tab's draft id
+// and revision. Tests that care about those read them from the raw body.
 function publicPostedBody(body) {
   if (!body || !Array.isArray(body.prompts)) return body;
-  return { ...body, prompts: body.prompts.map(publicQueuedPrompt) };
+  const rest = { ...body };
+  delete rest.draft_tab;
+  delete rest.draft_revision;
+  return { ...rest, prompts: body.prompts.map(publicQueuedPrompt) };
 }
 
 function assertPromptIdentity(id) {
@@ -5851,8 +5856,10 @@ test("chrome send and end carries the end intent with queued prompts", async () 
     ["/api/abc/prompts"],
   );
   assertPromptIdentity(posts[0].body.prompts[0].prompt_id);
-  const { draft_tab: endTab, ...endBody } = publicPostedBody(posts[0].body);
+  const { draft_tab: endTab, draft_revision: endRevision } = posts[0].body;
   assert.ok(typeof endTab === "string" && endTab.length > 0, "the end names its tab");
+  assert.ok(Number.isSafeInteger(endRevision), "the end names the last draft revision it stamped");
+  const endBody = publicPostedBody(posts[0].body);
   assert.deepEqual(endBody, {
     prompts: [{ prompt: "Ship this", selector: "button#ship", tag: "choice", text: "Ship" }],
     domSnapshot: "uid=1 body",
@@ -9788,6 +9795,36 @@ test("a saved draft moves the tab's base to the draft_seq the server answered", 
     chrome.draftRequests.map((request) => request.body.base),
     [0, 7],
   );
+});
+
+test("a send names the tab and the last draft revision it stamped before sending", async () => {
+  /** @type {{ url: string, body: any }[]} */
+  const posts = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      posts.push({ url, body: JSON.parse(init.body) });
+      return { ok: true, status: 200, json: async () => ({}) };
+    },
+  });
+  chrome.element("chatInput").value = "hello";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Use plan B", selector: "input#plan-b", tag: "choice", text: "Plan B" },
+  });
+  chrome.submit();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  // Every save this tab made was stamped before the send: no timer ran after the submit.
+  const lastSave = chrome.draftRequests.at(-1);
+  const sent = posts.find((post) => post.url === "/api/abc/prompts");
+  assert.ok(lastSave && sent, JSON.stringify(posts.map((post) => post.url)));
+  assert.equal(sent.body.draft_tab, lastSave.body.tab);
+  assert.equal(sent.body.draft_revision, lastSave.body.revision);
+  assert.ok(lastSave.body.revision >= 1);
 });
 
 test("a tab with no queue of its own starts from the draft a closed tab left on the server", async () => {
