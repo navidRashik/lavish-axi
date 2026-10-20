@@ -62,6 +62,13 @@ import { serializeChat, serializeChatAckIds, serializeChatSync } from "./chat-me
 import { formatServerLogLine, serverStdioIsTimestamped } from "./server-log.js";
 import { injectLavishSdk } from "./html-transform.js";
 import {
+  buildEditorUri,
+  isLocalViewer,
+  resolveEditorPath,
+  resolveEditorRoots,
+  resolveEditorSshHost,
+} from "./editor-link.js";
+import {
   bindHost,
   extraAllowedHosts,
   hostForUrl,
@@ -377,6 +384,8 @@ export async function serve({
   // artifact lives in a directory is pushed that directory's store whenever it, or a page file
   // beside it, changes. LAVISH_STATE=off turns the whole mechanism off.
   const stateEnabled = !isStateDisabled(env);
+  const editorRoots = resolveEditorRoots(env);
+  const editorSshHost = resolveEditorSshHost(env);
   const sessionStateDirs = new Map();
 
   function trackStateDir(session) {
@@ -1820,6 +1829,39 @@ export async function serve({
         { source: path.basename(session.file) },
       );
       res.json({ id, item });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // "Open in editor" from a page: the server confines the named file to the editor roots and
+  // returns a vscode:// URI for the chrome to navigate to, so the editor opens on the viewer's
+  // machine - through Remote-SSH when that machine is not this one.
+  app.post("/api/:key/editor-link", async (req, res, next) => {
+    try {
+      if (!isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
+        res.status(403).json({ error: "cross-origin editor request rejected" });
+        return;
+      }
+      const session = await store.findByKey(req.params.key);
+      if (!session) {
+        res.status(404).json({ error: "session not found" });
+        return;
+      }
+      const resolved = await resolveEditorPath(
+        { file: req.body?.path, root: req.body?.root },
+        { roots: [...editorRoots, path.dirname(session.file)] },
+      );
+      if ("error" in resolved) {
+        res.status(400).json({ error: resolved.error });
+        return;
+      }
+      const forwarded = req.headers["x-forwarded-host"] !== undefined;
+      const local =
+        !forwarded &&
+        isLocalViewer({ remoteAddress: req.socket.remoteAddress, hostname: hostnameFromHostHeader(req.headers.host) });
+      const uri = buildEditorUri(resolved.path, { sshHost: local ? "" : editorSshHost, line: req.body?.line });
+      res.json({ uri, path: resolved.path, remote: !local });
     } catch (error) {
       next(error);
     }
