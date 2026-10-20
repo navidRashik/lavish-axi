@@ -2553,6 +2553,10 @@ export function createArtifactSdk(
       if (!isTrustedAttachmentResult(event, { parentWindow: parent, nonce: ATTACHMENT_NONCE })) return;
       activeAttachments?.handleResult(msg.localId, msg.ok, msg.id, msg.error);
     }
+    if (msg.type === "lavish:editorLinkResult" && lastEditorOpener) {
+      if (msg.ok) lastEditorOpener.removeAttribute("data-lavish-open-error");
+      else lastEditorOpener.setAttribute("data-lavish-open-error", String(msg.error || "could not open the file"));
+    }
     if (msg.type === "lavish:requestSnapshot") {
       postArtifactMessage("lavish:snapshot", {
         snapshot: snapshot(),
@@ -2572,6 +2576,28 @@ export function createArtifactSdk(
       if (target) showAnnotationCard(target);
     }
   });
+
+  // An element with data-lavish-open names a file to open in the reviewer's editor. The frame can
+  // neither reach the server nor launch an external app, so it asks the chrome, which resolves the
+  // path on the server and navigates to the returned vscode:// URI. Window capture runs before the
+  // document-level annotation handlers, so the click opens the file in either mode.
+  let lastEditorOpener = null;
+  window.addEventListener(
+    "click",
+    (event) => {
+      const opener = closestElement(event.target)?.closest("[data-lavish-open]");
+      if (!opener) return;
+      event.preventDefault();
+      event.stopPropagation();
+      lastEditorOpener = opener;
+      postArtifactMessage("lavish:openInEditor", {
+        path: opener.getAttribute("data-lavish-open") || "",
+        root: opener.closest("[data-lavish-root]")?.getAttribute("data-lavish-root") || "",
+        line: opener.getAttribute("data-lavish-line") || "",
+      });
+    },
+    true,
+  );
 
   // Bring a warning's element into view and flash it. The marker is Lavish UI, so it is excluded
   // from the layout audit and never becomes a finding of its own.
