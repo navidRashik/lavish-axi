@@ -80,7 +80,8 @@ function blockSource(el) {
 async function renderMermaid(root) {
   const nodes = [...root.querySelectorAll(`.${MERMAID_CLASS}:not([data-processed])`)];
   if (!nodes.length) return;
-  const { default: mermaid } = await import("mermaid");
+  // One sibling bundle rather than mermaid's per-diagram chunks: a remote viewer pays one round trip.
+  const { default: mermaid } = await import(new URL("./mermaid.js", import.meta.url).href);
   const dark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
   // Natural size, not shrunk to the column: a wide flowchart scrolls instead of becoming unreadable.
   mermaid.initialize({
