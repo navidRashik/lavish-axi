@@ -2908,7 +2908,11 @@ test("begin-load requires the current chrome handoff before any first or direct 
     const directArtifact = await fetch(`${base}${directRedirect.headers.get("location")}`);
     assert.equal(directArtifact.status, 409);
     assert.match(directArtifact.headers.get("content-type") || "", /text\/html/);
-    assert.match(await directArtifact.text(), /Artifact load expired/);
+    const expiredPage = await directArtifact.text();
+    assert.match(expiredPage, /Artifact load expired/);
+    // The chrome around the frame is told, so it can begin a fresh load instead of leaving this
+    // page on screen for the reviewer to clear.
+    assert.match(expiredPage, /parent\.postMessage\(\{ type: "lavish:artifactLoadExpired" \}/);
     const revision = await fetch(`${base}/api/${key}/layout-warnings`).then((response) => response.json());
     assert.equal(revision.revision, firstLoad.artifact_revision);
   } finally {

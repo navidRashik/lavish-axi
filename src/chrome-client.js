@@ -4503,10 +4503,36 @@ async function reloadChromeForOutdatedBanner() {
   }
 }
 
+// The frame is showing the server's expired-load page instead of the artifact. Begin a fresh load:
+// a tab that still owns the review gets a current token and the artifact back; a tab another one
+// took the review from takes it back, because this tab is the one the reviewer is looking at and
+// its frame is empty. A tab whose frame still shows the artifact never gets here, so two open
+// tabs cannot trade the review back and forth. Queued prompts live in sessionStorage and survive
+// the takeover reload. One attempt per window keeps a server that keeps answering 409 from
+// spinning the frame.
+const EXPIRED_LOAD_RECOVERY_WINDOW_MS = 10_000;
+let lastExpiredLoadRecoveryAt = -Infinity;
+async function recoverExpiredArtifactLoad() {
+  if (ended) return;
+  const now = Date.now();
+  if (now - lastExpiredLoadRecoveryAt < EXPIRED_LOAD_RECOVERY_WINDOW_MS) return;
+  lastExpiredLoadRecoveryAt = now;
+  const reloaded = await resetFrame().catch(() => false);
+  if (reloaded || ended || !handoffBanner || handoffBanner.hidden) return;
+  await flushWhiteboardsBeforeChromeReload();
+  location.reload();
+}
+
 window.addEventListener("message", (event) => {
   if (event.source !== frame.contentWindow) return;
 
   const msg = event.data || {};
+  // The expired-load page carries no token by construction: it is what the server answers when
+  // the frame asked with one that is no longer current.
+  if (msg.type === "lavish:artifactLoadExpired") {
+    recoverExpiredArtifactLoad();
+    return;
+  }
   const messageToken = String(msg.artifact_load_token || "");
   if (messageToken !== artifactLoadToken) {
     // A pass can be stamped by the load that just lost a token race. Ask the current artifact

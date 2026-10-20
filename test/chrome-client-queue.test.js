@@ -4294,6 +4294,45 @@ test("a superseded reload keeps the artifact already on screen and leaves the ga
   assert.notEqual(chrome.element("layoutGateTitle").textContent, "This review is already open in another tab.");
 });
 
+test("a frame showing the expired-load page gets the current artifact back without the reviewer", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  await flushPromises();
+  const staleToken = chrome.artifactLoadToken();
+  const beginsBefore = chrome.artifactBeginRequests.length;
+
+  // The expired page carries no load token: it is the server's answer to one that is not current.
+  chrome.sendFrameMessage({ type: "lavish:artifactLoadExpired" });
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(chrome.artifactBeginRequests.length, beginsBefore + 1);
+  assert.notEqual(chrome.artifactLoadToken(), staleToken);
+  assert.match(chrome.frame.src, new RegExp(`artifact_load_token=${chrome.artifactLoadToken()}`));
+  assert.equal(chrome.reloadCount(), 0, "a tab that still owns the review keeps its chrome and queue");
+});
+
+test("an expired load in a tab another one took the review from takes it back once", async () => {
+  const beginLoadResponses = [];
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html", beginLoadResponses });
+  await flushPromises();
+  beginLoadResponses.push(
+    { ok: false, status: 409, json: async () => ({ status: "superseded" }) },
+    { ok: false, status: 409, json: async () => ({ status: "superseded" }) },
+  );
+
+  chrome.sendFrameMessage({ type: "lavish:artifactLoadExpired" });
+  await flushPromises();
+  await flushPromises();
+  await flushPromises();
+  assert.equal(chrome.reloadCount(), 1, "the chrome reloads to take the review over");
+
+  // A server that keeps answering with the expired page cannot spin the tab.
+  chrome.sendFrameMessage({ type: "lavish:artifactLoadExpired" });
+  await flushPromises();
+  await flushPromises();
+  assert.equal(chrome.reloadCount(), 1);
+});
+
 test("a chrome told to reload after a server restart waits for the replacement to answer", async () => {
   let healthy = false;
   const chrome = await createChromeHarness({
