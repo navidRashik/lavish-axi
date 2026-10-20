@@ -170,3 +170,16 @@ test("on a page Navid ended, only messages sent well before the end skip the ala
     ["lavish-sla:k1|withEnd", "lavish-sla:k1|withEnd:remind"],
   );
 });
+
+test("a watched page past the grace with no listener is added to the one watcher; one with a listener is not", async (t) => {
+  const feed = path.join(os.tmpdir(), "lavish-sla-feed");
+  const f = fixture(t, { POLL_GRACE_SEC: "0", LAVISH_FEED_DIR: feed });
+  const sla = new Sla(f.config);
+  const watched = new Map([["k1", f.session]]);
+  sla.polls([f.session], watched, new Set(["k1"]));
+  sla.polls([f.session], watched, new Set());
+  for (let i = 0; i < 100 && f.replies().length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(f.replies(), [
+    ["watch", "--feed-dir", feed, "--owner", "lavish-sla", "--add", f.page, "--name", "lorem"],
+  ]);
+});
