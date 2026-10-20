@@ -2365,10 +2365,17 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
     settleAcknowledgementGuidance(submission, preserveFailureState);
     return;
   }
-  const body = { prompts: prompts.map(stripInternalPromptFields), domSnapshot: submission.domSnapshot };
-  // An End names this tab and the draft it last saw, so the server can tell whether the stored
-  // draft is another tab's newer words that this batch does not carry.
-  if (shouldEndSession) Object.assign(body, { endSession: true, draft_tab: draftTab, draft_base: draftBase });
+  // Every send names this tab and the last draft revision it stamped: a save of this tab's with a
+  // revision at or below it was made before the send and may still carry the words just sent.
+  const body = {
+    prompts: prompts.map(stripInternalPromptFields),
+    domSnapshot: submission.domSnapshot,
+    draft_tab: draftTab,
+    draft_revision: draftRevision,
+  };
+  // An End also names the draft it last saw, so the server can tell whether the stored draft is
+  // another tab's newer words that this batch does not carry.
+  if (shouldEndSession) Object.assign(body, { endSession: true, draft_base: draftBase });
   let response;
   try {
     response = await fetch("/api/" + key + "/prompts", {

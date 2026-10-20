@@ -352,6 +352,18 @@ export class SessionStore {
       if (JSON.stringify(nextDraft) !== JSON.stringify(session.draft ?? null))
         session.draft_seq = draftSeq(session) + 1;
       session.draft = nextDraft;
+      // A send raises its tab's applied draft revision to the last one that tab stamped before
+      // sending, so a save of that tab's still in flight (made before the send, possibly carrying
+      // the sent words) is refused when it lands. Another tab's applied revision is left alone:
+      // that tab's saves are checked by draft_seq, which the prune above has already moved.
+      const sentTab = typeof payload.draft_tab === "string" ? payload.draft_tab.slice(0, 64) : "";
+      const applied = session.draft_revision;
+      if (sentTab && Number.isSafeInteger(payload.draft_revision) && (!applied || applied.tab === sentTab)) {
+        session.draft_revision = {
+          tab: sentTab,
+          revision: Math.max(applied?.revision ?? 0, payload.draft_revision),
+        };
+      }
     }
     if (restoring) {
       const restoredFailures = Array.isArray(payload.artifact_failures)
