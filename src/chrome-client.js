@@ -156,6 +156,7 @@ const copyShareUrlButton = /** @type {HTMLButtonElement} */ (document.getElement
 const copyUpdateKeyButton = /** @type {HTMLButtonElement} */ (document.getElementById("copyUpdateKey"));
 const copyShareSiteIdButton = /** @type {HTMLButtonElement} */ (document.getElementById("copyShareSiteId"));
 const endButton = /** @type {HTMLButtonElement} */ (document.getElementById("end"));
+const sendButton = /** @type {HTMLButtonElement} */ (document.getElementById("send"));
 const copyPathButton = /** @type {HTMLButtonElement} */ (document.getElementById("copyPath"));
 const copyHint = /** @type {HTMLSpanElement} */ (document.getElementById("copyHint"));
 const copyHintText = /** @type {HTMLSpanElement} */ (document.getElementById("copyHintText"));
@@ -321,7 +322,7 @@ const SNAPSHOT_REQUEST_TIMEOUT_MS = 5000;
 const SEND_STALLED_COPY =
   "Still trying to send. Your feedback is saved in this tab. Keep this tab open while Lavish catches up, and check that the server is running.";
 const SEND_FAILED_COPY =
-  "Could not send. Your feedback is still queued in this tab. Check that Lavish is running, then press Enter in the message box to retry, or click End.";
+  "Could not send. Your feedback is still queued in this tab. Check that Lavish is running, then click Send to Agent or press Enter in the message box to retry, or click End.";
 // A network failure or a 5xx on an ordinary Send is resent by the retry probe, so no click is asked for.
 // "Could not send" rather than "could not reach": a 5xx is a server that answered and failed.
 const SEND_RETRYING_COPY = "Could not send. Your feedback is saved and will be sent automatically when Lavish is back.";
@@ -922,6 +923,7 @@ function updateSendState() {
   annotationSwitch.disabled = ended || terminalReserved;
   chatInput.disabled = ended || terminalReserved;
   chatAttachButton.disabled = ended || terminalReserved;
+  sendButton.disabled = ended || terminalReserved;
   // A failed End keeps its reserved batch, and End stays the one control that retries it.
   endButton.disabled = ended || Boolean(terminalSubmission?.inFlight);
   if (warningsQueueButton) updateWarningSelectionState();
@@ -4961,6 +4963,7 @@ function toggleAnnotationMode() {
 annotationSwitch.onclick = toggleAnnotationMode;
 
 endButton.onclick = () => void endReview();
+sendButton.onclick = () => sendQueued(false);
 moreButton.onclick = () => {
   closeWarningsDrawer();
   closeRevisionsDrawer();
