@@ -3419,3 +3419,69 @@ test("a late draft save cannot bring back words a send already delivered", async
     assert.equal((await store.findByKey(key)).draft, null);
   });
 });
+
+test("an in-flight draft save that lands after a send of the same words does not hand them over again", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    // The tab saved "hello" (revision 1, draft_seq 0 -> 1), stamped a newer save of the same text
+    // (revision 2, still based on draft_seq 1), then sent "hello" with Enter. The send names the
+    // tab and the last revision it stamped (2), and it lands before the revision-2 save.
+    await store.saveDraft(key, { composer: "hello", tab: "tab-a", revision: 1, base: 0 });
+    await store.queuePrompts(key, {
+      draft_tab: "tab-a",
+      draft_revision: 2,
+      prompts: [{ uid: "", prompt: "hello", selector: "", tag: "message", text: "Freeform message", prompt_id: "m-1" }],
+    });
+    assert.equal((await store.findByKey(key)).draft, null);
+    const first = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      first.prompts.map((prompt) => prompt.prompt),
+      ["hello"],
+    );
+
+    // The in-flight save arrives after the send with a higher revision from the same tab.
+    const late = await store.saveDraft(key, { composer: "hello", tab: "tab-a", revision: 2, base: 1 });
+    assert.equal(late.sent, true);
+    assert.equal((await store.findByKey(key)).draft, null);
+
+    // A save the tab stamps after the send is its own words again and is kept.
+    const next = await store.saveDraft(key, { composer: "next thought", tab: "tab-a", revision: 3, base: 2 });
+    assert.equal(next.stale, undefined);
+    await store.endSession(key, "agent");
+
+    const after = await store.findByKey(key);
+    const handedOver = (after.prompts || []).map((prompt) => prompt.prompt);
+    assert.deepEqual(handedOver, ["next thought"], `the agent End handed over ${JSON.stringify(handedOver)}`);
+    assert.equal(after.status, "ended");
+  });
+});
+
+test("a tab's in-flight draft save that lands after its send is refused while another tab owns the draft", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    // Tab B owns the stored draft (draft_seq 0 -> 1). Tab A, based on draft_seq 1, stamps a save of
+    // "from a" (revision 1) and sends "from a" before that save lands. B's draft does not hold A's
+    // words, so the send leaves the draft and draft_seq as they were.
+    await store.saveDraft(key, { composer: "from b", tab: "tab-b", revision: 1, base: 0 });
+    await store.queuePrompts(key, {
+      draft_tab: "tab-a",
+      draft_revision: 1,
+      prompts: [
+        { uid: "", prompt: "from a", selector: "", tag: "message", text: "Freeform message", prompt_id: "m-1" },
+      ],
+    });
+    assert.deepEqual(
+      feedbackResult(await store.takeFeedback(key)).prompts.map((prompt) => prompt.prompt),
+      ["from a"],
+    );
+
+    const late = await store.saveDraft(key, { composer: "from a", tab: "tab-a", revision: 1, base: 1 });
+    assert.equal(late.sent, true);
+
+    // B keeps typing on the same base: A's send did not make B's draft stale.
+    const fromB = await store.saveDraft(key, { composer: "from b, more", tab: "tab-b", revision: 2, base: 1 });
+    assert.equal(fromB.stale, undefined);
+    await store.endSession(key, "agent");
+
+    const handedOver = ((await store.findByKey(key)).prompts || []).map((prompt) => prompt.prompt);
+    assert.deepEqual(handedOver, ["from b, more"], `the agent End handed over ${JSON.stringify(handedOver)}`);
+  });
+});

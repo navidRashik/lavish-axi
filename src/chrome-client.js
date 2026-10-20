@@ -246,8 +246,8 @@ let layoutWarnings = Array.isArray(sessionData.initialLayoutWarnings) ? sessionD
 const selectedWarningIds = new Set(loadJsonState(warningSelectionStorageKey, []));
 let warningsDrawerOpen = false;
 /** @typedef {{ done: Promise<boolean>, finish: (succeeded: boolean) => void }} FeedbackPreparation */
-/** @typedef {{ prompts: any[], inFlight: boolean, order: number }} TerminalSubmission */
-/** @type {Map<string, { action: "copy" | "submit", prompts?: any[], chatAtRequest?: any[], endAfter?: boolean, terminal?: TerminalSubmission | null, acknowledgement?: object, order?: number, timeout?: ReturnType<typeof setTimeout> }>} */
+/** @typedef {{ prompts: any[], inFlight: boolean, order: number, draftRevision?: number }} TerminalSubmission */
+/** @type {Map<string, { action: "copy" | "submit", prompts?: any[], chatAtRequest?: any[], endAfter?: boolean, terminal?: TerminalSubmission | null, acknowledgement?: object, order?: number, draftRevision?: number, timeout?: ReturnType<typeof setTimeout> }>} */
 const snapshotRequests = new Map();
 let nextSnapshotRequestId = 0;
 let nextSendOperationOrder = 0;
@@ -558,6 +558,14 @@ function stampedDraft(body) {
   return JSON.stringify({ ...JSON.parse(body), tab: draftTab, revision: draftRevision, base: draftBase });
 }
 
+// The revision a batch names when it is sent: the last one stamped when the batch was taken. An
+// End keeps the one taken with its first attempt, so a retry does not claim saves made after it.
+function batchDraftRevision(terminal) {
+  if (!terminal) return draftRevision;
+  if (!Number.isSafeInteger(terminal.draftRevision)) terminal.draftRevision = draftRevision;
+  return terminal.draftRevision;
+}
+
 function saveDraft() {
   draftTimer = undefined;
   draftSaving = draftSaving.then(async () => {
@@ -576,6 +584,10 @@ function saveDraft() {
       } else if (response.status === 409 && result?.status === "stale") {
         draftConflict = true;
         showSendHint(DRAFT_CONFLICT_COPY, null, false);
+      } else if (response.status === 409 && result?.status === "sent") {
+        // The save was made before this tab's last send and was not stored; what the tab holds
+        // now (the words typed since) is saved next.
+        scheduleDraftSave();
       } else if (response.status !== 409) {
         scheduleDraftSave(DRAFT_RETRY_DELAY_MS);
       }
@@ -1937,6 +1949,7 @@ function requestSnapshot(action, prompts = [], endAfter = false, terminal = null
           endAfter,
           terminal,
           order: terminal?.order || ++nextSendOperationOrder,
+          draftRevision: batchDraftRevision(terminal),
         }
       : { action };
   snapshotRequests.set(requestId, request);
@@ -1975,6 +1988,7 @@ function completeSnapshotRequest(requestId, snapshot) {
     terminal: request.terminal || null,
     acknowledgement: request.acknowledgement || null,
     order: request.order || 0,
+    draftRevision: request.draftRevision,
   }).catch(() => {});
 }
 
@@ -2365,10 +2379,18 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
     settleAcknowledgementGuidance(submission, preserveFailureState);
     return;
   }
-  const body = { prompts: prompts.map(stripInternalPromptFields), domSnapshot: submission.domSnapshot };
-  // An End names this tab and the draft it last saw, so the server can tell whether the stored
-  // draft is another tab's newer words that this batch does not carry.
-  if (shouldEndSession) Object.assign(body, { endSession: true, draft_tab: draftTab, draft_base: draftBase });
+  // Every send names this tab and the last draft revision it had stamped when the batch was taken:
+  // a save of this tab's at or below it was made before the batch and may still carry its words,
+  // while a later save (a follow-up typed while the batch waited) holds only words not yet sent.
+  const body = {
+    prompts: prompts.map(stripInternalPromptFields),
+    domSnapshot: submission.domSnapshot,
+    draft_tab: draftTab,
+    draft_revision: submission.draftRevision,
+  };
+  // An End also names the draft it last saw, so the server can tell whether the stored draft is
+  // another tab's newer words that this batch does not carry.
+  if (shouldEndSession) Object.assign(body, { endSession: true, draft_base: draftBase });
   let response;
   try {
     response = await fetch("/api/" + key + "/prompts", {
@@ -2550,6 +2572,7 @@ function resendRetryBuffer() {
     terminal: null,
     acknowledgement: null,
     order: ++nextSendOperationOrder,
+    draftRevision,
   }).catch(() => {});
 }
 
