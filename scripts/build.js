@@ -83,15 +83,13 @@ await esbuild.build({
   },
 });
 
-// Markdown renderer: marked + DOMPurify + highlight.js in the entry, mermaid split into chunks the
-// entry imports only when a page has a mermaid fence. Served from /markdown-assets/ so a rendered
-// .md page or an HTML page's Markdown block needs no network.
+// Markdown renderer: marked + DOMPurify + highlight.js in markdown.js, and mermaid in one mermaid.js
+// that markdown.js imports only when a page has a mermaid fence. Neither is split, so a viewer makes
+// at most two script requests. Served from /markdown-assets/ so rendering needs no network.
 await rm("dist/markdown", { recursive: true, force: true });
 await esbuild.build({
-  entryPoints: { markdown: "src/markdown-client.js" },
+  entryPoints: { markdown: "src/markdown-client.js", mermaid: "src/markdown-mermaid.js" },
   outdir: "dist/markdown",
-  chunkNames: "chunk-[hash]",
-  splitting: true,
   bundle: true,
   minify: true,
   format: "esm",

@@ -138,10 +138,11 @@ async function startMarkdownServer() {
   const dir = await mkdtemp(path.join(os.tmpdir(), "lavish-md-render-"));
   const assetsDir = path.join(dir, "markdown-assets");
   await esbuild.build({
-    entryPoints: { markdown: path.join(projectRoot, "src/markdown-client.js") },
+    entryPoints: {
+      markdown: path.join(projectRoot, "src/markdown-client.js"),
+      mermaid: path.join(projectRoot, "src/markdown-mermaid.js"),
+    },
     outdir: assetsDir,
-    chunkNames: "chunk-[hash]",
-    splitting: true,
     bundle: true,
     format: "esm",
     platform: "browser",
