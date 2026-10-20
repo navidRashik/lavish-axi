@@ -3128,6 +3128,25 @@ test("a save from a tab that has not seen another tab's newer draft is refused, 
   });
 });
 
+test("reopening the page keeps the draft counter, so a tab based on the old draft is still refused", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { composer: "newer-tab text", tab: "tab-new", revision: 1, base: 0 });
+    const before = await store.findByKey(key);
+    await store.upsertSession(before.file, before.url);
+
+    const reopened = await store.findByKey(key);
+    assert.equal(reopened.draft_seq, 1);
+    assert.deepEqual(reopened.draft_revision, { tab: "tab-new", revision: 1 });
+    const older = await store.saveDraft(key, { composer: "older-tab text", tab: "tab-old", revision: 1, base: 0 });
+    assert.equal(older.stale, true);
+    assert.equal((await store.findByKey(key)).draft.composer, "newer-tab text");
+
+    // The tab whose save is the last applied one keeps saving across the reopen.
+    const same = await store.saveDraft(key, { composer: "newer-tab text, more", tab: "tab-new", revision: 2, base: 0 });
+    assert.equal(same.draft_seq, 2);
+  });
+});
+
 test("a late draft save cannot bring back words a send already delivered", async () => {
   await withSyntheticSession(async ({ store, key }) => {
     await store.saveDraft(key, { composer: "hello", tab: "tab-a", revision: 3 });
