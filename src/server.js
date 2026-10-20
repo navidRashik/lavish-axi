@@ -132,6 +132,23 @@ const designAssetUrls = {
     source: new URL("../node_modules/@tailwindcss/browser/dist/index.global.js", import.meta.url),
     type: "application/javascript",
   },
+  // The Lavish house theme: a palette and layout stylesheet, a Mermaid renderer that themes
+  // diagrams from that palette, and a keeper for tabbed pages. Artifacts load them from /design/.
+  "house.css": {
+    packaged: new URL("./design/house.css", import.meta.url),
+    source: new URL("../assets/house/house.css", import.meta.url),
+    type: "text/css",
+  },
+  "house-mermaid.js": {
+    packaged: new URL("./design/house-mermaid.js", import.meta.url),
+    source: new URL("../assets/house/house-mermaid.js", import.meta.url),
+    type: "application/javascript",
+  },
+  "house-keep.js": {
+    packaged: new URL("./design/house-keep.js", import.meta.url),
+    source: new URL("../assets/house/house-keep.js", import.meta.url),
+    type: "application/javascript",
+  },
 };
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
