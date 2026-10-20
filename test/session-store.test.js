@@ -3068,3 +3068,25 @@ test("an ended session refuses a draft, and a reopened one keeps the draft it ha
     assert.equal(state.sessions[key].draft, null);
   });
 });
+
+test("ended_at marks the moment a round ended and stays put through later writes", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    assert.equal((await store.findByKey(key)).ended_at, null);
+    await store.queuePrompts(key, { endSession: true, prompts: [draftNote("last words", "n-1")] });
+    const endedAt = (await store.findByKey(key)).ended_at;
+    assert.equal(typeof endedAt, "string");
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    feedbackResult(await store.takeFeedback(key));
+    await store.addAgentReply(key, "noted");
+    await store.endSession(key, "agent");
+    const after = await store.findByKey(key);
+    assert.equal(after.ended_at, endedAt);
+    assert.notEqual(after.updated_at, endedAt);
+
+    const reopened = await store.upsertSession(after.file, "http://localhost:4387/session/test");
+    assert.equal(reopened.ended_at, null);
+    await store.endSession(key, "agent");
+    assert.notEqual((await store.findByKey(key)).ended_at, endedAt);
+  });
+});

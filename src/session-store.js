@@ -166,8 +166,9 @@ export class SessionStore {
       // composer text). Carried across a reopen like the chat: it is the reviewer's words.
       draft: normalizeDraft(existing.draft),
       // The one `session_ended_by_navid` poll event belongs to the round that ended; a reopened
-      // session starts a round whose end has not been reported.
+      // session starts a round whose end has not been reported, and has not ended.
       end_reported: false,
+      ended_at: null,
       updated_at: new Date().toISOString(),
     };
     state.sessions[key] = session;
@@ -352,7 +353,11 @@ export class SessionStore {
           ? "feedback"
           : "open";
     if (shouldEndSession) session.ended_by = "user";
-    session.updated_at = new Date().toISOString();
+    const now = new Date().toISOString();
+    // The moment the round ended, written once: later writes to an ended session (a poll taking
+    // the final batch, an agent reply) move updated_at but never this.
+    if (shouldEndSession && !alreadyEnded) session.ended_at = now;
+    session.updated_at = now;
     await this.writeState(state);
     return { ...session, fresh_feedback: !restoring && acceptedPrompts.length > 0 };
   }
@@ -727,6 +732,7 @@ export class SessionStore {
         return null;
       }
       const existingEndedBy = session.status === "ended" ? session.ended_by : undefined;
+      const wasOpen = session.status !== "ended";
       // The reviewer's End comes from the tab that holds their words and sends them itself, so the
       // draft it leaves behind is already handed over. Any other end hands the draft over with it;
       // a draft the queue refuses (a layout warning that changed) stays stored rather than dropped.
@@ -742,6 +748,7 @@ export class SessionStore {
       session.status = "ended";
       session.ended_by = nextEndedBy;
       session.updated_at = new Date().toISOString();
+      if (wasOpen && !session.ended_at) session.ended_at = session.updated_at;
       await this.writeState(state);
       return session;
     });
