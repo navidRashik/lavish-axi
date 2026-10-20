@@ -11,10 +11,10 @@ Several static pages in one directory often describe the same things: a PR, a Ji
   "version": 1,
   "staleAfterHours": 24,
   "items": {
-    "pr:newscred/opal-app#9194": {
+    "pr:acme/app#123": {
       "status": "merged",
       "title": "Lock fix",
-      "url": "https://github.com/newscred/opal-app/pull/9194",
+      "url": "https://github.com/acme/app/pull/123",
       "updatedAt": "2026-10-14T15:00:00Z",
       "source": "github"
     }
@@ -31,8 +31,8 @@ Several static pages in one directory often describe the same things: a PR, a Ji
 ## Writing it
 
 ```sh
-lavish-axi state set "pr:newscred/opal-app#9194" status=merged review=none --source github [--dir <pagesDir>]
-lavish-axi state get "pr:newscred/opal-app#9194" [--dir <pagesDir>]
+lavish-axi state set "pr:acme/app#123" status=merged review=none --source github [--dir <pagesDir>]
+lavish-axi state get "pr:acme/app#123" [--dir <pagesDir>]
 lavish-axi state list [--dir <pagesDir>]
 ```
 
