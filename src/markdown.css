@@ -1,30 +1,24 @@
 @import "highlight.js/styles/github.css" (prefers-color-scheme: light);
 @import "highlight.js/styles/github-dark.css" (prefers-color-scheme: dark);
 
-/* Rendered Markdown, scoped to .lavish-markdown so an HTML page embedding a block keeps its own styles. */
+/* Rendered Markdown, scoped to .lavish-markdown so an HTML page embedding a block keeps its own
+   styles. Text colour and font come from the host; rules and tints derive from currentColor so a
+   block reads on light and dark hosts alike. Code blocks carry their own background to match the
+   highlight theme chosen by the colour scheme. */
 .lavish-markdown {
-  --lmd-fg: #1f2328;
-  --lmd-muted: #59636e;
-  --lmd-border: #d1d9e0;
-  --lmd-subtle: #f6f8fa;
+  --lmd-muted: color-mix(in srgb, currentColor 70%, transparent);
+  --lmd-border: color-mix(in srgb, currentColor 22%, transparent);
+  --lmd-subtle: color-mix(in srgb, currentColor 7%, transparent);
+  --lmd-code-bg: #f6f8fa;
+  --lmd-code-fg: #1f2328;
   --lmd-link: #0969da;
-  color: var(--lmd-fg);
-  font:
-    16px/1.6 -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    "Noto Sans",
-    Helvetica,
-    Arial,
-    sans-serif;
+  line-height: 1.6;
   overflow-wrap: anywhere;
 }
 @media (prefers-color-scheme: dark) {
   .lavish-markdown {
-    --lmd-fg: #f0f6fc;
-    --lmd-muted: #9198a1;
-    --lmd-border: #3d444d;
-    --lmd-subtle: #151b23;
+    --lmd-code-bg: #151b23;
+    --lmd-code-fg: #f0f6fc;
     --lmd-link: #4493f8;
   }
 }
@@ -80,7 +74,8 @@
 }
 .lavish-markdown pre {
   overflow: auto;
-  background: var(--lmd-subtle);
+  color: var(--lmd-code-fg);
+  background: var(--lmd-code-bg);
   border-radius: 6px;
 }
 .lavish-markdown pre > code {
@@ -121,10 +116,20 @@
 /* Standalone page shell for a .md file. */
 .lavish-markdown-page {
   margin: 0;
+  color: #1f2328;
   background: #ffffff;
+  font:
+    16px/1.6 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "Noto Sans",
+    Helvetica,
+    Arial,
+    sans-serif;
 }
 @media (prefers-color-scheme: dark) {
   .lavish-markdown-page {
+    color: #f0f6fc;
     background: #0d1117;
   }
 }
