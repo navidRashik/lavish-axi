@@ -1157,7 +1157,7 @@ test("prompts queued after a session already ended are rejected, not silently st
   }
 });
 
-test("a Send & End that arrives after the session already ended is also rejected (#171)", async () => {
+test("an End that arrives after the session already ended is also rejected (#171)", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
   try {
     const stateFile = path.join(dir, "state.json");
@@ -1167,7 +1167,7 @@ test("a Send & End that arrives after the session already ended is also rejected
     const store = new SessionStore(stateFile);
     const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
     // The agent already ended the session; a browser tab that has not learned that yet clicks
-    // Send & End. That request also asking to end is not enough to make it deliverable - no
+    // End. That request also asking to end is not enough to make it deliverable - no
     // agent will ever poll for it either way, so it must be rejected the same as a plain Send.
     await store.endSession(session.key, "agent");
     const result = await store.queuePrompts(session.key, {
@@ -2928,4 +2928,490 @@ test("a transcript older than receipts is marked at load and never stamped", asy
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+async function withSyntheticSession(run) {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Synthetic</h1>");
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    await run({ store, key: session.key, stateFile });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+const draftNote = (text, id) => ({
+  uid: "",
+  prompt: text,
+  selector: "h1",
+  tag: "annotation",
+  text: "Synthetic",
+  prompt_id: id,
+});
+
+test("a reviewer's End is reported once, with every note of the round, even when nothing is left to take", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.queuePrompts(key, { prompts: [draftNote("first note", "n-1")] });
+    feedbackResult(await store.takeFeedback(key));
+    await store.queuePrompts(key, {
+      endSession: true,
+      prompts: [
+        { uid: "", prompt: "closing words", selector: "", tag: "message", text: "Freeform message", prompt_id: "n-2" },
+      ],
+    });
+
+    const taken = /** @type {any} */ (await store.takeFeedback(key));
+    assert.equal(taken.status, "feedback");
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["closing words"],
+    );
+    assert.equal(taken.event, "session_ended_by_navid");
+    assert.deepEqual(
+      taken.messages.map((message) => [message.prompt_id, message.text, typeof message.delivered_at]),
+      [
+        ["n-1", "first note", "string"],
+        ["n-2", "closing words", "string"],
+      ],
+    );
+
+    const after = /** @type {any} */ (await store.takeFeedback(key));
+    assert.deepEqual(after, { status: "ended", ended_by: "user" });
+  });
+});
+
+test("a reviewer's End with nothing queued still reports the event once", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.queuePrompts(key, { prompts: [draftNote("only note", "n-1")] });
+    feedbackResult(await store.takeFeedback(key));
+    await store.endSession(key, "user");
+
+    const taken = /** @type {any} */ (await store.takeFeedback(key));
+    assert.equal(taken.status, "ended");
+    assert.equal(taken.event, "session_ended_by_navid");
+    assert.deepEqual(
+      taken.messages.map((message) => message.prompt_id),
+      ["n-1"],
+    );
+    assert.equal(/** @type {any} */ (await store.takeFeedback(key)).event, undefined);
+  });
+});
+
+test("an agent end carries no reviewer end event", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.endSession(key, "agent");
+    assert.deepEqual(await store.takeFeedback(key), { status: "ended", ended_by: "agent" });
+  });
+});
+
+test("an unreported end event goes back for the next poll", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.endSession(key, "user");
+    assert.equal(/** @type {any} */ (await store.takeFeedback(key)).event, "session_ended_by_navid");
+    await store.unreportEnd(key);
+    assert.equal(/** @type {any} */ (await store.takeFeedback(key)).event, "session_ended_by_navid");
+  });
+});
+
+test("a draft the reviewer never sent is handed over when the agent ends the session", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    const saved = await store.saveDraft(key, {
+      prompts: [draftNote("queued in a closed tab", "d-1")],
+      composer: "typed, never sent",
+    });
+    assert.equal(saved.draft.composer, "typed, never sent");
+
+    await store.endSession(key, "agent");
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["queued in a closed tab", "typed, never sent"],
+    );
+    const session = await store.findByKey(key);
+    assert.equal(session.draft, null);
+    assert.equal(session.ended_by, "agent");
+  });
+});
+
+test("a reviewer's End clears the draft its own batch already carried, without delivering it twice", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { prompts: [draftNote("note", "d-1")], composer: "words" });
+    await store.queuePrompts(key, {
+      endSession: true,
+      prompts: [
+        draftNote("note", "d-1"),
+        { uid: "", prompt: "words", selector: "", tag: "message", text: "Freeform message", prompt_id: "d-2" },
+      ],
+    });
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["note", "words"],
+    );
+    assert.equal((await store.findByKey(key)).draft, null);
+  });
+});
+
+test("an End from a tab that never saw another tab's newer draft delivers that draft too", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { composer: "newer-tab text", tab: "tab-new", revision: 1, base: 0 });
+    await store.queuePrompts(key, {
+      endSession: true,
+      draft_tab: "tab-old",
+      draft_base: 0,
+      prompts: [
+        { uid: "", prompt: "older-tab text", selector: "", tag: "message", text: "Freeform message", prompt_id: "o-1" },
+      ],
+    });
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["older-tab text", "newer-tab text"],
+    );
+    assert.equal((await store.findByKey(key)).draft, null);
+  });
+});
+
+test("an End with nothing queued from a tab behind another tab's draft delivers that draft", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { composer: "newer-tab text", tab: "tab-new", revision: 1, base: 0 });
+    await store.endSession(key, "user", { tab: "tab-old", base: 0 });
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["newer-tab text"],
+    );
+    assert.equal(/** @type {any} */ (taken).event, "session_ended_by_navid");
+    assert.equal((await store.findByKey(key)).draft, null);
+  });
+});
+
+test("an End from the tab that wrote the stored draft replaces it with its batch", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { composer: "half a th", tab: "tab-a", revision: 1, base: 0 });
+    await store.queuePrompts(key, {
+      endSession: true,
+      draft_tab: "tab-a",
+      draft_base: 0,
+      prompts: [
+        { uid: "", prompt: "half a thought", selector: "", tag: "message", text: "Freeform message", prompt_id: "a-1" },
+      ],
+    });
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["half a thought"],
+    );
+  });
+});
+
+// A resolver that knows exactly the uploads in `known`; any other id is an expired upload.
+const draftImageResolver = (known) => ({
+  resolveAttachment: async (_key, id) =>
+    known.includes(id)
+      ? { id, type: "image", path: "/tmp/" + id, mime: "image/png", bytes: 10, width: 1, height: 1 }
+      : null,
+  maxPerPrompt: 4,
+  maxPromptBytes: 25 * 1024 * 1024,
+});
+
+const draftShot = (id) => ({ ...draftNote("see the screenshot", "img-1"), attachments: [{ id, name: "shot.png" }] });
+
+test("a draft's uploaded image arrives when a tab behind that draft ends the review", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    const image = unknownAttachmentId(1);
+    await store.saveDraft(key, { prompts: [draftShot(image)], composer: "", tab: "tab-new", revision: 1, base: 0 });
+    await store.queuePrompts(
+      key,
+      {
+        endSession: true,
+        draft_tab: "tab-old",
+        draft_base: 0,
+        prompts: [
+          { uid: "", prompt: "older", selector: "", tag: "message", text: "Freeform message", prompt_id: "o-1" },
+        ],
+      },
+      draftImageResolver([image]),
+    );
+
+    const taken = feedbackResult(await store.takeFeedback(key));
+    assert.deepEqual(
+      taken.prompts.map((prompt) => prompt.prompt),
+      ["older", "see the screenshot"],
+    );
+    const shot = taken.prompts[1];
+    assert.deepEqual(
+      shot.attachments.map((attachment) => [attachment.id, attachment.name, attachment.path]),
+      [[image, "shot.png", "/tmp/" + image]],
+    );
+  });
+});
+
+test("a draft's uploaded image arrives when an empty End from a stale tab or the agent hands the draft over", async () => {
+  for (const [endedBy, from] of [
+    ["user", { tab: "tab-old", base: 0 }],
+    ["agent", {}],
+  ]) {
+    await withSyntheticSession(async ({ store, key }) => {
+      const image = unknownAttachmentId(2);
+      await store.saveDraft(key, { prompts: [draftShot(image)], composer: "", tab: "tab-new", revision: 1, base: 0 });
+      await store.endSession(key, endedBy, from, draftImageResolver([image]));
+
+      const [shot] = feedbackResult(await store.takeFeedback(key)).prompts;
+      assert.equal(shot.prompt, "see the screenshot", `${endedBy} end`);
+      assert.deepEqual(
+        shot.attachments.map((attachment) => attachment.path),
+        ["/tmp/" + image],
+        `${endedBy} end`,
+      );
+    });
+  }
+});
+
+test("a draft image whose upload is gone is left out with a note, and the End still lands", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    const kept = unknownAttachmentId(3);
+    const gone = unknownAttachmentId(4);
+    await store.saveDraft(key, {
+      prompts: [{ ...draftShot(kept), attachments: [{ id: kept }, { id: gone }] }],
+      composer: "",
+    });
+    await store.endSession(key, "agent", {}, draftImageResolver([kept]));
+
+    const [shot] = feedbackResult(await store.takeFeedback(key)).prompts;
+    assert.equal(shot.prompt, "see the screenshot\n[1 image(s) from the unsent draft were not attached]");
+    assert.deepEqual(
+      shot.attachments.map((attachment) => attachment.id),
+      [kept],
+    );
+    assert.equal((await store.findByKey(key)).status, "ended");
+  });
+});
+
+// A draft holding composer text and a layout-warning fix request prepared on an artifact revision
+// the page has since moved past (the warning resolved on the next load).
+async function saveDraftWithStaleLayoutFix(store, key, extra = {}) {
+  const firstLoad = await beginArtifactLoad(store, key);
+  const recorded = await store.recordLayoutDiagnostics(
+    key,
+    diagnosticPayload(firstLoad, 1, {
+      complete: true,
+      viewport_width: 1440,
+      findings: [{ selector: "p", kind: "clipped-text", axis: "vertical", overflowPx: 27, severity: "error" }],
+    }),
+  );
+  const prepared = await store.prepareLayoutWarningFixes(key, [recorded.warnings[0].id]);
+  const layoutFix = { ...prepared.prompt, uid: "", selector: "", tag: "layout-warnings", prompt_id: "lw-1" };
+  await store.saveDraft(key, { prompts: [layoutFix], composer: "unrelated words", ...extra });
+  const secondLoad = await beginArtifactLoad(store, key);
+  await store.recordLayoutDiagnostics(
+    key,
+    diagnosticPayload(secondLoad, 1, {
+      complete: true,
+      target_presence_complete: true,
+      viewport_width: 1440,
+      findings: [],
+    }),
+  );
+}
+
+test("an End that hands over a draft delivers its text and drops only a stale layout-warning fix", async () => {
+  for (const { label, end } of [
+    { label: "agent End", end: (store, key) => store.endSession(key, "agent") },
+    {
+      label: "empty End from a stale tab",
+      end: (store, key) => store.endSession(key, "user", { tab: "tab-old", base: 0 }),
+    },
+    {
+      label: "End with a batch from a stale tab",
+      end: (store, key) =>
+        store.queuePrompts(key, {
+          endSession: true,
+          draft_tab: "tab-old",
+          draft_base: 0,
+          prompts: [draftNote("own note", "o-1")],
+        }),
+    },
+  ]) {
+    await withSyntheticSession(async ({ store, key }) => {
+      await saveDraftWithStaleLayoutFix(store, key, { tab: "tab-new", revision: 1, base: 0 });
+      const result = await end(store, key);
+      assert.equal(result.conflict, undefined, label);
+
+      const delivered = feedbackResult(await store.takeFeedback(key)).prompts.map((prompt) => prompt.prompt);
+      assert.ok(delivered.includes("unrelated words"), `${label}: ${JSON.stringify(delivered)}`);
+      assert.equal(
+        delivered.some((text) => /layout/i.test(text)),
+        false,
+        `${label}: ${JSON.stringify(delivered)}`,
+      );
+      const session = await store.findByKey(key);
+      assert.equal(session.status, "ended", label);
+      assert.equal(session.draft, null, label);
+    });
+  }
+});
+
+test("an End whose draft handover is refused leaves the session open and the draft stored", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    const image = unknownAttachmentId(5);
+    await store.saveDraft(key, {
+      prompts: [draftShot(image)],
+      composer: "keep me",
+      tab: "tab-new",
+      revision: 1,
+      base: 0,
+    });
+    // The upload resolves when the draft is read and is gone by the time the batch is validated.
+    let calls = 0;
+    const vanishing = {
+      ...draftImageResolver([image]),
+      resolveAttachment: async (_key, id) =>
+        ++calls === 1 ? draftImageResolver([image]).resolveAttachment(_key, id) : null,
+    };
+
+    for (const [endedBy, from] of [
+      ["agent", {}],
+      ["user", { tab: "tab-old", base: 0 }],
+    ]) {
+      calls = 0;
+      const result = await store.endSession(key, endedBy, from, vanishing);
+      assert.equal(result.refused, true, `${endedBy} end`);
+      const session = await store.findByKey(key);
+      assert.equal(session.status, "open", `${endedBy} end`);
+      assert.equal(session.draft.composer, "keep me", `${endedBy} end`);
+    }
+  });
+});
+
+test("a send takes the notes and message it delivered out of the stored draft", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { prompts: [draftNote("sent", "d-1"), draftNote("kept", "d-2")], composer: "hello" });
+    await store.queuePrompts(key, {
+      prompts: [
+        draftNote("sent", "d-1"),
+        { uid: "", prompt: "hello", selector: "", tag: "message", text: "Freeform message", prompt_id: "d-3" },
+      ],
+    });
+
+    const draft = (await store.findByKey(key)).draft;
+    assert.deepEqual(
+      draft.prompts.map((prompt) => prompt.prompt_id),
+      ["d-2"],
+    );
+    assert.equal(draft.composer, "");
+  });
+});
+
+test("an ended session refuses a draft, and a reopened one keeps the draft it had", async () => {
+  await withSyntheticSession(async ({ store, key, stateFile }) => {
+    await store.saveDraft(key, { prompts: [], composer: "kept across reopen" });
+    const reopened = await store.upsertSession((await store.findByKey(key)).file, "http://localhost:4387/session/test");
+    assert.equal(reopened.draft.composer, "kept across reopen");
+
+    await store.endSession(key, "user");
+    assert.deepEqual(await store.saveDraft(key, { composer: "too late" }), { ended: true, ended_by: "user" });
+    const state = JSON.parse(await readFile(stateFile, "utf8"));
+    assert.equal(state.sessions[key].draft, null);
+  });
+});
+
+test("ended_at marks the moment a round ended and stays put through later writes", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    assert.equal((await store.findByKey(key)).ended_at, null);
+    await store.queuePrompts(key, { endSession: true, prompts: [draftNote("last words", "n-1")] });
+    const endedAt = (await store.findByKey(key)).ended_at;
+    assert.equal(typeof endedAt, "string");
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    feedbackResult(await store.takeFeedback(key));
+    await store.addAgentReply(key, "noted");
+    await store.endSession(key, "agent");
+    const after = await store.findByKey(key);
+    assert.equal(after.ended_at, endedAt);
+    assert.notEqual(after.updated_at, endedAt);
+
+    const reopened = await store.upsertSession(after.file, "http://localhost:4387/session/test");
+    assert.equal(reopened.ended_at, null);
+    await store.endSession(key, "agent");
+    assert.notEqual((await store.findByKey(key)).ended_at, endedAt);
+  });
+});
+
+test("a draft save overtaken by a newer one from the same tab does not overwrite it", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    // The closing beacon (revision 2) lands before the debounced save it overtook (revision 1).
+    await store.saveDraft(key, { composer: "final words before closing", tab: "tab-a", revision: 2 });
+    const late = await store.saveDraft(key, { composer: "final wo", tab: "tab-a", revision: 1 });
+    assert.equal(late.stale, true);
+    assert.equal((await store.findByKey(key)).draft.composer, "final words before closing");
+
+    // A save carrying the same revision again is no newer either.
+    assert.equal((await store.saveDraft(key, { composer: "again", tab: "tab-a", revision: 2 })).stale, true);
+
+    // A tab that has seen tab-a's draft (draft_seq 1) may replace it.
+    const other = await store.saveDraft(key, { composer: "from another tab", tab: "tab-b", revision: 1, base: 1 });
+    assert.equal(other.draft_seq, 2);
+    assert.equal((await store.findByKey(key)).draft.composer, "from another tab");
+  });
+});
+
+test("a save from a tab that has not seen another tab's newer draft is refused, not stored", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    // Both tabs opened on draft_seq 0. The newer tab saves first; the older tab's save lands later.
+    const newer = await store.saveDraft(key, { composer: "newer-tab text", tab: "tab-new", revision: 1, base: 0 });
+    assert.equal(newer.draft_seq, 1);
+    const older = await store.saveDraft(key, { composer: "older-tab text", tab: "tab-old", revision: 1, base: 0 });
+    assert.equal(older.stale, true);
+    assert.equal(older.draft_seq, 1);
+    const session = await store.findByKey(key);
+    assert.equal(session.draft.composer, "newer-tab text");
+    assert.deepEqual(session.draft_revision, { tab: "tab-new", revision: 1 });
+
+    // The older tab's closing beacon is refused the same way.
+    const beacon = await store.saveDraft(key, { composer: "older-tab more", tab: "tab-old", revision: 2, base: 0 });
+    assert.equal(beacon.stale, true);
+    assert.equal((await store.findByKey(key)).draft.composer, "newer-tab text");
+  });
+});
+
+test("reopening the page keeps the draft counter, so a tab based on the old draft is still refused", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { composer: "newer-tab text", tab: "tab-new", revision: 1, base: 0 });
+    const before = await store.findByKey(key);
+    await store.upsertSession(before.file, before.url);
+
+    const reopened = await store.findByKey(key);
+    assert.equal(reopened.draft_seq, 1);
+    assert.deepEqual(reopened.draft_revision, { tab: "tab-new", revision: 1 });
+    const older = await store.saveDraft(key, { composer: "older-tab text", tab: "tab-old", revision: 1, base: 0 });
+    assert.equal(older.stale, true);
+    assert.equal((await store.findByKey(key)).draft.composer, "newer-tab text");
+
+    // The tab whose save is the last applied one keeps saving across the reopen.
+    const same = await store.saveDraft(key, { composer: "newer-tab text, more", tab: "tab-new", revision: 2, base: 0 });
+    assert.equal(same.draft_seq, 2);
+  });
+});
+
+test("a late draft save cannot bring back words a send already delivered", async () => {
+  await withSyntheticSession(async ({ store, key }) => {
+    await store.saveDraft(key, { composer: "hello", tab: "tab-a", revision: 3 });
+    await store.queuePrompts(key, {
+      prompts: [{ uid: "", prompt: "hello", selector: "", tag: "message", text: "Freeform message", prompt_id: "m-1" }],
+    });
+    assert.equal((await store.findByKey(key)).draft, null);
+
+    await store.saveDraft(key, { composer: "hell", tab: "tab-a", revision: 2 });
+    assert.equal((await store.findByKey(key)).draft, null);
+  });
 });
