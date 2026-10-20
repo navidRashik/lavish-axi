@@ -28,12 +28,12 @@ Every TICK (10 s), against ~/.lavish-axi/state.json and GET /health on the local
      The steer names the prompt id and the exact answer command:
      `lavish-axi reply <page> --done <prompt_id> --agent-reply "<prompt_id>: <one line>"`.
   5. Answered, per prompt id. An entry is answered only by an agent reply that names it: a later
-     non-ack agent entry whose text carries the prompt id, or done_at on that note stamped by a non-ack
-     agent entry (done_at equals that reply's `at`) that ticked this note alone (`reply --done <id>`).
-     A plain `reply` without --done ticks every delivered open note, so a done_at shared by several
-     notes counts only for a note whose id the stamping reply's text carries, or whose id is in that
-     reply's `done_ids` (lavish-axi records the ids `reply --done a,b,c` stamped there). A reply to
-     another prompt answers nothing else.
+     non-ack agent entry whose text carries the prompt id or whose `done_ids` lists it (lavish-axi lists
+     there every note a `reply --done a,b,c` answered, including one a plain reply ticked before), or
+     done_at on that note stamped by a non-ack agent entry (done_at equals that reply's `at`) that
+     ticked this note alone (`reply --done <id>`). A plain `reply` without --done ticks every delivered
+     open note, so a done_at shared by several notes counts only for a note whose id the stamping
+     reply's text carries or its `done_ids` lists. A reply to another prompt answers nothing else.
      An answer cached by an older build from such a reply is reopened while the prompt is younger than
      SLA_SEC (an older one stays answered: no alarm burst on deploy). Received (`acked`) and answered
      are separate ids in STATE_FILE.
@@ -159,11 +159,11 @@ def is_ack(x):
 
 def answered_after(s, c):
     """(acked, answered, untrusted) for one Navid entry. acked: a later ack/pick line of this daemon.
-    answered: a non-ack agent entry that names this prompt: a later one whose text carries the prompt id,
-    or the one whose `at` equals the note's done_at when that stamp was by id (`reply --done <id>`).
-    A plain `reply` ticks every delivered open note, so a done_at shared by several notes counts only when
-    the stamping reply's text names this prompt or its `done_ids` (written by `reply --done a,b,c`) lists
-    it; otherwise untrusted is True and the prompt stays open."""
+    answered: a non-ack agent entry that names this prompt: a later one whose text carries the prompt id
+    or whose `done_ids` lists it, or the one whose `at` equals the note's done_at when that stamp was by
+    id (`reply --done <id>`). A plain `reply` ticks every delivered open note, so a done_at shared by
+    several notes counts only when a reply names this prompt; otherwise untrusted is True and the prompt
+    stays open."""
     pid, done = c.get("prompt_id"), c.get("done_at")
     chat = s.get("chat") or []
     acked = answered = stamped_by_ack = untrusted = False
@@ -171,7 +171,8 @@ def answered_after(s, c):
     for x in chat:
         if x.get("role") != "agent":
             continue
-        at, named = x.get("at", ""), bool(pid) and pid in x.get("text", "")
+        at = x.get("at", "")
+        named = bool(pid) and (pid in x.get("text", "") or pid in (x.get("done_ids") or []))
         if is_ack(x):
             acked = acked or at > c["at"]
             stamped_by_ack = stamped_by_ack or (done is not None and at == done)
