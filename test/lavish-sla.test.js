@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { ACK_MARK, ACK_NOTICK, Sla, answerOf, answeredAfter, quote, readConfig } from "../scripts/lavish-sla.js";
+import { fileURLToPath } from "node:url";
+import {
+  ACK_MARK,
+  ACK_NOTICK,
+  PLAIN_REPLY_CLOSES_NOTHING,
+  Sla,
+  answerOf,
+  answeredAfter,
+  quote,
+  readConfig,
+} from "../scripts/lavish-sla.js";
 
 const user = (prompt_id, at, done_at) => ({ role: "user", kind: "annotation", text: "", prompt_id, at, done_at });
 const agent = (text, at, done_ids) => ({ role: "agent", text, at, ...(done_ids ? { done_ids } : {}) });
@@ -67,7 +78,7 @@ test("quote matches the established spool form", () => {
   assert.equal(quote(`it's "x"`), `'it\\'s "x"'`);
 });
 
-function fixture(t, env = {}) {
+function fixture(t, env = {}, help = "--agent-reply --done --ended-ok") {
   const dir = mkdtempSync(path.join(os.tmpdir(), "lavish-sla-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const page = path.join(dir, "lorem.html");
@@ -79,7 +90,7 @@ function fixture(t, env = {}) {
     `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-if (args.includes("--help")) { console.log("--agent-reply --done --ended-ok"); process.exit(0); }
+if (args.includes("--help")) { console.log(${JSON.stringify(help)}); process.exit(0); }
 fs.appendFileSync(${JSON.stringify(replies)}, JSON.stringify(args) + "\\n");
 `,
   );
@@ -139,21 +150,38 @@ test("a tick baselines first, then alarms and reminds once per unanswered note, 
   assert.equal(rows[0].tier, 0);
 });
 
-test("the ack names ACK_NOTICK so it ticks nothing, and is posted once", async (t) => {
-  const f = fixture(t, { ACK_AFTER_SEC: "0", SLA_SEC: "99999" });
-  await new Sla(f.config).tick();
-  f.session.chat.push(user("n1", new Date(Date.now() - 1000).toISOString()));
-  f.writeState();
-  const sla = new Sla(f.config);
-  await sla.tick();
-  await sla.tick();
-  const replies = f.replies();
-  assert.equal(replies.length, 1);
-  const [args] = replies;
-  assert.equal(args[0], "reply");
-  assert.equal(args[1], f.page);
-  assert.match(args[3], /^📥 received \d\d:\d\d · routed to captain$/);
-  assert.deepEqual(args.slice(4), ["--done", ACK_NOTICK]);
+// An older install's plain reply ticks every delivered note, so there the ack passes an id no note has;
+// where a plain reply closes nothing, the ack is plain (an unknown --done id would refuse it).
+for (const { install, help, flags } of [
+  { install: "an older install", help: "--agent-reply --done --ended-ok", flags: ["--done", ACK_NOTICK] },
+  {
+    install: "a closes-nothing install",
+    help: `--agent-reply --done --ended-ok ${PLAIN_REPLY_CLOSES_NOTHING}.`,
+    flags: [],
+  },
+]) {
+  test(`on ${install} the ack closes no note, and is posted once`, async (t) => {
+    const f = fixture(t, { ACK_AFTER_SEC: "0", SLA_SEC: "99999" }, help);
+    await new Sla(f.config).tick();
+    f.session.chat.push(user("n1", new Date(Date.now() - 1000).toISOString()));
+    f.writeState();
+    const sla = new Sla(f.config);
+    await sla.tick();
+    await sla.tick();
+    const replies = f.replies();
+    assert.equal(replies.length, 1);
+    const [args] = replies;
+    assert.equal(args[0], "reply");
+    assert.equal(args[1], f.page);
+    assert.match(args[3], /^📥 received \d\d:\d\d · routed to captain$/);
+    assert.deepEqual(args.slice(4), flags);
+  });
+}
+
+test("the real reply help carries the sentence the ack probes for", () => {
+  const cli = fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url));
+  const help = spawnSync(process.execPath, [cli, "reply", "--help"], { encoding: "utf8", timeout: 30_000 });
+  assert.ok(`${help.stdout}${help.stderr}`.includes(PLAIN_REPLY_CLOSES_NOTHING));
 });
 
 test("on a page Navid ended, only messages sent well before the end skip the alarm", async (t) => {

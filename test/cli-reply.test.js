@@ -352,6 +352,46 @@ test("reply refuses user-ended and agent-ended sessions without changing the tra
   }
 });
 
+test("a reply closes only the notes --done names, and refuses a --done id that matches no note", async () => {
+  await withArtifact(async ({ artifact, env, base, key, stateFile }) => {
+    const queued = await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({
+        prompts: ["p-one", "p-two"].map((id) => ({ prompt: id, prompt_id: id, tag: "message" })),
+      }),
+    });
+    assert.equal(queued.status, 200, await queued.text());
+    const delivered = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
+    assert.equal((await delivered.json()).status, "feedback");
+    const state = async () => {
+      const chat = JSON.parse(await readFile(stateFile, "utf8")).sessions[key].chat;
+      return {
+        open: chat.filter((entry) => entry.role === "user" && !entry.done_at).map((entry) => entry.prompt_id),
+        replies: chat.filter((entry) => entry.role === "agent").map((entry) => entry.text),
+      };
+    };
+
+    const progress = await runCli(["reply", artifact, "--agent-reply", "Working on both."], { env });
+    assert.equal(progress.status, 0, progress.stderr || progress.stdout);
+    assert.deepEqual((await state()).open, ["p-one", "p-two"], "a progress reply closes nothing");
+
+    for (const ids of ["q-unknown", "p-one,q-unknown"]) {
+      const refused = await runCli(["reply", artifact, "--agent-reply", "Should not land.", "--done", ids], { env });
+      assert.notEqual(refused.status, 0, `--done ${ids}`);
+      assert.match(refused.stdout, /UNKNOWN_DONE_ID/);
+      assert.match(refused.stdout, /q-unknown/);
+      assert.doesNotMatch(refused.stdout, /p-one/, "only the unmatched id is named");
+      assert.doesNotMatch(refused.stdout, /status: sent/);
+    }
+    assert.deepEqual(await state(), { open: ["p-one", "p-two"], replies: ["Working on both."] });
+
+    const answered = await runCli(["reply", artifact, "--agent-reply", "p-one: done.", "--done", "p-one"], { env });
+    assert.equal(answered.status, 0, answered.stderr || answered.stdout);
+    assert.deepEqual((await state()).open, ["p-two"], "--done closes only the named note");
+  });
+});
+
 test("reply rejects missing, conflicting, empty, and unreadable reply input", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "lavish-reply-flags-"));
   const artifact = path.join(dir, "artifact.html");
