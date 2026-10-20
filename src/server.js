@@ -1498,6 +1498,16 @@ export async function serve({
         res.status(409).json({ status: "ended", error: "session already ended", ended_by: result.ended_by });
         return;
       }
+      // This tab sent its words after it made this save: the save may carry them, so it is not
+      // stored, and the tab's later saves are unaffected.
+      if (result.sent) {
+        res.status(409).json({
+          status: "sent",
+          error: "this tab sent its words after this save was made",
+          draft_seq: result.draft_seq,
+        });
+        return;
+      }
       if (result.stale) {
         res.status(409).json({
           status: "stale",
