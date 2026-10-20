@@ -165,6 +165,13 @@ export class SessionStore {
       // What the reviewer has written but not yet handed over (the open tab's queued notes and
       // composer text). Carried across a reopen like the chat: it is the reviewer's words.
       draft: normalizeDraft(existing.draft),
+      // The draft's counter and last applied tab save are carried with it: reset, a tab still based
+      // on the pre-reopen draft would pass the stale check and overwrite the newer words.
+      draft_seq: draftSeq(existing),
+      draft_revision:
+        typeof existing.draft_revision?.tab === "string" && Number.isSafeInteger(existing.draft_revision?.revision)
+          ? existing.draft_revision
+          : null,
       // The one `session_ended_by_navid` poll event belongs to the round that ended; a reopened
       // session starts a round whose end has not been reported, and has not ended.
       end_reported: false,
