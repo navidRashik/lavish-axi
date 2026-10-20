@@ -17,7 +17,7 @@ const servedChromeIds = new Set(
   ),
 );
 
-/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, revisionPalette?: { hex: string, borderStyle: string, pattern: string }[] }} HarnessSessionData */
+/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, initialDraft?: { prompts?: any[], composer?: string } | null, initialDraftSeq?: number, revisionPalette?: { hex: string, borderStyle: string, pattern: string }[] }} HarnessSessionData */
 /** @type {HarnessSessionData} */
 const defaultSessionData = {
   key: "abc",
@@ -82,6 +82,8 @@ async function createChromeHarness({
   localStore = new Map(),
   beginLoadResponses = [],
   handoffResponses = [],
+  // Answers for draft saves, in order; once used up every save answers 200 with an empty body.
+  draftResponses = [],
   storedQueue = null,
   // Opt-in frozen clock. `reloadChromeAfterServerRestart` waits on wall-clock deadlines, so a
   // test that needs one to expire has to own `Date.now()` rather than sleep through it.
@@ -104,6 +106,7 @@ async function createChromeHarness({
   const elements = new Map();
   const timers = new Map();
   const srcLoads = [];
+  const beacons = [];
   const beginRequests = [];
   const artifactBeginRequests = [];
   const focusLog = [];
@@ -355,7 +358,15 @@ async function createChromeHarness({
     },
   };
 
+  const draftRequests = [];
   const harnessFetch = async (url, init) => {
+    // Draft saves run on their own debounce; tests about sends and ends read them from
+    // `draftRequests` rather than finding them interleaved with the prompt posts.
+    if (String(url).endsWith("/draft")) {
+      draftRequests.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+      if (draftResponses.length > 0) return draftResponses.shift();
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
     if (String(url).includes("/chrome-loads/begin")) {
       beginRequests.push({ url, init });
       if (handoffResponses.length > 0) return handoffResponses.shift();
@@ -399,6 +410,16 @@ async function createChromeHarness({
           clipboardWrites.push(String(value));
         },
       },
+      sendBeacon(url, blob) {
+        beacons.push({ url, blob });
+        return true;
+      },
+    },
+    Blob: class FakeBlob {
+      constructor(parts, options = {}) {
+        this.text = parts.join("");
+        this.type = options.type || "";
+      }
     },
     setTimeout: fakeSetTimeout,
     crypto: globalThis.crypto,
@@ -517,6 +538,21 @@ async function createChromeHarness({
   }
 
   return {
+    draftRequests,
+    beacons,
+    // Enter in the message box: the keyboard send that remains beside the single End button.
+    submit() {
+      element("chatInput").dispatch("keydown", {
+        key: "Enter",
+        shiftKey: false,
+        isComposing: false,
+        keyCode: 13,
+        preventDefault() {},
+      });
+    },
+    dispatchWindowEvent(type, event = {}) {
+      for (const handler of windowListeners.get(type) || []) handler(event);
+    },
     element,
     frame,
     postedToFrame,
@@ -745,7 +781,7 @@ test("a reconnect cannot settle an identical note this tab never submitted", asy
   });
 
   assert.equal(chrome.queued().length, 1);
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
 
@@ -762,7 +798,7 @@ test("a queued send stalled at POST becomes visibly recoverable", async () => {
   });
   chrome.element("chatInput").value = "Do not lose this";
 
-  chrome.element("send").click();
+  chrome.submit();
 
   assert.equal(chrome.element("chatInput").value, "");
   assert.match(chrome.element("queuedLog").innerHTML, /Do not lose this/);
@@ -797,7 +833,7 @@ test("a queued send falls back without a snapshot and ignores a late snapshot", 
   });
   chrome.element("chatInput").value = "Deliver even if the artifact navigated away";
 
-  chrome.element("send").click();
+  chrome.submit();
   const snapshotRequest = chrome.postedToFrame.at(-1);
   assert.equal(snapshotRequest.type, "lavish:requestSnapshot");
   assert.equal(typeof snapshotRequest.snapshot_request_id, "string");
@@ -863,7 +899,7 @@ test("Copy snapshot stays independent while a Send snapshot is pending", async (
   });
   chrome.element("chatInput").value = "Wait for this snapshot";
 
-  chrome.element("send").click();
+  chrome.submit();
   const submitRequest = chrome.postedToFrame.at(-1);
   chrome.element("copySnapshot").click();
   const copyRequest = chrome.postedToFrame.at(-1);
@@ -900,7 +936,7 @@ test("a Send only submits prompts present when that action started", async () =>
   });
   chrome.element("chatInput").value = "First batch";
 
-  chrome.element("send").click();
+  chrome.submit();
   const firstRequest = chrome.postedToFrame.at(-1);
   chrome.sendFrameMessage({
     type: "lavish:queuePrompt",
@@ -933,10 +969,10 @@ test("an older out-of-order snapshot cannot submit work queued after a newer Sen
   });
 
   chrome.element("chatInput").value = "First batch";
-  chrome.element("send").click();
+  chrome.submit();
   const firstRequest = chrome.postedToFrame.at(-1);
   chrome.element("chatInput").value = "Second batch";
-  chrome.element("send").click();
+  chrome.submit();
   const secondRequest = chrome.postedToFrame.at(-1);
 
   chrome.sendFrameMessage({
@@ -984,9 +1020,9 @@ test("a Send started after another snapshot wins remains live while that POST is
   });
 
   chrome.element("chatInput").value = "First";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.element("chatInput").value = "Second";
-  chrome.element("send").click();
+  chrome.submit();
   const winningRequest = chrome.postedToFrame.at(-1);
   chrome.sendFrameMessage({
     type: "lavish:snapshot",
@@ -997,7 +1033,7 @@ test("a Send started after another snapshot wins remains live while that POST is
   assert.equal(posts.length, 1);
 
   chrome.element("chatInput").value = "Third";
-  chrome.element("send").click();
+  chrome.submit();
   const laterRequest = chrome.postedToFrame.at(-1);
   releaseFirstPost();
   await flushPromises();
@@ -1039,12 +1075,12 @@ test("an older success preserves stall guidance for a later pending send", async
   });
 
   chrome.element("chatInput").value = "First batch";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("first snapshot");
   await flushPromises();
 
   chrome.element("chatInput").value = "Second batch";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("second snapshot");
   chrome.runTimers(10_000);
 
@@ -1082,11 +1118,11 @@ test("a redundant zero-prompt send clears obsolete stall guidance", async () => 
   });
 
   chrome.element("chatInput").value = "Shared batch";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("first snapshot");
   await flushPromises();
 
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("redundant snapshot");
   chrome.runTimers(10_000);
   assert.match(chrome.element("sendHint").textContent, /still trying to send/i);
@@ -1117,11 +1153,11 @@ test("a failed terminal-only end shows retry guidance", async () => {
   });
 
   chrome.element("chatInput").value = "Shared terminal batch";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("first snapshot");
   await flushPromises();
 
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.sendSnapshot("terminal snapshot");
   releasePromptPost();
   await flushPromises();
@@ -1130,11 +1166,11 @@ test("a failed terminal-only end shows retry guidance", async () => {
   assert.equal(calls.filter((url) => String(url).endsWith("/prompts")).length, 1);
   assert.equal(calls.filter((url) => String(url).endsWith("/end")).length, 1);
   assert.equal(chrome.queued().length, 0);
-  assert.equal(chrome.element("send").disabled, true);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.equal(chrome.element("chatInput").disabled, true);
+  assert.equal(chrome.element("end").disabled, false);
   assert.equal(chrome.element("sendHint").hidden, false);
   assert.equal(chrome.element("sendHint").classList.contains("persistent"), true);
-  assert.match(chrome.element("sendHint").textContent, /click Send & End to retry the same batch/i);
+  assert.match(chrome.element("sendHint").textContent, /click End to retry/i);
 });
 
 test("a failed in-flight POST preserves and runs a completed later Send & End", async () => {
@@ -1152,13 +1188,13 @@ test("a failed in-flight POST preserves and runs a completed later Send & End", 
   });
 
   chrome.element("chatInput").value = "First batch";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 first");
   await flushPromises();
   assert.equal(posts.length, 1);
 
   chrome.element("chatInput").value = "Final batch";
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   const finalRequest = chrome.postedToFrame.at(-1);
   chrome.sendFrameMessage({
     type: "lavish:snapshot",
@@ -1191,7 +1227,7 @@ test("a failed in-flight POST preserves and runs a completed later Send & End", 
   );
   assert.equal(chrome.element("sendHint").hidden, true);
   assert.equal(chrome.element("sendHint").classList.contains("persistent"), false);
-  assert.equal(chrome.element("sendAndEnd").disabled, true);
+  assert.equal(chrome.element("end").disabled, true);
 });
 
 test("a later successful batch clears an earlier failure after delivering everything", async () => {
@@ -1209,12 +1245,12 @@ test("a later successful batch clears an earlier failure after delivering everyt
   });
 
   chrome.element("chatInput").value = "First batch";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("first snapshot");
   await flushPromises();
 
   chrome.element("chatInput").value = "Second batch";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("second snapshot");
   rejectFirstPost();
   await flushPromises();
@@ -1244,7 +1280,7 @@ test("an older successful send preserves a newer terminal preparation failure", 
   });
 
   chrome.element("chatInput").value = "Already sending";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("first snapshot");
   await flushPromises();
 
@@ -1255,7 +1291,7 @@ test("an older successful send preserves a newer terminal preparation failure", 
   row.children[0].checked = true;
   row.children[0].dispatch("change");
   chrome.element("warningsQueueButton").click();
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   failPreparation();
   await flushPromises();
 
@@ -1280,7 +1316,7 @@ test("Send & End falls back without a snapshot and preserves the atomic end inte
   });
   chrome.element("chatInput").value = "Final answer";
 
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.runTimers(5000);
   await flushPromises();
   await flushPromises();
@@ -1289,7 +1325,7 @@ test("Send & End falls back without a snapshot and preserves the atomic end inte
   assert.equal(posts[0].url, "/api/abc/prompts");
   assert.equal(posts[0].body.domSnapshot, "");
   assert.equal(posts[0].body.endSession, true);
-  assert.equal(chrome.element("sendAndEnd").disabled, true);
+  assert.equal(chrome.element("end").disabled, true);
 });
 
 test("Send & End reserves its terminal batch and only retries that batch after failure", async () => {
@@ -1307,19 +1343,17 @@ test("Send & End reserves its terminal batch and only retries that batch after f
   });
   chrome.element("chatInput").value = "Terminal batch";
 
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   const firstRequest = chrome.postedToFrame.at(-1);
-  assert.equal(chrome.element("send").disabled, true);
-  assert.equal(chrome.element("sendAndEnd").disabled, true);
-  assert.equal(chrome.element("annotation").disabled, true);
   assert.equal(chrome.element("chatInput").disabled, true);
   assert.equal(chrome.element("end").disabled, true);
+  assert.equal(chrome.element("annotation").disabled, true);
   chrome.sendFrameMessage({
     type: "lavish:queuePrompt",
     prompt: { prompt: "Rejected later annotation", selector: "h2", tag: "annotation", text: "Later" },
   });
   chrome.element("chatInput").value = "Rejected later send";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendFrameMessage({
     type: "lavish:snapshot",
     snapshot: "uid=1 terminal",
@@ -1335,11 +1369,9 @@ test("Send & End reserves its terminal batch and only retries that batch after f
   await flushPromises();
   await flushPromises();
 
-  assert.equal(chrome.element("send").disabled, true);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
-  assert.equal(chrome.element("annotation").disabled, true);
   assert.equal(chrome.element("chatInput").disabled, true);
-  assert.equal(chrome.element("end").disabled, true);
+  assert.equal(chrome.element("end").disabled, false);
+  assert.equal(chrome.element("annotation").disabled, true);
   assert.deepEqual(
     chrome.queued().map((prompt) => prompt.prompt),
     ["Terminal batch"],
@@ -1352,16 +1384,14 @@ test("Send & End reserves its terminal batch and only retries that batch after f
       return { ok: true };
     },
   });
-  assert.equal(reloaded.element("send").disabled, true);
-  assert.equal(reloaded.element("sendAndEnd").disabled, false);
-  assert.equal(reloaded.element("annotation").disabled, true);
   assert.equal(reloaded.element("chatInput").disabled, true);
-  assert.equal(reloaded.element("end").disabled, true);
+  assert.equal(reloaded.element("end").disabled, false);
+  assert.equal(reloaded.element("annotation").disabled, true);
 
-  reloaded.element("sendAndEnd").click();
+  reloaded.element("end").click();
   const retryRequest = reloaded.postedToFrame.at(-1);
   assert.equal(typeof retryRequest.snapshot_request_id, "string");
-  assert.equal(reloaded.element("sendAndEnd").disabled, true);
+  assert.equal(reloaded.element("end").disabled, true);
   reloaded.sendFrameMessage({
     type: "lavish:snapshot",
     snapshot: "uid=2 retry",
@@ -1378,7 +1408,7 @@ test("Send & End reserves its terminal batch and only retries that batch after f
   assert.equal(posts[1].body.domSnapshot, "uid=2 retry");
   assert.equal(posts[1].body.endSession, true);
   assert.equal(reloaded.queued().length, 0);
-  assert.equal(reloaded.element("sendAndEnd").disabled, true);
+  assert.equal(reloaded.element("end").disabled, true);
 });
 
 test("Send & End locks the artifact without closing an open annotation draft before delivery", async () => {
@@ -1398,7 +1428,7 @@ test("Send & End locks the artifact without closing an open annotation draft bef
     (message) => message.type === "lavish:setAnnotationMode" && message.enabled === false,
   ).length;
 
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
 
   assert.equal(chrome.frame.inert, true, "the artifact is interaction-locked while the terminal send owns it");
   assert.equal(
@@ -1437,7 +1467,7 @@ test("reload during terminal preparation cannot restore an incomplete terminal b
   row.children[0].dispatch("change");
 
   chrome.element("warningsQueueButton").click();
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
 
   assert.equal(
     storage.has("lavish-axi:terminal:abc"),
@@ -1445,8 +1475,8 @@ test("reload during terminal preparation cannot restore an incomplete terminal b
     "a terminal reservation is not durable until all in-flight preparation joins the batch",
   );
   const reloaded = await createChromeHarness({ storage });
-  assert.equal(reloaded.element("send").disabled, false);
-  assert.equal(reloaded.element("sendAndEnd").disabled, false);
+  assert.equal(reloaded.element("chatInput").disabled, false);
+  assert.equal(reloaded.element("end").disabled, false);
   assert.equal(reloaded.element("chatInput").disabled, false);
 
   finishPreparation();
@@ -1472,11 +1502,11 @@ test("reload restores a completed terminal reservation after its prompt was deli
     },
   });
 
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("ordinary snapshot");
   await flushPromises();
 
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.sendSnapshot("terminal snapshot");
   await flushPromises();
 
@@ -1497,17 +1527,21 @@ test("reload restores a completed terminal reservation after its prompt was deli
     },
   });
   assert.equal(reloaded.queued().length, 0);
-  assert.equal(reloaded.element("send").disabled, true);
-  assert.equal(reloaded.element("sendAndEnd").disabled, false);
+  assert.equal(reloaded.element("chatInput").disabled, true);
+  assert.equal(reloaded.element("end").disabled, false);
 
-  reloaded.element("sendAndEnd").click();
+  reloaded.element("end").click();
   reloaded.sendSnapshot("retry snapshot");
   await flushPromises();
   await flushPromises();
 
-  assert.deepEqual(reloadedRequests, [{ url: "/api/abc/end", body: null }]);
+  assert.deepEqual(
+    reloadedRequests.map((request) => request.url),
+    ["/api/abc/end"],
+  );
+  assert.equal(reloadedRequests[0].body.draft_base, 0, "the end names the draft this tab last saw");
   assert.equal(storage.has("lavish-axi:terminal:abc"), false);
-  assert.equal(reloaded.element("sendAndEnd").disabled, true);
+  assert.equal(reloaded.element("end").disabled, true);
 });
 
 test("a recoverable terminal layout conflict restores ordinary review controls", async () => {
@@ -1533,13 +1567,13 @@ test("a recoverable terminal layout conflict restores ordinary review controls",
     },
   });
 
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.sendSnapshot("");
   await flushPromises();
 
   assert.deepEqual(publicQueued(chrome), [prompt]);
-  assert.equal(chrome.element("send").disabled, false);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.equal(chrome.element("chatInput").disabled, false);
+  assert.equal(chrome.element("end").disabled, false);
   assert.equal(chrome.element("annotation").disabled, false);
   assert.equal(chrome.element("chatInput").disabled, false);
   assert.equal(chrome.element("end").disabled, false);
@@ -1568,14 +1602,14 @@ test("an actionable terminal attachment rejection restores editable review contr
     },
   });
 
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.sendSnapshot("");
   await flushPromises();
   await flushPromises();
 
   assert.deepEqual(publicQueued(chrome), [prompt]);
-  assert.equal(chrome.element("send").disabled, false);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.equal(chrome.element("chatInput").disabled, false);
+  assert.equal(chrome.element("end").disabled, false);
   assert.equal(chrome.element("annotation").disabled, false);
   assert.equal(chrome.element("chatInput").disabled, false);
   assert.equal(chrome.element("end").disabled, false);
@@ -1591,14 +1625,14 @@ test("a transient terminal failure names Send & End as the retry action", async 
     },
   });
 
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.sendSnapshot("");
   await flushPromises();
   await flushPromises();
 
-  assert.equal(chrome.element("send").disabled, true);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
-  assert.match(chrome.element("sendHint").textContent, /click Send & End to retry the same batch/i);
+  assert.equal(chrome.element("chatInput").disabled, true);
+  assert.equal(chrome.element("end").disabled, false);
+  assert.match(chrome.element("sendHint").textContent, /click End to retry/i);
   assert.doesNotMatch(chrome.element("sendHint").textContent, /click Send to Agent/i);
 });
 
@@ -1615,7 +1649,7 @@ test("an older successful send preserves newer terminal retry guidance", async (
       promptPostCount += 1;
       if (promptPostCount === 1) {
         chrome.element("chatInput").value = "Terminal batch";
-        chrome.element("sendAndEnd").click();
+        chrome.element("end").click();
         chrome.sendSnapshot("terminal snapshot");
         return firstPost;
       }
@@ -1624,20 +1658,20 @@ test("an older successful send preserves newer terminal retry guidance", async (
   });
 
   chrome.element("chatInput").value = "Ordinary batch";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("ordinary snapshot");
   await flushPromises();
   await flushPromises();
 
   assert.equal(promptPostCount, 2);
-  assert.match(chrome.element("sendHint").textContent, /click Send & End to retry the same batch/i);
+  assert.match(chrome.element("sendHint").textContent, /click End to retry/i);
   releaseFirstPost();
   await flushPromises();
   await flushPromises();
 
   assert.equal(chrome.element("sendHint").hidden, false);
   assert.equal(chrome.element("sendHint").classList.contains("persistent"), true);
-  assert.match(chrome.element("sendHint").textContent, /click Send & End to retry the same batch/i);
+  assert.match(chrome.element("sendHint").textContent, /click End to retry/i);
 });
 
 test("an older late Send failure preserves newer terminal retry guidance", async () => {
@@ -1651,9 +1685,9 @@ test("an older late Send failure preserves newer terminal retry guidance", async
     },
   });
 
-  chrome.element("send").click();
+  chrome.submit();
   const ordinaryRequest = chrome.postedToFrame.at(-1);
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   const terminalRequest = chrome.postedToFrame.at(-1);
 
   chrome.sendFrameMessage({
@@ -1666,7 +1700,7 @@ test("an older late Send failure preserves newer terminal retry guidance", async
 
   assert.equal(posts.length, 1);
   assert.equal(posts[0].endSession, true);
-  assert.match(chrome.element("sendHint").textContent, /click Send & End to retry the same batch/i);
+  assert.match(chrome.element("sendHint").textContent, /click End to retry/i);
 
   chrome.sendFrameMessage({
     type: "lavish:snapshot",
@@ -1678,10 +1712,10 @@ test("an older late Send failure preserves newer terminal retry guidance", async
 
   assert.equal(posts.length, 2);
   assert.equal(posts[1].endSession, undefined);
-  assert.equal(chrome.element("send").disabled, true);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
-  assert.match(chrome.element("sendHint").textContent, /click Send & End to retry the same batch/i);
-  assert.doesNotMatch(chrome.element("sendHint").textContent, /click Send to Agent to retry/i);
+  assert.equal(chrome.element("chatInput").disabled, true);
+  assert.equal(chrome.element("end").disabled, false);
+  assert.match(chrome.element("sendHint").textContent, /click End to retry/i);
+  assert.doesNotMatch(chrome.element("sendHint").textContent, /press Enter in the message box to retry/i);
 });
 
 test("a failed timeout fallback keeps the queue and a timely retry sends it once", async () => {
@@ -1694,7 +1728,7 @@ test("a failed timeout fallback keeps the queue and a timely retry sends it once
     },
   });
 
-  chrome.element("send").click();
+  chrome.submit();
   chrome.runTimers(5000);
   await flushPromises();
   await flushPromises();
@@ -1702,13 +1736,13 @@ test("a failed timeout fallback keeps the queue and a timely retry sends it once
   assert.equal(chrome.element("sendHint").hidden, false);
   assert.match(chrome.element("sendHint").textContent, /feedback is saved/i);
   assert.match(chrome.element("sendHint").textContent, /will be sent automatically when Lavish is back/i);
-  assert.doesNotMatch(chrome.element("sendHint").textContent, /click Send to Agent to retry/i);
+  assert.doesNotMatch(chrome.element("sendHint").textContent, /press Enter in the message box to retry/i);
   assert.deepEqual(
     chrome.queued().map((prompt) => prompt.prompt),
     ["Retry me"],
   );
 
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 retry");
   await flushPromises();
   await flushPromises();
@@ -2091,7 +2125,7 @@ test("attachment rejection copy applies to annotations and Conversation messages
   });
 
   chrome.element("chatInput").value = "Look at these";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   await flushPromises();
@@ -2121,7 +2155,7 @@ test("Conversation accepts an image-only paste and sends its attachment ref", as
 
   assert.equal(event.defaultPrevented, true);
   assert.match(chrome.element("chatAttachments").innerHTML, /clipboard\.png/);
-  chrome.element("send").click();
+  chrome.submit();
   assert.deepEqual(chrome.queued()[0].attachments, [{ id, name: "clipboard.png" }]);
   assert.equal(chrome.queued()[0].prompt, "");
 });
@@ -2140,7 +2174,7 @@ test("Conversation attaches a screenshot exposed only through clipboard items", 
 
   assert.equal(event.defaultPrevented, true);
   assert.match(chrome.element("chatAttachments").innerHTML, /screenshot\.png/);
-  chrome.element("send").click();
+  chrome.submit();
   assert.deepEqual(chrome.queued()[0].attachments, [{ id, name: "screenshot.png" }]);
 });
 
@@ -2270,7 +2304,7 @@ test("the composer attaches an image type the server declares", async () => {
   await flushPromises();
   await flushPromises();
 
-  chrome.element("send").click();
+  chrome.submit();
   assert.deepEqual(chrome.queued()[0].attachments, [{ id, name: "next.avif" }]);
 });
 
@@ -2311,7 +2345,7 @@ test("Conversation blocks send while an image upload is pending", async () => {
   chrome.element("chatInput").dispatch("paste", clipboardEvent(pastedImage("waiting.png")));
   await flushPromises();
 
-  chrome.element("send").click();
+  chrome.submit();
   assert.deepEqual(chrome.queued(), []);
   assert.match(chrome.element("chatAttachmentNotice").textContent, /finish uploading/i);
 
@@ -2329,7 +2363,7 @@ test("a blocked-send notice follows the upload that failed instead of going stal
   chrome.element("chatInput").dispatch("paste", clipboardEvent(pastedImage("doomed.png")));
   await flushPromises();
 
-  chrome.element("send").click();
+  chrome.submit();
   assert.match(chrome.element("chatAttachmentNotice").textContent, /finish uploading/i);
 
   // The upload the notice describes then fails. Nothing is uploading any more,
@@ -2353,7 +2387,7 @@ test("clearing the failed attachment clears the blocked-send notice", async () =
   await flushPromises();
   await flushPromises();
 
-  chrome.element("send").click();
+  chrome.submit();
   assert.match(chrome.element("chatAttachmentNotice").textContent, /retry or remove/i);
 
   chrome.element("chatAttachments").dispatch("click", {
@@ -2472,7 +2506,7 @@ test("Conversation retries a failed upload and then permits sending", async () =
   assert.match(chrome.element("chatAttachments").innerHTML, /aria-label="Remove retry\.png"/);
   assert.match(chrome.element("chatAttachments").innerHTML, /aria-live="polite"/);
 
-  chrome.element("send").click();
+  chrome.submit();
   assert.deepEqual(chrome.queued(), []);
   assert.match(chrome.element("chatAttachmentNotice").textContent, /retry or remove/i);
 
@@ -2485,7 +2519,7 @@ test("Conversation retries a failed upload and then permits sending", async () =
   });
   await flushPromises();
   await flushPromises();
-  chrome.element("send").click();
+  chrome.submit();
   assert.equal(attempts, 2);
   assert.deepEqual(chrome.queued()[0].attachments, [{ id, name: "retry.png" }]);
 });
@@ -2505,7 +2539,7 @@ test("a blocked send outranks the attachment count notice", async () => {
 
   // Send is refused because of the ERROR, not the cap - the notice must name the
   // condition the user has to clear, or Send looks dead for no stated reason.
-  chrome.element("send").click();
+  chrome.submit();
 
   assert.deepEqual(chrome.queued(), []);
   assert.match(chrome.element("chatAttachmentNotice").textContent, /retry or remove/i);
@@ -2589,7 +2623,7 @@ test("Conversation labels an image-only queued prompt as an image message", asyn
   await flushPromises();
   await flushPromises();
 
-  chrome.element("send").click();
+  chrome.submit();
 
   assert.match(chrome.element("queuedLog").innerHTML, /Image message/);
 });
@@ -2647,7 +2681,7 @@ test("queued annotation prompts still deliver while a composer chip uploads", as
   await flushPromises();
   chrome.element("chatInput").value = "Held back";
 
-  chrome.element("send").click();
+  chrome.submit();
   assert.match(chrome.element("chatAttachmentNotice").textContent, /finish uploading/i);
   // The chip gate must not have swallowed the send: the chrome asked the frame
   // for the snapshot that starts the actual submission.
@@ -2665,14 +2699,14 @@ test("queued annotation prompts still deliver while a composer chip uploads", as
   assert.equal(chrome.queued().length, 0, "the annotation was delivered, not stranded");
 });
 
-test("Send & End with a failed composer chip delivers prompts but holds the end", async () => {
+test("End with a failed composer chip holds the whole review open", async () => {
   const promptBodies = [];
   const chrome = await createChromeHarness({
     storedQueue: [{ uid: "", prompt: "Fix the header", selector: "h1", tag: "element", text: "Header" }],
     sessionData: { ...defaultSessionData, attachmentMaxBytes: 1024, attachmentMaxCount: 4 },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/prompts")) {
-        promptBodies.push(JSON.parse(init.body));
+      if (String(url).endsWith("/prompts") || String(url).endsWith("/end")) {
+        promptBodies.push(init?.body ? JSON.parse(init.body) : url);
         return { ok: true, json: async () => ({}) };
       }
       return { ok: false, json: async () => ({ error: "storage full" }) };
@@ -2682,17 +2716,19 @@ test("Send & End with a failed composer chip delivers prompts but holds the end"
   await flushPromises();
   await flushPromises();
 
-  chrome.element("sendAndEnd").click();
-  assert.match(chrome.element("chatAttachmentNotice").textContent, /retry or remove/i);
-  assert.ok(chrome.postedToFrame.some((m) => m.type === "lavish:requestSnapshot"));
-  chrome.sendSnapshot("uid=1 body");
+  chrome.element("end").click();
   await flushPromises();
   await flushPromises();
 
-  // Ending now would strand the chip the user is clearly still working on, so
-  // the queued prompts go out WITHOUT the end flag.
-  assert.equal(promptBodies.length, 1);
-  assert.equal(promptBodies[0].endSession, undefined);
+  // End hands over everything or nothing: the chip the user is still working on keeps the
+  // notes and the session where they are.
+  assert.match(chrome.element("chatAttachmentNotice").textContent, /retry or remove/i);
+  assert.equal(
+    chrome.postedToFrame.some((m) => m.type === "lavish:requestSnapshot"),
+    false,
+  );
+  assert.deepEqual(promptBodies, []);
+  assert.equal(chrome.queued().length, 1);
 });
 
 test("a size-refused image cannot eat a cap slot from a valid one in the same paste", async () => {
@@ -3056,13 +3092,13 @@ test("Send & End waits for layout feedback preparation already in flight", async
   row.children[0].dispatch("change");
 
   chrome.element("warningsQueueButton").click();
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
 
   assert.equal(
     chrome.postedToFrame.some((message) => message.type === "lavish:requestSnapshot"),
     false,
   );
-  assert.equal(chrome.element("sendAndEnd").disabled, true);
+  assert.equal(chrome.element("end").disabled, true);
 
   finishPreparation();
   await flushPromises();
@@ -3095,7 +3131,7 @@ test("a failed terminal layout preparation stays visible with an empty queue", a
   row.children[0].dispatch("change");
 
   chrome.element("warningsQueueButton").click();
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   failPreparation();
   await flushPromises();
   await flushPromises();
@@ -3105,8 +3141,8 @@ test("a failed terminal layout preparation stays visible with an empty queue", a
   assert.equal(chrome.element("sendHint").classList.contains("persistent"), true);
   assert.match(chrome.element("sendHint").textContent, /could not prepare the selected layout fixes/i);
   assert.doesNotMatch(chrome.element("sendHint").textContent, /still queued/i);
-  assert.equal(chrome.element("send").disabled, false);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.equal(chrome.element("chatInput").disabled, false);
+  assert.equal(chrome.element("end").disabled, false);
   assert.equal(chrome.element("annotation").disabled, false);
   assert.equal(chrome.element("end").disabled, false);
 });
@@ -3129,7 +3165,7 @@ test("an empty Send preserves layout preparation failure guidance", async () => 
   await flushPromises();
   assert.match(chrome.element("sendHint").textContent, /could not prepare the selected layout fixes/i);
 
-  chrome.element("send").click();
+  chrome.submit();
   chrome.runTimers(2600);
 
   assert.equal(chrome.element("sendHint").hidden, false);
@@ -3160,7 +3196,7 @@ test("a terminal preparation timeout preserves another preparation type's failur
   assert.match(chrome.element("sendHint").textContent, /could not prepare the selected layout fixes/i);
 
   chrome.element("warningsQueueButton").click();
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.runTimers(5000);
   await flushPromises();
 
@@ -3195,7 +3231,7 @@ test("an unrelated successful send preserves layout preparation failure guidance
   await flushPromises();
 
   assert.match(chrome.element("sendHint").textContent, /could not prepare the selected layout fixes/i);
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("");
   await flushPromises();
   await flushPromises();
@@ -3249,7 +3285,7 @@ test("an older failed send cannot overwrite a newer layout preparation failure",
     },
   });
 
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("older snapshot");
   await flushPromises();
 
@@ -3270,7 +3306,7 @@ test("an older failed send cannot overwrite a newer layout preparation failure",
   assert.equal(chrome.element("sendHint").hidden, false);
   assert.equal(chrome.element("sendHint").classList.contains("persistent"), true);
   assert.match(chrome.element("sendHint").textContent, /could not prepare the selected layout fixes/i);
-  assert.doesNotMatch(chrome.element("sendHint").textContent, /click Send to Agent to retry/i);
+  assert.doesNotMatch(chrome.element("sendHint").textContent, /press Enter in the message box to retry/i);
 });
 
 test("a successful retry of the failed preparation clears its stale error", async () => {
@@ -3341,7 +3377,7 @@ test("a stalled unrelated send cannot overwrite layout preparation failure guida
   await flushPromises();
   await flushPromises();
 
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("");
   await flushPromises();
   chrome.runTimers(10_000);
@@ -3389,7 +3425,7 @@ test("Send & End releases after a five-second feedback preparation timeout", asy
   chrome.element("chatInput").value = "Already queued";
 
   chrome.element("warningsQueueButton").click();
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.runTimers(5000);
   await flushPromises();
 
@@ -3397,8 +3433,8 @@ test("Send & End releases after a five-second feedback preparation timeout", asy
     chrome.queued().map((prompt) => prompt.prompt),
     ["Already queued"],
   );
-  assert.equal(chrome.element("send").disabled, false);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.equal(chrome.element("chatInput").disabled, false);
+  assert.equal(chrome.element("end").disabled, false);
   assert.equal(chrome.element("annotation").disabled, false);
   assert.equal(chrome.element("end").disabled, false);
   assert.equal(chrome.element("sendHint").classList.contains("persistent"), true);
@@ -3455,7 +3491,7 @@ test("a stale queued layout prompt remains available for user re-decision", asyn
   row.children[0].checked = true;
   row.children[0].dispatch("change");
   await chrome.element("warningsQueueButton").onclick();
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("");
   await flushPromises();
 
@@ -5667,7 +5703,7 @@ test("chrome client strips the internal queue key before posting prompts", async
     type: "lavish:queuePrompt",
     prompt: { prompt: "Use plan B", selector: "input#plan-b", tag: "choice", text: "Plan B", _lavishQueueKey: "plan" },
   });
-  chrome.element("send").onclick();
+  chrome.submit();
   assert.equal(chrome.postedToFrame.at(-1).type, "lavish:requestSnapshot");
 
   chrome.sendSnapshot("uid=1 body");
@@ -5697,7 +5733,7 @@ test("chrome client sends queued prompts while the agent is working", async () =
     type: "lavish:queuePrompt",
     prompt: { prompt: "Follow up", selector: "button#follow-up", tag: "choice", text: "Follow up" },
   });
-  chrome.element("send").onclick();
+  chrome.submit();
   assert.equal(chrome.postedToFrame.at(-1).type, "lavish:requestSnapshot");
 
   chrome.sendSnapshot("uid=1 body");
@@ -5732,7 +5768,7 @@ test("a send acknowledgement does not finish the round before late feedback deli
     type: "lavish:queuePrompt",
     prompt: { prompt: "Late feedback matters", selector: "h1", tag: "message", text: "Late feedback matters" },
   });
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
 
@@ -5770,24 +5806,24 @@ test("send controls stay enabled while the agent works and lock only once the se
     fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
   });
 
-  assert.equal(chrome.element("send").disabled, false);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.equal(chrome.element("chatInput").disabled, false);
+  assert.equal(chrome.element("end").disabled, false);
 
   chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "working" }) });
-  assert.equal(chrome.element("send").disabled, false);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.equal(chrome.element("chatInput").disabled, false);
+  assert.equal(chrome.element("end").disabled, false);
 
   chrome.sendFrameMessage({
     type: "lavish:queuePrompt",
     prompt: { prompt: "Ship this", selector: "button#ship", tag: "choice", text: "Ship" },
   });
-  chrome.element("sendAndEnd").onclick();
+  chrome.element("end").onclick();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   await flushPromises();
 
-  assert.equal(chrome.element("send").disabled, true);
-  assert.equal(chrome.element("sendAndEnd").disabled, true);
+  assert.equal(chrome.element("chatInput").disabled, true);
+  assert.equal(chrome.element("end").disabled, true);
 });
 
 test("chrome send and end carries the end intent with queued prompts", async () => {
@@ -5803,7 +5839,7 @@ test("chrome send and end carries the end intent with queued prompts", async () 
     type: "lavish:queuePrompt",
     prompt: { prompt: "Ship this", selector: "button#ship", tag: "choice", text: "Ship" },
   });
-  chrome.element("sendAndEnd").onclick();
+  chrome.element("end").onclick();
   assert.equal(chrome.postedToFrame.at(-1).type, "lavish:requestSnapshot");
 
   chrome.sendSnapshot("uid=1 body");
@@ -5815,16 +5851,19 @@ test("chrome send and end carries the end intent with queued prompts", async () 
     ["/api/abc/prompts"],
   );
   assertPromptIdentity(posts[0].body.prompts[0].prompt_id);
-  assert.deepEqual(publicPostedBody(posts[0].body), {
+  const { draft_tab: endTab, ...endBody } = publicPostedBody(posts[0].body);
+  assert.ok(typeof endTab === "string" && endTab.length > 0, "the end names its tab");
+  assert.deepEqual(endBody, {
     prompts: [{ prompt: "Ship this", selector: "button#ship", tag: "choice", text: "Ship" }],
     domSnapshot: "uid=1 body",
     endSession: true,
+    draft_base: 0,
   });
   assert.equal(chrome.queued().length, 0);
   assert.equal(chrome.element("chatInput").disabled, true);
 });
 
-test("chrome send and end with an empty composer nudges instead of ending", async () => {
+test("End with nothing written ends the review through /end", async () => {
   const posts = [];
   const chrome = await createChromeHarness({
     fetchImpl: async (url, init = {}) => {
@@ -5832,16 +5871,34 @@ test("chrome send and end with an empty composer nudges instead of ending", asyn
       return { ok: true };
     },
   });
-  chrome.element("sendHint").hidden = true;
+  chrome.element("endedOverlay").hidden = true;
 
-  chrome.element("sendAndEnd").onclick();
-  await flushPromises();
+  chrome.element("end").onclick();
+  for (let i = 0; i < 3; i += 1) await flushPromises();
 
-  assert.equal(posts.length, 0);
-  assert.equal(chrome.postedToFrame.length, 0);
-  assert.equal(chrome.element("sendHint").hidden, false);
-  assert.equal(chrome.element("chatInput").focused, true);
-  assert.equal(chrome.element("chatInput").disabled, false);
+  assert.deepEqual(
+    posts.map((post) => post.url),
+    ["/api/abc/end"],
+  );
+  assert.equal(
+    chrome.postedToFrame.some((message) => message.type === "lavish:requestSnapshot"),
+    false,
+  );
+  assert.equal(chrome.element("endedOverlay").hidden, false);
+});
+
+test("an End with nothing written that the server refuses leaves the review open and says so", async () => {
+  const chrome = await createChromeHarness({
+    fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }),
+  });
+  chrome.element("endedOverlay").hidden = true;
+
+  chrome.element("end").onclick();
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  assert.equal(chrome.element("endedOverlay").hidden, true);
+  assert.match(chrome.element("sendHint").textContent, /could not end the review/i);
+  assert.equal(chrome.element("end").disabled, false);
 });
 
 test("an oversized terminal snapshot retries once without optional DOM context", async () => {
@@ -5856,7 +5913,7 @@ test("an oversized terminal snapshot retries once without optional DOM context",
     },
   });
 
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.sendSnapshot("x".repeat(200));
   await flushPromises();
   await flushPromises();
@@ -5878,14 +5935,14 @@ test("a terminal 413 without snapshot releases the review for editing", async ()
     },
   });
 
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.sendSnapshot("");
   await flushPromises();
   await flushPromises();
 
   assert.deepEqual(publicQueued(chrome), [prompt]);
-  assert.equal(chrome.element("send").disabled, false);
-  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.equal(chrome.element("chatInput").disabled, false);
+  assert.equal(chrome.element("end").disabled, false);
   assert.equal(chrome.element("annotation").disabled, false);
   assert.equal(chrome.element("chatInput").disabled, false);
   assert.equal(chrome.element("end").disabled, false);
@@ -5896,7 +5953,7 @@ test("chrome send with an empty composer shows a visible hint", async () => {
   const chrome = await createChromeHarness();
   chrome.element("sendHint").hidden = true;
 
-  chrome.element("send").click();
+  chrome.submit();
 
   assert.equal(chrome.element("sendHint").hidden, false);
   assert.equal(chrome.element("sendHint").textContent, "Write a message or annotate an element first.");
@@ -5922,12 +5979,12 @@ test("chrome send and end during an in-flight submit still ends after the submit
     type: "lavish:queuePrompt",
     prompt: { prompt: "Ship this", selector: "button#ship", tag: "choice", text: "Ship" },
   });
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   assert.equal(posts.length, 1);
 
-  chrome.element("sendAndEnd").onclick();
+  chrome.element("end").onclick();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   assert.equal(posts.length, 1);
@@ -5945,7 +6002,7 @@ test("chrome send and end during an in-flight submit still ends after the submit
     prompts: [{ prompt: "Ship this", selector: "button#ship", tag: "choice", text: "Ship" }],
     domSnapshot: "uid=1 body",
   });
-  assert.equal(posts[1].body, null);
+  assert.equal(posts[1].body.draft_base, 0);
   assert.equal(chrome.queued().length, 0);
   assert.equal(chrome.element("chatInput").disabled, true);
 });
@@ -5968,8 +6025,8 @@ test("chrome goes read-only when the server forwards an ended SSE event (#171)",
   assert.equal(chrome.element("chatInput").disabled, true);
   assert.equal(chrome.element("annotation").disabled, true);
   assert.equal(chrome.element("moreButton").disabled, true);
-  assert.equal(chrome.element("send").disabled, true);
-  assert.equal(chrome.element("sendAndEnd").disabled, true);
+  assert.equal(chrome.element("chatInput").disabled, true);
+  assert.equal(chrome.element("end").disabled, true);
   assert.equal(chrome.element("panelScroll").inert, true);
   assert.equal(chrome.element("chatComposer").inert, true);
   assert.equal(chrome.element("shareDialog").hidden, true);
@@ -5990,8 +6047,8 @@ test("chrome boots read-only when the session already ended before this page loa
   assert.equal(chrome.element("chatInput").disabled, true);
   assert.equal(chrome.element("annotation").disabled, true);
   assert.equal(chrome.element("moreButton").disabled, true);
-  assert.equal(chrome.element("send").disabled, true);
-  assert.equal(chrome.element("sendAndEnd").disabled, true);
+  assert.equal(chrome.element("chatInput").disabled, true);
+  assert.equal(chrome.element("end").disabled, true);
   assert.equal(chrome.element("panelScroll").inert, true);
   assert.equal(chrome.element("chatComposer").inert, true);
   assert.equal(chrome.element("endedOverlay").hidden, false);
@@ -6012,7 +6069,7 @@ test("a queued Send refused because the session already ended marks the chrome r
     type: "lavish:queuePrompt",
     prompt: { prompt: "Too late", selector: "button#ship", tag: "choice", text: "Ship" },
   });
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   await flushPromises();
@@ -6255,13 +6312,13 @@ test("Send & End waits for whiteboard feedback preparation already in flight", a
     pngDataUrl: "data:image/png;base64,AA==",
   });
   await flushPromises();
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
 
   assert.equal(
     chrome.postedToFrame.some((message) => message.type === "lavish:requestSnapshot"),
     false,
   );
-  assert.equal(chrome.element("sendAndEnd").disabled, true);
+  assert.equal(chrome.element("end").disabled, true);
 
   finishSceneSave();
   await flushPromises();
@@ -6979,7 +7036,7 @@ test("a queued attachment ref is projected to primitives, not kept by reference 
 
   assert.deepEqual(chrome.queued()[0].attachments, [{ id, name: "ok.png" }]);
 
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
 
@@ -7231,7 +7288,7 @@ test("the dock summarizes what the user should know while the sheet is down", as
   // Raising the sheet shows the reply itself, so the preview is no longer owed; once the queue
   // is sent the dock is back to reporting the agent.
   chrome.element("panelHead").dispatch("click", {});
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   await flushPromises();
@@ -7252,11 +7309,11 @@ test("the dock reports an ended session", async () => {
   });
 
   chrome.element("chatInput").value = "Ship it";
-  chrome.element("sendAndEnd").click();
+  chrome.element("end").click();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   await flushPromises();
-  assert.equal(chrome.element("sendAndEnd").disabled, true, "the session ended");
+  assert.equal(chrome.element("end").disabled, true, "the session ended");
   assert.equal(sheetState(chrome).summary, "Session ended");
 });
 
@@ -7485,7 +7542,7 @@ test("a sent batch settles in place: notes read Sending until the server's trans
     prompt: { prompt: "Rename this", selector: "h2#phase-1", tag: "h2", text: "Phase 1: Inventory" },
   });
   chrome.element("chatInput").value = "Keep the table";
-  chrome.element("send").click();
+  chrome.submit();
 
   // Pressing Send commits the batch: both notes read Sending, nothing is in the transcript yet,
   // and a committed note cannot be removed.
@@ -7534,7 +7591,7 @@ test("an accepted note merges before live entries that arrived before its respon
       },
     });
     chrome.element("chatInput").value = "Sent note";
-    chrome.element("send").click();
+    chrome.submit();
     chrome.sendSnapshot("uid=1 body");
     await flushPromises();
 
@@ -7588,7 +7645,7 @@ test("an accepted transcript consumes live entries it already contains", async (
       },
     });
     chrome.element("chatInput").value = "Sent note";
-    chrome.element("send").click();
+    chrome.submit();
     chrome.sendSnapshot("uid=1 body");
     await flushPromises();
     chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify(reply) });
@@ -7633,7 +7690,7 @@ test("an acceptance sync settles a matching local note before the prompts respon
   chrome.sendFrameMessage({ type: "lavish:queuePrompt", prompt });
   const promptId = chrome.queued()[0].prompt_id;
   assertPromptIdentity(promptId);
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
 
@@ -7679,7 +7736,7 @@ test("one transcript entry cannot settle a second identical queued note", async 
     },
   });
   chrome.element("chatInput").value = "Repeat this";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 first");
   await flushPromises();
 
@@ -7696,7 +7753,7 @@ test("one transcript entry cannot settle a second identical queued note", async 
   await flushPromises();
   assert.equal(chrome.queued().length, 1);
 
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=2 second");
   await flushPromises();
   assert.equal(postedBodies.length, 2);
@@ -7733,7 +7790,7 @@ test("a restored duplicate note survives history at boot and settles only on a l
   });
 
   assert.equal(chrome.queued().length, 1);
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   assert.equal(postedBody.prompts.length, 1);
@@ -7767,7 +7824,7 @@ test("retrying after a lost prompts response does not resend accepted feedback",
     },
   });
   chrome.element("chatInput").value = "Keep the accepted note";
-  chrome.element("send").click();
+  chrome.submit();
   const promptId = chrome.queued()[0].prompt_id;
   assertPromptIdentity(promptId);
   chrome.sendSnapshot("uid=1 body");
@@ -7780,7 +7837,7 @@ test("retrying after a lost prompts response does not resend accepted feedback",
   });
   rejectPost();
   await flushPromises();
-  chrome.element("send").click();
+  chrome.submit();
   await flushPromises();
 
   assert.equal(postCount, 1);
@@ -7806,7 +7863,7 @@ test("a WebSocket acceptance sync settles only the note whose identity it acknow
   chrome.sendFrameMessage({ type: "lavish:queuePrompt", prompt: identicalProjectionNote(0) });
   const promptId = chrome.queued()[0].prompt_id;
   assertPromptIdentity(promptId);
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
 
@@ -7837,7 +7894,7 @@ test("a reconnect initial sync settles this tab's in-flight note by identity", a
   });
   chrome.sendFrameMessage({ type: "lavish:queuePrompt", prompt: identicalProjectionNote(0) });
   const promptId = chrome.queued()[0].prompt_id;
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
 
@@ -7882,7 +7939,7 @@ test("reload after a lost prompts response settles the accepted note and does no
   assert.deepEqual(chrome.queued(), []);
   assert.equal(chrome.element("queuedLog").innerHTML, "");
   assert.equal(chrome.element("chatLog").children.length, 1);
-  chrome.element("send").click();
+  chrome.submit();
   await flushPromises();
   assert.equal(postCount, 0);
 });
@@ -7915,7 +7972,7 @@ test("reload after a lost response settles an accepted anchor-only prompt exactl
   assert.deepEqual(chrome.queued(), []);
   assert.equal(chrome.element("queuedLog").innerHTML, "");
   assert.equal(chrome.element("chatLog").children.length, 1);
-  chrome.element("send").click();
+  chrome.submit();
   await flushPromises();
   assert.equal(postCount, 0);
 });
@@ -7992,9 +8049,9 @@ test("two tabs with identical chat projections settle only their own submission"
     chatEntryForPrompt({ uid: "", ...identicalProjectionNote(5) }, "t").anchor,
   );
 
-  chromeA.element("send").click();
+  chromeA.submit();
   chromeA.sendSnapshot("uid=1 a");
-  chromeB.element("send").click();
+  chromeB.submit();
   chromeB.sendSnapshot("uid=1 b");
   await flushPromises();
 
@@ -8043,7 +8100,7 @@ test("an older live sync does not hide the transcript accepted by the prompts re
     },
   });
   chrome.element("chatInput").value = "Sent note";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
 
@@ -8074,7 +8131,7 @@ test("a stale prompts response cannot remove a newer concurrent note", async () 
     },
   });
   chrome.element("chatInput").value = "First note";
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
 
@@ -8155,7 +8212,7 @@ test("a live agent reply remains reconcilable with a later sent-note transcript"
     const eventReply = includeEventTimestamp ? reply : { role: reply.role, text: reply.text, html: reply.html };
     chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify(eventReply) });
     chrome.element("chatInput").value = "Reviewer note";
-    chrome.element("send").click();
+    chrome.submit();
     chrome.sendSnapshot("uid=1 body");
     await flushPromises();
 
@@ -8175,7 +8232,7 @@ test("a failed send returns its notes to Queued with the remove control back", a
     },
   });
   chrome.element("chatInput").value = "Do not lose this";
-  chrome.element("send").click();
+  chrome.submit();
   assert.match(chrome.element("queuedLog").innerHTML, /<small>Sending… /);
 
   chrome.sendSnapshot("uid=1 body");
@@ -8294,7 +8351,7 @@ test("a queued note settles from a compact ack after its transcript entry is evi
     },
   });
   assert.deepEqual(chrome.queued(), []);
-  chrome.element("send").click();
+  chrome.submit();
   await flushPromises();
   assert.equal(posted, 0, "an evicted identity must not be sent again");
   const bubbles = chrome.element("chatLog").children;
@@ -8317,7 +8374,7 @@ test("a live sync that dropped a prefix still settles from ack_ids", async () =>
     },
   });
   chrome.element("chatInput").value = "Evicted after accept";
-  chrome.element("send").click();
+  chrome.submit();
   const promptId = chrome.queued()[0].prompt_id;
   assertPromptIdentity(promptId);
   chrome.sendSnapshot("uid=1 body");
@@ -8330,7 +8387,7 @@ test("a live sync that dropped a prefix still settles from ack_ids", async () =>
     data: JSON.stringify({ chat: [kept], ack_ids: [promptId] }),
   });
   assert.deepEqual(chrome.queued(), []);
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 retry");
   await flushPromises();
   assert.equal(postCount, 1, "settlement from ack_ids must prevent a second POST");
@@ -8764,7 +8821,7 @@ test("Send delivers an open edit instead of the stale words", async () => {
   chrome.element("queuedLog").dispatch("click", { target: queuedLogNode(["bubble", "queued"], 0) });
   typeIntoQueuedEdit(chrome, "Make this heading smaller");
 
-  chrome.element("send").click();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
 
@@ -8777,7 +8834,7 @@ test("Send delivers an open edit instead of the stale words", async () => {
 test("a note that is already sending cannot be opened for editing", async () => {
   const chrome = await createChromeHarness({ fetchImpl: () => new Promise(() => {}) });
   queueHeadingNote(chrome);
-  chrome.element("send").click();
+  chrome.submit();
 
   chrome.element("queuedLog").dispatch("click", { target: queuedLogNode(["bubble", "queued"], 0) });
   chrome.sendFrameMessage({ type: "lavish:editQueuedAnchor", selector: "main > h2" });
@@ -9141,7 +9198,7 @@ test("L1: a Send made while the server is down is buffered and delivered once wh
     prompt: { prompt: "Sent during the outage", selector: "button#ship", tag: "choice", text: "Ship" },
   });
   const queuedId = chrome.queued()[0].prompt_id;
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   await flushPromises();
@@ -9180,7 +9237,7 @@ test("L1: a Send that fails during the outage says it will be sent automatically
   const { fetchImpl } = outageFetch();
   const chrome = await createChromeHarness({ fetchImpl });
   queueDraft(chrome, "Typed while down");
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   for (let i = 0; i < 4; i += 1) await flushPromises();
 
@@ -9197,7 +9254,7 @@ test("L1: an accepted resend after a stop retires the stop banner it outlived", 
   assert.equal(banner.hidden, false);
 
   queueDraft(chrome, "Sent while stopped");
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   for (let i = 0; i < 4; i += 1) await flushPromises();
   assert.equal(state.posts.length, 0);
@@ -9216,7 +9273,7 @@ test("L1: an accepted resend leaves a banner raised after the outage began", asy
   const banner = chrome.element("outdatedBanner");
   sendChromeOutdated(chrome, "stop");
   queueDraft(chrome, "Sent while stopped");
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   for (let i = 0; i < 4; i += 1) await flushPromises();
 
@@ -9236,7 +9293,7 @@ test("L1: a Send that never hit an outage leaves the stop banner to the user", a
   const chrome = await createChromeHarness({ fetchImpl });
   sendChromeOutdated(chrome, "stop");
   queueDraft(chrome, "Sent with the server up");
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   for (let i = 0; i < 4; i += 1) await flushPromises();
   assert.equal(state.posts.length, 1);
@@ -9301,7 +9358,7 @@ async function sendIntoEndedSession(chrome, text) {
     type: "lavish:queuePrompt",
     prompt: { prompt: text, selector: "button#ship", tag: "choice", text: "Ship" },
   });
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   await flushPromises();
@@ -9429,7 +9486,7 @@ test("F1: a note left queued when the agent ends the session is never auto-poste
   );
 
   // The user's own Send delivers it, and the buffer flag never reaches the POST body.
-  tab2.element("send").onclick();
+  tab2.submit();
   tab2.sendSnapshot("uid=1 body");
   for (let i = 0; i < 6; i += 1) await flushPromises();
   assert.equal(state.posts.length, 1);
@@ -9437,22 +9494,55 @@ test("F1: a note left queued when the agent ends the session is never auto-poste
   assert.equal(localStore.has("lavish-axi:retry:abc"), false);
 });
 
-test("F1: a note left queued when the user ends the session is never auto-posted by a later page", async () => {
+test("End hands a queued note and the typed message to the server in the batch that ends the review", async () => {
   const { state, fetchImpl } = liveFetch();
-  const localStore = new Map();
-  const tab1 = await createChromeHarness({ fetchImpl, localStore });
-  queueDraft(tab1, "Dropped by ending");
-  tab1.element("end").click();
-  for (let i = 0; i < 4; i += 1) await flushPromises();
-  assert.equal(tab1.element("endedOverlay").hidden, false);
+  const ends = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/end")) ends.push(url);
+      return fetchImpl(url, init);
+    },
+  });
+  chrome.element("endedOverlay").hidden = true;
+  queueDraft(chrome, "Queued, never sent");
+  chrome.element("chatInput").value = "Typed, never sent";
 
-  const tab2 = await createChromeHarness({ fetchImpl, localStore });
-  for (let i = 0; i < 6; i += 1) await flushPromises();
-  assert.equal(state.posts.length, 0);
+  chrome.element("end").click();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+
+  assert.equal(state.posts.length, 1);
+  assert.equal(state.posts[0].endSession, true);
   assert.deepEqual(
-    tab2.queued().map((prompt) => prompt.prompt),
-    ["Dropped by ending"],
+    state.posts[0].prompts.map((prompt) => prompt.prompt),
+    ["Queued, never sent", "Typed, never sent"],
   );
+  assert.deepEqual(ends, [], "the words travel with the end, never ahead of a bare /end");
+  assert.equal(chrome.queued().length, 0);
+  assert.equal(chrome.element("endedOverlay").hidden, false);
+});
+
+test("an End the server refuses keeps the review open with every word still queued", async () => {
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url) =>
+      String(url).endsWith("/prompts")
+        ? { ok: false, status: 500, json: async () => ({ error: "disk full" }) }
+        : { ok: true, json: async () => ({}) },
+  });
+  chrome.element("endedOverlay").hidden = true;
+  chrome.element("chatInput").value = "Keep me";
+
+  chrome.element("end").click();
+  chrome.sendSnapshot("uid=1 body");
+  for (let i = 0; i < 4; i += 1) await flushPromises();
+
+  assert.equal(chrome.element("endedOverlay").hidden, true, "the review did not end");
+  assert.deepEqual(
+    chrome.queued().map((prompt) => prompt.prompt),
+    ["Keep me"],
+  );
+  assert.match(chrome.element("sendHint").textContent, /click End to retry/i);
+  assert.equal(chrome.element("end").disabled, false);
 });
 
 test("F1: a page opened on the ended session lists the unsent note as not sent", async () => {
@@ -9478,7 +9568,7 @@ test("F2: an edit made after a failed Send replaces the buffered text another pa
   const localStore = new Map();
   const tab1 = await createChromeHarness({ fetchImpl, localStore });
   queueDraft(tab1, "Before the edit");
-  tab1.element("send").onclick();
+  tab1.submit();
   tab1.sendSnapshot("uid=1 body");
   for (let i = 0; i < 4; i += 1) await flushPromises();
 
@@ -9505,7 +9595,7 @@ test("F3: a resend that keeps failing while /health answers backs off instead of
   };
   const chrome = await createChromeHarness({ fetchImpl });
   queueDraft(chrome, "Keeps failing");
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   for (let i = 0; i < 4; i += 1) await flushPromises();
   assert.equal(state.attempts, 1);
@@ -9538,7 +9628,7 @@ test("F5: a Send answered with a 5xx is retried once the server is healthy", asy
   };
   const chrome = await createChromeHarness({ fetchImpl });
   queueDraft(chrome, "Server hiccup");
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   for (let i = 0; i < 4; i += 1) await flushPromises();
   assert.equal(posts.length, 1);
@@ -9564,11 +9654,11 @@ test("F5: a Send refused with a non-5xx error still asks for the click it needs"
   };
   const chrome = await createChromeHarness({ fetchImpl });
   queueDraft(chrome, "Refused");
-  chrome.element("send").onclick();
+  chrome.submit();
   chrome.sendSnapshot("uid=1 body");
   for (let i = 0; i < 4; i += 1) await flushPromises();
 
-  assert.match(chrome.element("sendHint").textContent, /click Send to Agent to retry/i);
+  assert.match(chrome.element("sendHint").textContent, /press Enter in the message box to retry/i);
   chrome.runTimers(1000);
   for (let i = 0; i < 6; i += 1) await flushPromises();
   assert.equal(posts.length, 1, "nothing retries a refusal by itself");
@@ -9603,4 +9693,126 @@ test("F6: a resend whose reopen worked but whose send failed says the send faile
   assert.equal(chrome.queued().length, 1);
   assert.equal(chrome.element("endedResend").disabled, false);
   assert.equal(chrome.reloadCount(), 0);
+});
+
+test("queued notes and the typed message are saved to the server draft as they are written", async () => {
+  const chrome = await createChromeHarness();
+  queueDraft(chrome, "Saved note");
+  chrome.element("chatInput").value = "Half a thought";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  const saved = chrome.draftRequests.at(-1);
+  assert.equal(saved.url, "/api/abc/draft");
+  assert.deepEqual(
+    saved.body.prompts.map((prompt) => prompt.prompt),
+    ["Saved note"],
+  );
+  assert.equal(saved.body.composer, "Half a thought");
+  assertPromptIdentity(saved.body.prompts[0].prompt_id);
+});
+
+test("closing the tab beacons words typed after the last draft save", async () => {
+  const chrome = await createChromeHarness();
+  chrome.element("chatInput").value = "Typed just before closing";
+  chrome.element("chatInput").dispatch("input");
+
+  chrome.dispatchWindowEvent("pagehide");
+
+  assert.equal(chrome.beacons.length, 1);
+  assert.equal(chrome.beacons[0].url, "/api/abc/draft");
+  assert.equal(chrome.beacons[0].blob.type, "text/plain");
+  assert.equal(JSON.parse(chrome.beacons[0].blob.text).composer, "Typed just before closing");
+  chrome.dispatchWindowEvent("beforeunload");
+  assert.equal(chrome.beacons.length, 1, "an unchanged draft is not beaconed twice");
+});
+
+test("the closing beacon carries a revision above the save it may overtake", async () => {
+  const chrome = await createChromeHarness();
+  chrome.element("chatInput").value = "final wo";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  chrome.element("chatInput").value = "final words before closing";
+  chrome.element("chatInput").dispatch("input");
+
+  chrome.dispatchWindowEvent("pagehide");
+
+  const save = chrome.draftRequests.at(-1).body;
+  const beacon = JSON.parse(chrome.beacons[0].blob.text);
+  assert.equal(save.composer, "final wo");
+  assert.equal(beacon.composer, "final words before closing");
+  assert.equal(beacon.tab, save.tab);
+  assert.ok(typeof save.tab === "string" && save.tab.length > 0);
+  assert.ok(beacon.revision > save.revision, `beacon revision ${beacon.revision} must exceed save ${save.revision}`);
+});
+
+test("a tab told another tab changed the draft stops saving over it and says so", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, initialDraftSeq: 4 },
+    draftResponses: [{ ok: false, status: 409, json: async () => ({ status: "stale", draft_seq: 5 }) }],
+  });
+  chrome.element("chatInput").value = "older-tab text";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  assert.equal(chrome.draftRequests.length, 1);
+  assert.equal(chrome.draftRequests[0].body.base, 4, "a save names the draft it was based on");
+  assert.match(chrome.element("sendHint").textContent, /Another tab changed this page's unsent notes/);
+
+  chrome.element("chatInput").value = "older-tab text, more";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(6000);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  chrome.dispatchWindowEvent("pagehide");
+  assert.equal(chrome.draftRequests.length, 1, "no further save overwrites the other tab's draft");
+  assert.equal(chrome.beacons.length, 0, "the closing beacon does not overwrite it either");
+});
+
+test("a saved draft moves the tab's base to the draft_seq the server answered", async () => {
+  const chrome = await createChromeHarness({
+    draftResponses: [{ ok: true, status: 200, json: async () => ({ status: "saved", draft_seq: 7 }) }],
+  });
+  chrome.element("chatInput").value = "first";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  chrome.element("chatInput").value = "second";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  assert.deepEqual(
+    chrome.draftRequests.map((request) => request.body.base),
+    [0, 7],
+  );
+});
+
+test("a tab with no queue of its own starts from the draft a closed tab left on the server", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: {
+      ...defaultSessionData,
+      initialDraft: {
+        prompts: [
+          {
+            uid: "",
+            prompt: "From the closed tab",
+            selector: "h1",
+            tag: "element",
+            text: "Heading",
+            prompt_id: "draft-1",
+          },
+        ],
+        composer: "Unfinished sentence",
+      },
+    },
+  });
+
+  assert.deepEqual(
+    chrome.queued().map((prompt) => [prompt.prompt, prompt.prompt_id]),
+    [["From the closed tab", "draft-1"]],
+  );
+  assert.equal(chrome.element("chatInput").value, "Unfinished sentence");
 });

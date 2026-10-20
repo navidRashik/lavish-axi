@@ -125,8 +125,6 @@ const panelHead = /** @type {HTMLDivElement} */ (document.getElementById("panelH
 const panelSummary = /** @type {HTMLSpanElement} */ (document.getElementById("panelSummary"));
 const panelToggle = /** @type {HTMLButtonElement} */ (document.getElementById("panelToggle"));
 const panelScrim = /** @type {HTMLDivElement} */ (document.getElementById("panelScrim"));
-const sendButton = /** @type {HTMLButtonElement} */ (document.getElementById("send"));
-const sendAndEndButton = /** @type {HTMLButtonElement} */ (document.getElementById("sendAndEnd"));
 const annotationSwitch = /** @type {HTMLButtonElement} */ (document.getElementById("annotation"));
 const moreWrap = /** @type {HTMLDivElement} */ (document.getElementById("moreWrap"));
 const moreButton = /** @type {HTMLButtonElement} */ (document.getElementById("moreButton"));
@@ -323,12 +321,14 @@ const SNAPSHOT_REQUEST_TIMEOUT_MS = 5000;
 const SEND_STALLED_COPY =
   "Still trying to send. Your feedback is saved in this tab. Keep this tab open while Lavish catches up, and check that the server is running.";
 const SEND_FAILED_COPY =
-  "Could not send. Your feedback is still queued in this tab. Check that Lavish is running, then click Send to Agent to retry.";
+  "Could not send. Your feedback is still queued in this tab. Check that Lavish is running, then press Enter in the message box to retry, or click End.";
 // A network failure or a 5xx on an ordinary Send is resent by the retry probe, so no click is asked for.
 // "Could not send" rather than "could not reach": a 5xx is a server that answered and failed.
 const SEND_RETRYING_COPY = "Could not send. Your feedback is saved and will be sent automatically when Lavish is back.";
 const TERMINAL_SEND_FAILED_COPY =
-  "Could not send. Your terminal feedback is still queued in this tab. Check that Lavish is running, then click Send & End to retry the same batch.";
+  "Could not end the review. Everything you wrote is still queued in this tab and the review is still open. Check that Lavish is running, then click End to retry.";
+const END_FAILED_COPY =
+  "Could not end the review. The review is still open. Check that Lavish is running, then click End to retry.";
 const HEALTH_NO_ANSWER_TITLE = "Lavish did not answer.";
 const HEALTH_NO_ANSWER_COPY =
   "Lavish did not answer the check, so this page cannot tell whether it is running. Try again in a moment.";
@@ -479,7 +479,13 @@ function sanitizeQueuedPrompt(prompt) {
 
 function loadQueuedPrompts() {
   try {
-    const parsed = JSON.parse(sessionStorage.getItem(queueStorageKey) || "[]");
+    const stored = sessionStorage.getItem(queueStorageKey);
+    // A tab with no queue of its own (a reopened tab, another browser) starts from the draft the
+    // server stored, so notes written in a closed tab are still there to hand over.
+    const parsed =
+      stored === null && !sessionData.initialEnded
+        ? sessionData.initialDraft?.prompts || []
+        : JSON.parse(stored || "[]");
     // Also sanitize on restore: a tab poisoned before this guard existed still has
     // the bad prompt on disk and would otherwise stay wedged after an upgrade.
     // Keep a stored identity so a reload can settle an already-accepted note; mint
@@ -499,6 +505,95 @@ function persistQueuedPrompts() {
     }
   } catch {
     // The in-memory queue still works if browser storage is unavailable.
+  }
+  scheduleDraftSave();
+}
+
+// The server keeps a copy of everything written here and not yet handed over - the queued notes
+// and the composer text - so a closed tab, a crash, or an End from elsewhere loses none of it.
+// Saves are debounced and run one at a time; `lastSavedDraft` is the body the server last took.
+const DRAFT_SAVE_DELAY_MS = 400;
+const DRAFT_RETRY_DELAY_MS = 5000;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let draftTimer;
+let draftSaving = Promise.resolve();
+let lastSavedDraft = JSON.stringify(
+  draftBody(sessionData.initialDraft?.prompts || [], sessionData.initialDraft?.composer || ""),
+);
+
+function draftBody(prompts, composer) {
+  return { prompts: prompts.map(stripInternalPromptFields), composer };
+}
+
+function currentDraftJson() {
+  return JSON.stringify(draftBody(queued, chatInput.value));
+}
+
+// Another tab changed this page's draft after this tab last saw it. This tab stops saving so it
+// cannot overwrite that tab's words; its own End still hands over everything it holds.
+const DRAFT_CONFLICT_COPY =
+  "Another tab changed this page's unsent notes, so this tab stopped saving its draft. Click End to hand over what this tab holds, or reload to continue from the other tab.";
+let draftConflict = false;
+
+function scheduleDraftSave(delayMs = DRAFT_SAVE_DELAY_MS) {
+  if (ended) return;
+  if (draftConflict) {
+    showSendHint(DRAFT_CONFLICT_COPY, null, false);
+    return;
+  }
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraft, delayMs);
+}
+
+// Every save names the page's draft_seq it was based on, so the server refuses a save made from a
+// draft another tab has since changed. It also carries this tab's id and a revision that only
+// grows, so the server can drop a save that arrives after a newer one from this same tab (the
+// closing beacon overtaking a debounced save).
+const draftTab = Math.random().toString(36).slice(2) + Date.now().toString(36);
+let draftRevision = 0;
+let draftBase = Number.isSafeInteger(sessionData.initialDraftSeq) ? sessionData.initialDraftSeq : 0;
+
+function stampedDraft(body) {
+  draftRevision += 1;
+  return JSON.stringify({ ...JSON.parse(body), tab: draftTab, revision: draftRevision, base: draftBase });
+}
+
+function saveDraft() {
+  draftTimer = undefined;
+  draftSaving = draftSaving.then(async () => {
+    const body = currentDraftJson();
+    if (ended || draftConflict || body === lastSavedDraft) return;
+    try {
+      const response = await fetch("/api/" + key + "/draft", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: stampedDraft(body),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.ok) {
+        lastSavedDraft = body;
+        if (Number.isSafeInteger(result?.draft_seq)) draftBase = result.draft_seq;
+      } else if (response.status === 409 && result?.status === "stale") {
+        draftConflict = true;
+        showSendHint(DRAFT_CONFLICT_COPY, null, false);
+      } else if (response.status !== 409) {
+        scheduleDraftSave(DRAFT_RETRY_DELAY_MS);
+      }
+    } catch {
+      scheduleDraftSave(DRAFT_RETRY_DELAY_MS);
+    }
+  });
+  return draftSaving;
+}
+
+// The last chance for words typed after the latest save: a beacon outlives the closing page. Its
+// revision is above every save this tab sent, so it wins even if an earlier save lands after it.
+function saveDraftOnExit() {
+  if (ended || draftConflict || typeof navigator.sendBeacon !== "function") return;
+  const body = currentDraftJson();
+  if (body === lastSavedDraft) return;
+  if (navigator.sendBeacon("/api/" + key + "/draft", new Blob([stampedDraft(body)], { type: "text/plain" }))) {
+    lastSavedDraft = body;
   }
 }
 
@@ -812,12 +907,11 @@ function updateSendState() {
   // artifact without disabling annotation mode. Disabling annotation mode closes the
   // SDK card and destroys an unsent draft before delivery has actually succeeded.
   frame.inert = ended || terminalReserved;
-  sendButton.disabled = ended || terminalReserved;
-  sendAndEndButton.disabled = ended || Boolean(terminalSubmission?.inFlight);
   annotationSwitch.disabled = ended || terminalReserved;
   chatInput.disabled = ended || terminalReserved;
   chatAttachButton.disabled = ended || terminalReserved;
-  endButton.disabled = ended || terminalReserved;
+  // A failed End keeps its reserved batch, and End stays the one control that retries it.
+  endButton.disabled = ended || Boolean(terminalSubmission?.inFlight);
   if (warningsQueueButton) updateWarningSelectionState();
 }
 
@@ -2095,10 +2189,13 @@ function sendQueued(endAfter) {
   // A pending or failed chip holds back only the COMPOSER message (and an
   // explicit end, which would strand the chips) - queued annotation prompts
   // still deliver, mirroring how the annotation card holds only its own card
-  // open. Gating the whole pipeline here made Send and Send & End silently
+  // open. Gating the whole pipeline here made Send and End silently
   // deliver nothing while the only signal sat in the composer toolbar.
   const chipsBlocked = chatAttachmentController.hasPending() || chatAttachmentController.hasErrors();
   if (chipsBlocked) chatAttachmentController.noteSendBlocked();
+  // End hands over everything or nothing: delivering the notes while the images it is waiting on
+  // stay behind would split the review the reviewer meant to close in one step.
+  if (chipsBlocked && endAfter) return;
 
   if (!chipsBlocked) {
     const text = chatInput.value.trim();
@@ -2120,7 +2217,8 @@ function sendQueued(endAfter) {
   const shouldEnd = Boolean(endAfter && !chipsBlocked);
   const preparations = shouldEnd ? [...feedbackPreparations] : [];
   if (!queued.length && preparations.length === 0) {
-    if (!chipsBlocked && !sendFailureOwner) showSendHint();
+    if (shouldEnd) endWithNothingQueued();
+    else if (!chipsBlocked && !sendFailureOwner) showSendHint();
     return;
   }
   if (!sendFailureOwner) hideSendHint(true);
@@ -2170,7 +2268,7 @@ function completeTerminalPreparation(terminal, results) {
   clearPreparationFailure("terminal");
   if (!terminal.prompts.length) {
     releaseTerminalSubmission(terminal);
-    if (!sendFailureOwner) showSendHint();
+    endWithNothingQueued();
     return;
   }
   // Only make the reservation durable once every preparation has joined the exact
@@ -2179,6 +2277,11 @@ function completeTerminalPreparation(terminal, results) {
   persistTerminalReservation(true);
   requestSnapshot("submit", terminal.prompts, true, terminal);
   render();
+}
+
+// An End whose preparations and edits left nothing to hand over still ends the review.
+function endWithNothingQueued() {
+  endSession().catch(() => showSendHint(END_FAILED_COPY, null, false));
 }
 
 function retryTerminalSubmission() {
@@ -2263,7 +2366,9 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
     return;
   }
   const body = { prompts: prompts.map(stripInternalPromptFields), domSnapshot: submission.domSnapshot };
-  if (shouldEndSession) body.endSession = true;
+  // An End names this tab and the draft it last saw, so the server can tell whether the stored
+  // draft is another tab's newer words that this batch does not carry.
+  if (shouldEndSession) Object.assign(body, { endSession: true, draft_tab: draftTab, draft_base: draftBase });
   let response;
   try {
     response = await fetch("/api/" + key + "/prompts", {
@@ -2284,7 +2389,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
     }
   } catch (error) {
     // The server never answered: the retry buffer still holds the batch, so resend it once
-    // /health answers. Send & End keeps its own explicit retry, which also ends the session.
+    // /health answers. End keeps its own explicit retry, which also ends the session.
     if (submission.terminal) {
       showQueuedSendFailure(TERMINAL_SEND_FAILED_COPY, { kind: "terminal", operation: submission.terminal });
     } else {
@@ -2314,7 +2419,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
       }
       if (Array.isArray(data?.warnings)) setLayoutWarnings(data.warnings);
       showQueuedSendFailure(
-        "Could not send because the layout issue selection changed. Your feedback is still queued. Review the current issues, then click Send to Agent to retry.",
+        "Could not send because the layout issue selection changed. Your feedback is still queued. Review the current issues, then click End to retry.",
         { kind: "submission", operation: submission },
       );
       forgetRetryPrompts(prompts);
@@ -3291,14 +3396,30 @@ async function refreshLayoutWarnings() {
 
 async function endSession(terminal = null) {
   if (ended || (terminalSubmission && terminal !== terminalSubmission)) return;
-  const response = await fetch("/api/" + key + "/end", { method: "POST" });
+  const response = await fetch("/api/" + key + "/end", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ draft_tab: draftTab, draft_base: draftBase }),
+  });
   if (!response.ok) throw new Error("failed to end session");
   markSessionEnded();
+}
+
+// The one way out of a review. End hands over everything written here - queued notes, the
+// composer text and its images - and the session ends only once the server has taken all of it;
+// a failure leaves the review open with every word still queued. An End with nothing queued
+// still ends (see `endWithNothingQueued`). The draft save stays scheduled, so a failed End leaves
+// the server's copy current; an End that succeeds cancels it.
+function endReview() {
+  closeMenus();
+  sendQueued(true);
+  scheduleDraftSave();
 }
 
 function markSessionEnded() {
   if (ended) return;
   ended = true;
+  clearTimeout(draftTimer);
   pendingAcknowledgements.clear();
   stopSendRetryProbe();
   clearSendAcknowledgementWarning();
@@ -4631,7 +4752,7 @@ window.addEventListener("message", (event) => {
   // removal note below: the iframe cannot be trusted to decide a delete, and the
   // chrome cannot see every live reference, so reclamation is the sweeper's job.
   if (msg.type === "lavish:sendQueuedPrompts") sendQueued();
-  if (msg.type === "lavish:endSession") endSession();
+  if (msg.type === "lavish:endSession") void endReview();
   if (msg.type === "lavish:revisions") applyRevisionMessage(msg);
   if (msg.type === "lavish:toggleAnnotationMode") toggleAnnotationMode();
   if (msg.type === "lavish:togglePanel") togglePanelCollapsed();
@@ -4816,8 +4937,7 @@ function toggleAnnotationMode() {
 
 annotationSwitch.onclick = toggleAnnotationMode;
 
-sendButton.onclick = () => sendQueued(false);
-sendAndEndButton.onclick = () => sendQueued(true);
+endButton.onclick = () => void endReview();
 moreButton.onclick = () => {
   closeWarningsDrawer();
   closeRevisionsDrawer();
@@ -4918,7 +5038,12 @@ chatInput.addEventListener("keydown", (event) => {
     sendQueued(false);
   }
 });
-chatInput.addEventListener("input", () => hideSendHint());
+chatInput.addEventListener("input", () => {
+  hideSendHint();
+  scheduleDraftSave();
+});
+window.addEventListener("pagehide", saveDraftOnExit);
+window.addEventListener("beforeunload", saveDraftOnExit);
 copyPathButton.onclick = copyFilePath;
 reloadArtifactButton.onclick = reloadArtifact;
 copySnapshotButton.onclick = copyDomSnapshot;
@@ -4936,10 +5061,6 @@ copySharePasswordButton.onclick = () =>
   copyToButton(sharePasswordOutput.value, copySharePasswordButton, "Copy password");
 copyShareSiteIdButton.onclick = () => copyToButton(shareSiteIdInput.value, copyShareSiteIdButton, "Copy site ID");
 shareGenerateInput.onchange = syncSharePasswordInput;
-endButton.onclick = () => {
-  closeMenus();
-  endSession();
-};
 handoffTakeoverButton.onclick = () => location.reload();
 if (endedResendButton) endedResendButton.onclick = () => resendEndedUnsent();
 if (endedCopyButton) endedCopyButton.onclick = () => copyEndedUnsent();
@@ -5114,7 +5235,15 @@ setAgentPresence("waiting");
 // The session already ended before this page (re)loaded, so there is no future live `ended` event
 // to wait for - start read-only instead of looking live until a Send gets silently refused.
 if (sessionData.initialEnded) markSessionEnded();
-else resendRetryBuffer();
+else {
+  // The composer text a closed tab left in the server's draft comes back where it was typed, and
+  // notes adopted from that draft become this tab's own queue.
+  const draftComposer = sessionData.initialDraft?.composer;
+  if (typeof draftComposer === "string" && draftComposer && !chatInput.value) chatInput.value = draftComposer;
+  if (queued.length) persistQueuedPrompts();
+  if (currentDraftJson() !== lastSavedDraft) scheduleDraftSave();
+  resendRetryBuffer();
+}
 
 // Reaching this line is the only proof that this file parsed and ran to completion. The inline
 // bootstrap already owns the gate's bounded escape if this script fails; retire only its separate

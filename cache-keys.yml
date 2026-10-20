@@ -32,6 +32,10 @@ keys:
     template: "lavish-axi:sheet-open:{key}"
     ttl: null
     version: 1
+  session-draft:
+    template: "state.json sessions.{key}.draft"
+    ttl: null
+    version: 1
   events-stream:
     template: "/events/{key}"
     ttl: 0

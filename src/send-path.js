@@ -1,7 +1,7 @@
 // Render-free check for an artifact whose own controls queue feedback and then never deliver it:
 // it calls window.lavish.queuePrompt() but neither window.lavish.sendQueuedPrompts() nor
 // window.lavish.answerQuestion(). The reviewer clicks the artifact's button, sees nothing go to
-// the agent, and the note sits in the queue until they find Send to Agent - or close the tab.
+// the agent, and the note sits in the queue until they press Enter or End.
 // Like the self-paint check this is a warning only: never block the open, never auto-repair, and
 // a page with no queuePrompt call at all is never flagged.
 
@@ -23,7 +23,7 @@ const QUEUE_CALL_RE = /\bqueuePrompt\s*\(/;
 const SEND_CALL_RE = /\b(?:sendQueuedPrompts|answerQuestion)\s*\(/;
 
 export const SEND_PATH_WARNING =
-  "This artifact calls window.lavish.queuePrompt() but never window.lavish.sendQueuedPrompts() or window.lavish.answerQuestion(), so feedback its own controls queue does not reach you until the reviewer finds Send to Agent. Call sendQueuedPrompts() after queueing when a control should send right away, or answerQuestion() for a store-bound question.";
+  "This artifact calls window.lavish.queuePrompt() but never window.lavish.sendQueuedPrompts() or window.lavish.answerQuestion(), so feedback its own controls queue does not reach you until the reviewer presses Enter in the message box or End. Call sendQueuedPrompts() after queueing when a control should send right away, or answerQuestion() for a store-bound question.";
 
 function executableCode(html) {
   const markup = html.replace(HTML_COMMENT_RE, "");
