@@ -2412,7 +2412,7 @@ test("/api/sessions refuses a non-HTML path so its directory cannot become an ar
     assert.equal(created.status, 400);
     assert.equal(body.status, "error");
     assert.equal(body.code, "VALIDATION_ERROR");
-    assert.match(body.error, /HTML file/);
+    assert.match(body.error, /HTML or Markdown file/);
 
     const key = sessionKey(await canonicalFile(secret));
     const leak = await fetch(`${base}/artifact/${key}/.env`);
@@ -2440,7 +2440,7 @@ test("/api/sessions refuses an HTML symlink to a non-HTML file", async () => {
     const body = await created.json();
     assert.equal(created.status, 400);
     assert.equal(body.code, "VALIDATION_ERROR");
-    assert.match(body.error, /HTML file/);
+    assert.match(body.error, /HTML or Markdown file/);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });

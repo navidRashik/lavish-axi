@@ -1,0 +1,135 @@
+@import "highlight.js/styles/github.css" (prefers-color-scheme: light);
+@import "highlight.js/styles/github-dark.css" (prefers-color-scheme: dark);
+
+/* Rendered Markdown, scoped to .lavish-markdown so an HTML page embedding a block keeps its own styles. */
+.lavish-markdown {
+  --lmd-fg: #1f2328;
+  --lmd-muted: #59636e;
+  --lmd-border: #d1d9e0;
+  --lmd-subtle: #f6f8fa;
+  --lmd-link: #0969da;
+  color: var(--lmd-fg);
+  font:
+    16px/1.6 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "Noto Sans",
+    Helvetica,
+    Arial,
+    sans-serif;
+  overflow-wrap: anywhere;
+}
+@media (prefers-color-scheme: dark) {
+  .lavish-markdown {
+    --lmd-fg: #f0f6fc;
+    --lmd-muted: #9198a1;
+    --lmd-border: #3d444d;
+    --lmd-subtle: #151b23;
+    --lmd-link: #4493f8;
+  }
+}
+.lavish-markdown > :first-child {
+  margin-top: 0;
+}
+.lavish-markdown :is(h1, h2, h3, h4, h5, h6) {
+  margin: 1.5em 0 0.5em;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.lavish-markdown :is(h1, h2) {
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--lmd-border);
+}
+.lavish-markdown h1 {
+  font-size: 2em;
+}
+.lavish-markdown h2 {
+  font-size: 1.5em;
+}
+.lavish-markdown h3 {
+  font-size: 1.25em;
+}
+.lavish-markdown :is(p, ul, ol, blockquote, table, pre, .lavish-md-mermaid) {
+  margin: 0 0 1em;
+}
+.lavish-markdown a {
+  color: var(--lmd-link);
+}
+.lavish-markdown :is(ul, ol) {
+  padding-left: 2em;
+}
+.lavish-markdown li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.4em;
+}
+.lavish-markdown blockquote {
+  padding: 0 1em;
+  color: var(--lmd-muted);
+  border-left: 0.25em solid var(--lmd-border);
+}
+.lavish-markdown code {
+  padding: 0.2em 0.4em;
+  font:
+    85% / 1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  background: var(--lmd-subtle);
+  border-radius: 6px;
+}
+.lavish-markdown pre {
+  overflow: auto;
+  background: var(--lmd-subtle);
+  border-radius: 6px;
+}
+.lavish-markdown pre > code {
+  display: block;
+  padding: 1em;
+  font-size: 85%;
+  background: transparent;
+  white-space: pre;
+}
+.lavish-markdown table {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  border-collapse: collapse;
+}
+.lavish-markdown :is(th, td) {
+  padding: 6px 13px;
+  border: 1px solid var(--lmd-border);
+}
+.lavish-markdown th {
+  font-weight: 600;
+  background: var(--lmd-subtle);
+}
+.lavish-markdown img {
+  max-width: 100%;
+}
+.lavish-markdown hr {
+  height: 0.25em;
+  margin: 1.5em 0;
+  background: var(--lmd-border);
+  border: 0;
+}
+.lavish-markdown .lavish-md-mermaid {
+  text-align: center;
+}
+
+/* Standalone page shell for a .md file. */
+.lavish-markdown-page {
+  margin: 0;
+  background: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  .lavish-markdown-page {
+    background: #0d1117;
+  }
+}
+.lavish-markdown-page > main {
+  box-sizing: border-box;
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}

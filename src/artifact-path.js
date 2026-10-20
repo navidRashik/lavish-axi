@@ -1,16 +1,35 @@
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
-export const ARTIFACT_HTML_ERROR = "Lavish Editor expects an HTML file";
+export const ARTIFACT_HTML_ERROR = "Lavish Editor expects an HTML or Markdown file";
 
 /**
- * Match the CLI: Lavish reviews HTML files, so only `.html` / `.htm` (any case) count.
+ * Match the CLI: `.html` / `.htm` (any case) are HTML artifacts.
  * @param {unknown} file
  * @returns {boolean}
  */
 export function isHtmlPath(file) {
   const lower = String(file || "").toLowerCase();
   return lower.endsWith(".html") || lower.endsWith(".htm");
+}
+
+/**
+ * `.md` / `.markdown` (any case) are Markdown artifacts, served as a rendered HTML shell.
+ * @param {unknown} file
+ * @returns {boolean}
+ */
+export function isMarkdownPath(file) {
+  const lower = String(file || "").toLowerCase();
+  return lower.endsWith(".md") || lower.endsWith(".markdown");
+}
+
+/**
+ * Every file type Lavish opens as a review session.
+ * @param {unknown} file
+ * @returns {boolean}
+ */
+export function isArtifactPath(file) {
+  return isHtmlPath(file) || isMarkdownPath(file);
 }
 
 /**
@@ -47,19 +66,19 @@ export function isArtifactPathError(error) {
 }
 
 /**
- * Canonicalize a session-create path and refuse anything that is not a regular HTML file.
- * The request name and the symlink-followed real path both have to be HTML, so
+ * Canonicalize a session-create path and refuse anything that is not a regular HTML or Markdown file.
+ * The request name and the symlink-followed real path both have to be artifacts, so
  * `preview.html -> /etc/passwd` cannot adopt `/etc` as a serving tree.
  * @param {unknown} file
  * @returns {Promise<string>}
  */
 export async function resolveAllowedArtifactFile(file) {
   const requested = typeof file === "string" ? file : "";
-  if (!isHtmlPath(requested)) {
+  if (!isArtifactPath(requested)) {
     throw new ArtifactPathError();
   }
   const canonical = await realpath(path.resolve(requested));
-  if (!isHtmlPath(canonical)) {
+  if (!isArtifactPath(canonical)) {
     throw new ArtifactPathError();
   }
   const info = await stat(canonical);
