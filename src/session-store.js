@@ -213,7 +213,7 @@ export class SessionStore {
     const withDraft =
       options.withDraft === true ||
       (shouldEndSession && draftIsAnotherTabs(session, { tab: payload.draft_tab, base: payload.draft_base }));
-    const prompts = withDraft ? [...sent, ...draftPrompts(session.draft, sent)] : sent;
+    const prompts = withDraft ? [...sent, ...(await draftPrompts(session.draft, sent, key, options))] : sent;
     // `options.restore` re-queues a batch `takeFeedback` already removed (a poll whose client
     // disconnected before its response was written). Those prompts were accepted once already, so
     // restoring replays them verbatim: no layout-warning plan or conflict check to re-run and no
@@ -739,8 +739,9 @@ export class SessionStore {
   // `endedBy` distinguishes a human ending review from the browser chrome ("user") from an
   // agent explicitly closing the loop via `lavish-axi end` ("agent"). Only a user-initiated end
   // blocks a plain reopen - see `SessionStore` callers in server.js. `from` names the ending tab
-  // and the draft_seq it last saw.
-  async endSession(key, endedBy = "agent", from = {}) {
+  // and the draft_seq it last saw; `attachmentOptions` carries the resolver and caps a handed-over
+  // draft's images go through.
+  async endSession(key, endedBy = "agent", from = {}, attachmentOptions = {}) {
     return this.runExclusive(async () => {
       let state = await this.readState();
       let session = state.sessions[key];
@@ -754,7 +755,11 @@ export class SessionStore {
       // the ending tab never saw. Any other end hands the draft over with it; a draft the queue
       // refuses (a layout warning that changed) stays stored rather than dropped.
       if (session.status !== "ended" && session.draft && (endedBy !== "user" || draftIsAnotherTabs(session, from))) {
-        const committed = await this.#queuePromptsLocked(key, { prompts: [], endSession: true }, { withDraft: true });
+        const committed = await this.#queuePromptsLocked(
+          key,
+          { prompts: [], endSession: true },
+          { ...attachmentOptions, withDraft: true },
+        );
         if (committed && !committed.conflict && !committed.rejected) {
           state = await this.readState();
           session = state.sessions[key];
@@ -1026,16 +1031,27 @@ function pruneDraft(draft, session, delivered) {
   return normalizeDraft({ prompts, composer: composerDelivered ? "" : draft.composer, at: draft.at });
 }
 
-// What an end adds to its batch from the stored draft. Images are left out: an upload the draft
-// names may have expired, and one unresolvable image would refuse the whole end. The note says so.
-function draftPrompts(draft, batch) {
+// What an end adds to its batch from the stored draft. Each draft image goes through the same
+// resolver and caps as a sent one; an image it cannot honour (its upload expired, a cap, or no
+// resolver at all) is left out with a note in the text instead of refusing the whole end, which
+// would leave the reviewer's words undelivered.
+async function draftPrompts(draft, batch, key, options) {
   if (!draft) return [];
-  const prompts = draft.prompts.map((prompt) => {
-    if (!prompt.attachments?.length) return prompt;
+  const prompts = [];
+  for (const prompt of draft.prompts) {
+    if (!prompt.attachments?.length) {
+      prompts.push(prompt);
+      continue;
+    }
+    const { resolved } = await resolvePromptAttachments(prompt.attachments, key, options);
+    const resolvedIds = new Set(resolved.map((attachment) => attachment.id));
+    const kept = prompt.attachments.filter((ref) => resolvedIds.has(ref.id));
     const { attachments, ...rest } = prompt;
-    const note = `[${attachments.length} image(s) from the unsent draft were not attached]`;
-    return { ...rest, prompt: rest.prompt ? `${rest.prompt}\n${note}` : note };
-  });
+    const missing = attachments.length - kept.length;
+    const note = `[${missing} image(s) from the unsent draft were not attached]`;
+    const text = missing === 0 ? rest.prompt : rest.prompt ? `${rest.prompt}\n${note}` : note;
+    prompts.push(kept.length ? { ...rest, prompt: text, attachments: kept } : { ...rest, prompt: text });
+  }
   const composer = draft.composer.trim();
   const alreadySent = batch.some(
     (prompt) => prompt?.tag === "message" && String(prompt.prompt || "").trim() === composer,
