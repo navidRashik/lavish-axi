@@ -148,7 +148,7 @@ export const REVISION_REGISTRY_SNIPPET = `<script type="application/json" data-l
 
 // The default page: the house theme Lavish serves from /design/, a top bar linking the other
 // pages and this page's sections, a diagram, a one-click question and a closing takeaway.
-export const HOUSE_PAGE_SNIPPET = `<!doctype html>
+const HOUSE_PAGE_SNIPPET = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
