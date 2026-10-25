@@ -150,7 +150,9 @@ function dumpChromeDom(chrome, args, pageRequested) {
       timer = setTimeout(() => finish(new Error("Chrome did not dump the fixture DOM in time")), CHROME_PAGE_MS);
     });
     child.on("error", finish);
-    child.on("exit", (code) => {
+    // 'exit' can arrive while Chrome's last stdout chunk is still unread; 'close' comes only after
+    // stdout has been drained, so the dump is judged complete or not on everything Chrome wrote.
+    child.on("close", (code) => {
       if (!settled) finish(new Error(`Chrome exited before dumping the fixture DOM (${code})`));
     });
     child.stdout.setEncoding("utf8");
