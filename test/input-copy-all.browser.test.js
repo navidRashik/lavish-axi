@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -12,7 +12,6 @@ import { parse } from "parse5";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const playbooksPath = process.env.LAVISH_AXI_PLAYBOOKS_MODULE || path.join(repoRoot, "src/playbooks.js");
 const { PLAYBOOKS } = await import(pathToFileURL(playbooksPath).href);
-let chromeLaunchState;
 
 async function chromePath() {
   const candidates = [
@@ -32,38 +31,6 @@ async function chromePath() {
     }
   }
   return "";
-}
-
-async function headlessChromeState(chrome) {
-  if (chromeLaunchState) return chromeLaunchState;
-  const root = await mkdtemp(path.join(os.tmpdir(), "lavish-copy-all-probe-"));
-  try {
-    const result = spawnSync(
-      chrome,
-      [
-        "--headless=new",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--no-sandbox",
-        `--user-data-dir=${path.join(root, "chrome-profile")}`,
-        "--use-mock-keychain",
-        "--password-store=basic",
-        "--dump-dom",
-        "about:blank",
-      ],
-      { stdio: "ignore", timeout: 15_000 },
-    );
-    chromeLaunchState =
-      result.status === 0
-        ? { available: true }
-        : {
-            available: false,
-            reason: `Chrome or Chromium could not launch headless (${result.signal || `exit ${result.status}`})`,
-          };
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-  return chromeLaunchState;
 }
 
 function copyAllHtmlSnippet() {
@@ -148,6 +115,8 @@ function probeScript(scenario, { clicks = 1 } = {}) {
 // A launch that has not requested it after CHROME_LAUNCH_MS hung before running any page code and
 // never recovers on its own, so that launch is killed and Chrome is started once more with a fresh
 // profile. Once the page has been requested, a stall fails the test: nothing after that is retried.
+// A Chrome binary that is present but cannot serve a page therefore fails these tests; only a
+// missing binary skips them.
 const CHROME_LAUNCH_MS = 10_000;
 const CHROME_PAGE_MS = 30_000;
 
@@ -221,11 +190,6 @@ async function runBrowserScenario(t, scenario, fixture, options = {}) {
   const chrome = await chromePath();
   if (!chrome) {
     t.skip("Chrome or Chromium is required for the standalone copy behavior regression");
-    return null;
-  }
-  const launchState = await headlessChromeState(chrome);
-  if (!launchState.available) {
-    t.skip(launchState.reason);
     return null;
   }
   const root = await mkdtemp(path.join(os.tmpdir(), "lavish-copy-all-"));
