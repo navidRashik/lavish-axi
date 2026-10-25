@@ -263,6 +263,7 @@ try {
       target.id !== "" && target.answer !== "" && prompts.includes(target.id) && prompts.includes(target.answer);
     console.log(`question id=${JSON.stringify(target.id)} answer=${JSON.stringify(target.answer)}`);
   } else {
+    console.log("question: no visible question control to click");
     checks.questionReachesServer = false;
   }
 
