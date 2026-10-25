@@ -59,10 +59,12 @@ const shutdown = async (code) => {
   rmSync(profile, { recursive: true, force: true });
   process.exit(code);
 };
+// The deadlines only stop a hang; on a heavily loaded host a navigation alone can take tens of
+// seconds, so they sit well above what a healthy run needs.
 const overall = setTimeout(() => {
-  console.error("TIMEOUT: the check did not finish in 120 s");
+  console.error("TIMEOUT: the check did not finish in 300 s");
   void shutdown(2);
-}, 120_000);
+}, 300_000);
 
 let socket;
 const pending = new Map();
@@ -113,14 +115,14 @@ socket.addEventListener("message", ({ data }) => {
   }
 });
 
-/** One CDP call; a call Chrome never answers fails after 15 s instead of hanging the check. */
+/** One CDP call; a call Chrome never answers fails after 60 s instead of hanging the check. */
 const send = (method, params = {}, sessionId) =>
   new Promise((resolve, reject) => {
     const id = ++nextId;
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`CDP ${method} got no answer in 15 s`));
-    }, 15_000);
+      reject(new Error(`CDP ${method} got no answer in 60 s`));
+    }, 60_000);
     pending.set(id, {
       resolve: (value) => (clearTimeout(timer), resolve(value)),
       reject: (error) => (clearTimeout(timer), reject(error)),
