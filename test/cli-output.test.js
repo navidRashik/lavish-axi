@@ -2100,6 +2100,36 @@ test("a reviewer's End reaches the agent as one event carrying every note of the
   assert.equal(plain.messages, undefined);
 });
 
+test("a feedback poll names the exact reply --done that closes each delivered note", () => {
+  const output = createPollOutput({
+    file: "/tmp/report.html",
+    response: {
+      status: "feedback",
+      dom_snapshot: "",
+      prompts: [
+        { prompt: "first", tag: "message", prompt_id: "n-1" },
+        { prompt: "second", tag: "message", prompt_id: "n-2" },
+      ],
+    },
+  });
+  assert.deepEqual(
+    output.prompts.map((prompt) => prompt.prompt_id),
+    ["n-1", "n-2"],
+  );
+  assert.ok(
+    output.next_step.includes(
+      '`lavish-axi reply /tmp/report.html --done n-1,n-2 --agent-reply "<message for the user>"`',
+    ),
+    output.next_step,
+  );
+
+  const legacy = createPollOutput({
+    file: "/tmp/report.html",
+    response: { status: "feedback", dom_snapshot: "", prompts: [{ prompt: "no id", tag: "message" }] },
+  });
+  assert.doesNotMatch(legacy.next_step, /--done/);
+});
+
 test("a poll reporting an agent-ended session allows a plain reopen if still needed", () => {
   const output = createPollOutput({
     file: "/tmp/report.html",

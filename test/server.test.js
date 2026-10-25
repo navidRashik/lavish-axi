@@ -4882,6 +4882,48 @@ test("agent-reply done marks named notes from any round; ended_ok answers an end
   }
 });
 
+test("a delivered note carries its prompt_id, and reply done with that id closes exactly it", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const stateFile = path.join(dir, "state.json");
+  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const base = `http://127.0.0.1:${server.port}`;
+  const post = (route, body) =>
+    fetch(`${base}${route}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify(body),
+    });
+  try {
+    const { key } = await (await post("/api/sessions", { file: artifact })).json();
+    const note = (id) => ({ uid: "", prompt: `words ${id}`, prompt_id: id, tag: "message", selector: "" });
+    assert.equal((await post(`/api/${key}/prompts`, { prompts: [note("p-a"), note("p-b")] })).status, 200);
+    const delivered = await (await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`)).json();
+    assert.equal(delivered.status, "feedback");
+    assert.deepEqual(
+      delivered.prompts.map((prompt) => [prompt.prompt_id, prompt.prompt]),
+      [
+        ["p-a", "words p-a"],
+        ["p-b", "words p-b"],
+      ],
+    );
+
+    assert.equal((await post(`/api/${key}/agent-reply`, { text: "a done", done: ["p-a"] })).status, 200);
+    const chat = JSON.parse(await readFile(stateFile, "utf8")).sessions[key].chat;
+    assert.deepEqual(
+      chat.filter((entry) => entry.role === "user").map((entry) => [entry.prompt_id, Boolean(entry.done_at)]),
+      [
+        ["p-a", true],
+        ["p-b", false],
+      ],
+    );
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("poll on an ended session reports who ended it", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
