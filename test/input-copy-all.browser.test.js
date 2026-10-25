@@ -242,7 +242,10 @@ async function runBrowserScenario(t, scenario, fixture, options = {}) {
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
-    await rm(root, { recursive: true, force: true });
+    // Killing Chrome's process group does not stop every writer at once: helpers take a moment to
+    // die and the crashpad handler runs in a session of its own, so files can still appear in the
+    // profile while it is being removed (ENOTEMPTY). The removal retries until they stop.
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 }
 
