@@ -1,3 +1,5 @@
+import "./socket-tos-guard.js";
+
 import { spawn, spawnSync } from "node:child_process";
 import {
   closeSync,
