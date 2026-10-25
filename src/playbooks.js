@@ -9,8 +9,9 @@ export const PLAYBOOKS = [
     id: "diagram",
     use_when: "Explain relationships, flows, state, architecture, and concepts with illustrations",
     choose: [
-      "Default to hand-authored inline SVG: it gives proportion, emphasis, spatial metaphor, and annotation-ready structure that generated layouts cannot.",
-      "Use Mermaid only when the user asks for an editable whiteboard: rendered Mermaid in a `.mermaid` container becomes an Excalidraw whiteboard in the Lavish browser.",
+      "On a house page (the `lavish-axi design` default), write flows, sequences, state, entities and timelines as Mermaid in a `.mermaid` block: /design/house-mermaid.js renders it as a plain SVG themed from the house palette, with a Full screen viewer.",
+      "Hand-author inline SVG when proportion, spatial metaphor or emphasis carry the point, or when the page does not load house-mermaid.js.",
+      'An editable whiteboard is opt-in: `class="mermaid whiteboard"` on a house page, or rendered Mermaid in a `.mermaid` container elsewhere, becomes an Excalidraw whiteboard in the Lavish browser.',
       "For large systems, draw a small overview illustration and put detail in module cards below it, instead of one dense auto-laid graph.",
     ],
     structure: [
@@ -31,8 +32,8 @@ export const PLAYBOOKS = [
     ],
     pitfalls: [
       "Do not cram every file or function into one figure when a layered explanation would be clearer.",
-      "Do not hand-build boxes-and-arrows from div/flexbox: inline SVG owns figures, HTML owns the prose around them.",
-      "Do not reach for Mermaid to save authoring effort - it surrenders position, size, and emphasis to the engine.",
+      "Do not hand-build boxes-and-arrows from div/flexbox: Mermaid or inline SVG owns figures, HTML owns the prose around them.",
+      "Do not reach for Mermaid when the layout itself is the message - it surrenders position, size, and emphasis to the engine.",
       "Do not present unverified architecture claims as facts. Cite the files or commands that support them.",
     ],
     lavish_notes: [

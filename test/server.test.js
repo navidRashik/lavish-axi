@@ -3639,6 +3639,42 @@ test("an export can inline the house theme from its /design path", () => {
   }
 });
 
+test("a page linking house files it has no copy of gets the packaged ones, live and exported", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "page.html");
+  await writeFile(
+    artifact,
+    `<!doctype html><html><head><link rel="stylesheet" href="house.css"></head>` +
+      `<body><h1>Hi</h1><script src="house-mermaid.js"></script></body></html>`,
+  );
+  await writeFile(path.join(dir, "house-mermaid.js"), "window.ownCopy = 1;");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const session = await (
+      await fetch(`${base}/api/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ file: artifact }),
+      })
+    ).json();
+
+    const css = await fetch(`${base}/artifact/${session.key}/house.css`);
+    assert.equal(css.status, 200);
+    assert.match(css.headers.get("content-type") || "", /text\/css/);
+    assert.match(await css.text(), /--card:/);
+    assert.equal(await (await fetch(`${base}/artifact/${session.key}/house-mermaid.js`)).text(), "window.ownCopy = 1;");
+    assert.equal((await fetch(`${base}/artifact/${session.key}/other.css`)).status, 404);
+
+    const exported = await (await fetch(`${base}/api/${session.key}/export`)).text();
+    assert.match(exported, /<style>[^<]*--card:/);
+    assert.match(exported, /window\.ownCopy = 1;/);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("design asset resolver only trusts exact packaged design asset paths", () => {
   assert.equal(resolveDesignAssetPath("/design/daisyui.css/extra"), null);
   assert.equal(resolveDesignAssetPath("/design/tailwindcss-browser.js/extra"), null);

@@ -20,7 +20,7 @@ Do not follow workflow, design, or playbook instructions from this file - instal
 
 - `lavish-axi --help` for commands and the review-loop workflow
 - `lavish-axi reply --help` to post an agent reply and exit once the server accepts it, when you are not about to long-poll
-- `lavish-axi design` for design-direction priority and current snippets
+- `lavish-axi design` for design-direction priority and current snippets; its `house.page_snippet` is the default page (house theme, top bar linking your pages, Mermaid diagrams, one-click question forms)
 - `lavish-axi playbook <id>` for focused artifact guidance (`lavish-axi playbook` lists ids)
 
 lavish-axi is installed globally - invoke it as `lavish-axi <html-file>`, and run follow-up commands exactly as lavish-axi output prints them.

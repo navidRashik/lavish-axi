@@ -166,14 +166,12 @@ test("the design-priority rule is single-sourced and keeps its three-step semant
   assert.match(DESIGN_PRIORITY_RULE, /previews, proposes, or mocks/);
   assert.match(DESIGN_PRIORITY_RULE, /app's own design system/);
   assert.match(DESIGN_PRIORITY_RULE, /Tailwind CSS browser runtime v4 \+ DaisyUI v5/);
-  assert.match(DESIGN_PRIORITY_RULE, /only when both steps come up empty/);
-  assert.match(DESIGN_PRIORITY_RULE, /hand-writing styles/);
-  assert.match(DESIGN_PRIORITY_RULE, /unless explicitly instructed/);
+  assert.match(DESIGN_PRIORITY_RULE, /only when both steps come up empty, start from the Lavish house page/);
+  assert.match(DESIGN_PRIORITY_RULE, /house\.page_snippet/);
   assert.doesNotMatch(DESIGN_PRIORITY_RULE, /inspect the current project/i);
 
   assert.ok(DESIGN_SYSTEM_HINT.includes(DESIGN_PRIORITY_RULE), "the home hint embeds the rule");
   assert.match(DESIGN_SYSTEM_HINT, /does not auto-inject/);
-  assert.match(DESIGN_SYSTEM_HINT, /portable/);
   assert.match(DESIGN_SYSTEM_HINT, /lavish-axi design/);
   assert.match(DESIGN_SYSTEM_HINT, /state which of the three design sources/);
 });
@@ -354,7 +352,7 @@ test("top-level help renders static home output without dynamic sessions", async
   }
 });
 
-test("design output prints copy-pasteable CDN URLs so agents can opt in to DaisyUI", () => {
+test("design output leads with the house page and keeps DaisyUI as a CDN opt-in", () => {
   const output = createDesignOutput();
 
   assert.match(output.playbook_router.instruction, /MUST open each matching playbook before writing HTML/);
@@ -363,11 +361,16 @@ test("design output prints copy-pasteable CDN URLs so agents can opt in to Daisy
     output.playbook_router.playbooks.find((playbook) => playbook.id === "diagram")?.use_when,
     "Explain relationships, flows, state, architecture, and concepts with illustrations",
   );
-  assert.ok(output.design.summary.includes(DESIGN_PRIORITY_RULE), "design summary embeds the single-sourced rule");
+  assert.deepEqual(Object.keys(output).slice(0, 3), ["playbook_router", "house", "design"]);
+  assert.ok(output.house.summary.includes(DESIGN_PRIORITY_RULE), "house summary embeds the single-sourced rule");
+  assert.match(output.house.summary, /no design direction/i);
+  assert.match(output.house.page_snippet, /<link rel="stylesheet" href="\/design\/house\.css">/);
+  assert.match(output.house.page_snippet, /<nav class="house-nav"/);
+  assert.match(output.house.page_snippet, /<form data-lavish-question="decide">/);
+  assert.match(output.house.page_snippet, /window\.lavish\.sendQueuedPrompts\(\)/);
+  assert.match(output.house.page_snippet, /<script src="\/design\/house-mermaid\.js"><\/script>/);
   assert.match(output.design.summary, /does not auto-inject/);
-  assert.match(output.design.summary, /^Use this .*fallback only if/i);
-  assert.match(output.design.summary, /no design direction/i);
-  assert.match(output.design.summary, /check first/i);
+  assert.match(output.design.summary, /when the user asks for it/);
   assert.match(output.design.cdn_snippet, /cdn\.jsdelivr\.net\/npm\/daisyui@/);
   assert.match(output.design.cdn_snippet, /cdn\.jsdelivr\.net\/npm\/daisyui@.*\/themes\.css/);
   assert.match(output.design.cdn_snippet, /cdn\.jsdelivr\.net\/npm\/@tailwindcss\/browser@/);
@@ -391,7 +394,7 @@ test("design output prints copy-pasteable CDN URLs so agents can opt in to Daisy
   assert.match(output.design.other_design_systems, /different design system|other design system/i);
   assert.match(output.whiteboard_tooling.use_when, /^Opt-in only/);
   assert.match(output.whiteboard_tooling.use_when, /asks for an editable whiteboard/);
-  assert.match(output.whiteboard_tooling.use_when, /hand-authored inline SVG per the diagram playbook/);
+  assert.match(output.whiteboard_tooling.use_when, /class="mermaid whiteboard"/);
   assert.match(output.whiteboard_tooling.mermaid_cdn_snippet, /cdn\.jsdelivr\.net\/npm\/mermaid@\d+\.\d+\.\d+/);
   assert.match(output.whiteboard_tooling.mermaid_cdn_snippet, /mermaid\.initialize/);
   assert.match(
@@ -464,14 +467,17 @@ test("explanation playbook routes understanding of existing things and separates
   assert.ok(output.playbook.pitfalls.some((item) => /inferred reasoning as verified fact/i.test(item)));
 });
 
-test("diagram playbook defaults to hand-authored SVG and names the anti-patterns", () => {
+test("diagram playbook defaults to house Mermaid, keeps inline SVG and whiteboards, and names the anti-patterns", () => {
   const output = createPlaybookOutput(["diagram"]);
 
-  assert.ok(output.playbook.choose.some((item) => /Default to hand-authored inline SVG/.test(item)));
-  assert.ok(output.playbook.choose.some((item) => /only when the user asks for an editable whiteboard/i.test(item)));
+  assert.ok(output.playbook.choose.some((item) => /On a house page .* Mermaid .*house-mermaid\.js/.test(item)));
+  assert.ok(output.playbook.choose.some((item) => /Hand-author inline SVG when/.test(item)));
+  assert.ok(output.playbook.choose.some((item) => /editable whiteboard is opt-in/i.test(item)));
   assert.ok(output.playbook.pitfalls.some((item) => /hand-build boxes-and-arrows/i.test(item)));
   assert.ok(output.playbook.pitfalls.some((item) => /div\/flexbox/i.test(item)));
-  assert.ok(output.playbook.pitfalls.some((item) => /reach for Mermaid to save authoring effort/i.test(item)));
+  assert.ok(
+    output.playbook.pitfalls.some((item) => /reach for Mermaid when the layout itself is the message/i.test(item)),
+  );
 });
 
 test("diagram playbook owns assume-nothing and one-concept-per-diagram guidance", async () => {
