@@ -61,12 +61,10 @@ session="$(session_of "$page")"
 [[ -n "$session" ]] || { echo "FAIL no Lavish session for $page"; finish 1; }
 echo "session $session"
 
-node "$repo/scripts/fresh-machine-check.js" "$session" "$page" "$dir/page.png"
-status=$?
-echo "check page exit $status (screenshot $dir/page.png)"
-[[ "$status" == 0 ]] || finish 1
-
-# The controls are copies beside the page, so its relative links and house files still resolve.
+# Each check runs on its own copy beside the page, so relative links and house files still
+# resolve. A question's answer is shared by every page holding it and disables its controls,
+# so the no-prompt control runs before the page answers it; the bad-link control runs last and
+# is judged on its navbar alone.
 stem="${page%.html}"
 node - "$page" "$stem.control-no-prompt.html" "$stem.control-bad-link.html" <<'NODE' || finish 2
 const fs = require("node:fs");
@@ -81,17 +79,36 @@ let replaced = false;
 const broken = html.replace(/<nav[^>]*house-nav[\s\S]*?<\/nav>/i, (nav) =>
   nav.replace(/href="(?!#)[^"]*"/, () => ((replaced = true), 'href="missing-page.html"')),
 );
-if (!replaced) process.exit(1);
-fs.writeFileSync(badLink, broken);
+if (replaced) fs.writeFileSync(badLink, broken);
 NODE
-controls_ok=1
-for control in no-prompt bad-link; do
-  file="$stem.control-$control.html"
-  node "$repo/scripts/fresh-machine-check.js" "$(session_of "$file")" "$file" "$dir/control-$control.png"
+
+# run_check <label> <file> <screenshot>: prints the checker's output and its exit code.
+run_check() {
+  output="$(node "$repo/scripts/fresh-machine-check.js" "$(session_of "$2")" "$2" "$3")"
   status=$?
-  echo "check control-$control exit $status (must be 1)"
-  [[ "$status" == 1 ]] || controls_ok=0
-done
+  echo "$output"
+  echo "check $1 exit $status (screenshot $3)"
+}
+controls_ok=1
+run_check control-no-prompt "$stem.control-no-prompt.html" "$dir/control-no-prompt.png"
+if [[ "$status" != 1 || "$output" != *"question id="* || "$output" != *"FAIL questionReachesServer"* ]]; then
+  echo "control-no-prompt did not fail on a clicked question that never reached the server"
+  controls_ok=0
+fi
+
+run_check page "$page" "$dir/page.png"
+[[ "$status" == 0 ]] || finish 1
+
+if [[ -f "$stem.control-bad-link.html" ]]; then
+  run_check control-bad-link "$stem.control-bad-link.html" "$dir/control-bad-link.png"
+  if [[ "$status" != 1 || "$output" != *"missing-page.html -> "*" BAD"* || "$output" != *"FAIL navLinksOtherPages"* ]]; then
+    echo "control-bad-link did not fail on its missing navbar target"
+    controls_ok=0
+  fi
+else
+  echo "control-bad-link not built: the page's navbar links to no other page"
+  controls_ok=0
+fi
 [[ "$controls_ok" == 1 ]] && finish 0
-echo "FAIL a negative control did not fail"
+echo "FAIL a negative control did not fail as required"
 finish 1
