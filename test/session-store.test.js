@@ -2384,7 +2384,7 @@ test("every accepted prompt enters the chat history with its anchor, in batch or
   });
 });
 
-test("queuePrompts stores the prompt identity on the transcript and not on the agent-facing prompt", async () => {
+test("queuePrompts stores the prompt identity on the transcript and on the pending prompt", async () => {
   await withStore(async ({ store, session }) => {
     const promptId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
     await store.queuePrompts(session.key, {
@@ -2401,7 +2401,7 @@ test("queuePrompts stores the prompt identity on the transcript and not on the a
     });
     const updated = await store.findByKey(session.key);
     assert.equal(updated.chat[0].prompt_id, promptId);
-    assert.equal(updated.prompts[0].prompt_id, undefined);
+    assert.equal(updated.prompts[0].prompt_id, promptId);
     assert.equal(updated.prompts[0].prompt, "Rename this");
   });
 });

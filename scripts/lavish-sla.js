@@ -16,11 +16,11 @@
 //      still running against an ENDED session is killed: an ended session is never re-armed.
 //   3. Ack (received). A Navid entry (role user, not layout-warnings) newer than the first run, not yet
 //      answered, gets ONE reply after ACK_AFTER: `📥 received HH:MM · routed to <owner>` (Dhaka time).
-//      The ack never ticks the note and never counts as an answer. On an install whose `reply --help`
-//      says a reply without --done closes no note (PLAIN_REPLY_CLOSES_NOTHING) it is a plain reply; on
-//      an older install, where a plain reply ticks every delivered note, it passes `--done <ACK_NOTICK>`,
-//      an id no note has. With `reply --ended-ok` a Send & End message on an ended page is acked too,
-//      without reopening it. Flags are probed once per process (restart after an upgrade).
+//      The ack never ticks the note and never counts as an answer: it is a plain `lavish-axi reply`
+//      with no --done, which `reply --help` documents as closing no note (any --done id would close
+//      that note, and one no note has is refused with UNKNOWN_DONE_ID). With `reply --ended-ok` a
+//      Send & End message on an ended page is acked too, without reopening it. That flag is probed
+//      once per process (restart after an upgrade).
 //      An "ANSWER <...> <qid>: <answer>" prompt also sets shared state q:<qid> status=answered in the
 //      page's directory, so every page binding that question disables it and shows the pick, and the
 //      ack reads `✅ YOUR PICK <qid>: <answer> · routed to <owner>`.
@@ -56,10 +56,6 @@ import { pathToFileURL } from "node:url";
 
 export const ACK_MARK = "📥 received";
 export const PICK_MARK = "✅ YOUR PICK";
-// The --done target the ack passes on an older install: it matches no note, so the ack ticks nothing.
-export const ACK_NOTICK = "lavish-sla-ack-notick";
-// The `reply --help` sentence of an install where a reply without --done closes no note.
-export const PLAIN_REPLY_CLOSES_NOTHING = "A reply without --done closes no note";
 const TEST_PAGE = /^(negctl|relaytest)-|^test\.html$|^rt\d+\.html$|^cutover-rt\.html$/;
 const ANSWER = /^ANSWER\b([\s\S]*?)(?:\n|$)/;
 const DHAKA_MS = 6 * 3600 * 1000;
@@ -236,8 +232,6 @@ export class Sla {
     this.noListener = new Map();
     /** @type {Set<string> | null} */
     this.flagSet = null;
-    // Whether this install's plain reply ticks every delivered note (probed with flagSet).
-    this.plainTicks = true;
   }
 
   log(message) {
@@ -355,22 +349,20 @@ export class Sla {
     return pages[s.key] || pages[path.basename(s.file)] || "captain";
   }
 
-  // Which optional `lavish-axi reply` flags this install knows: --done, --ended-ok.
+  // Which optional `lavish-axi reply` flags this install knows: --ended-ok.
   flags() {
     if (!this.flagSet) {
       const h = spawnSync(this.c.lavish, ["reply", "--help"], { encoding: "utf8", timeout: 30_000 });
       const out = `${h.stdout || ""}${h.stderr || ""}`;
-      this.flagSet = new Set(["--done", "--ended-ok"].filter((f) => out.includes(f)));
-      this.plainTicks = !out.includes(PLAIN_REPLY_CLOSES_NOTHING);
+      this.flagSet = new Set(["--ended-ok"].filter((f) => out.includes(f)));
     }
     return this.flagSet;
   }
 
-  // Posts the ack, which must close no note: plain where a plain reply closes nothing, else with
-  // `--done ACK_NOTICK`. `--ended-ok` answers a Send & End message on an ended page without reopening it.
+  // Posts the ack as a plain reply, which closes no note. `--ended-ok` answers a Send & End message
+  // on an ended page without reopening it.
   reply(file, text, ended) {
     const cmd = ["reply", file, "--agent-reply", text];
-    if (this.flags().has("--done") && this.plainTicks) cmd.push("--done", ACK_NOTICK);
     if (ended) cmd.push("--ended-ok");
     const r = spawnSync(this.c.lavish, cmd, { encoding: "utf8", timeout: 30_000 });
     return { rc: r.status ?? 1, out: `${r.stdout || ""}${r.stderr || ""}`.trim().slice(-200) };
