@@ -880,10 +880,12 @@ async function exportCommand(args) {
   const root = path.dirname(absolute);
   const output = path.resolve(flagValue(args, "--out") || path.join(root, exportFileName(absolute)));
   const source = await readFile(absolute, "utf8");
+  const { resolveDesignAssetPath, resolveHouseFallbackPath } = await loadServer();
   const { html, warnings } = await buildSelfContainedHtml(source, {
     baseDir: root,
     confineDir: root,
-    resolveAbsolute: (await loadServer()).resolveDesignAssetPath,
+    resolveAbsolute: resolveDesignAssetPath,
+    resolveMissing: resolveHouseFallbackPath,
   });
   await writeFile(output, html);
   return createExportOutput({
@@ -998,10 +1000,12 @@ export async function shareCommand(args) {
   const absolute = await canonicalFile(request.file);
   const root = path.dirname(absolute);
   const source = await readFile(absolute, "utf8");
+  const { resolveDesignAssetPath, resolveHouseFallbackPath } = await loadServer();
   const { html, warnings } = await buildSelfContainedHtml(source, {
     baseDir: root,
     confineDir: root,
-    resolveAbsolute: (await loadServer()).resolveDesignAssetPath,
+    resolveAbsolute: resolveDesignAssetPath,
+    resolveMissing: resolveHouseFallbackPath,
   });
   const selfPaintWarning = analyzeSelfPaint(source).painted ? undefined : SELF_PAINT_WARNING;
 

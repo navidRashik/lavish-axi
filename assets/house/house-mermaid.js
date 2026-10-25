@@ -1,6 +1,6 @@
-/* Lavish house Mermaid renderer. Canonical copy: ~/.config/opencode/lavish-house/.
-   Copy it next to the artifact and load it as a classic script, not a module:
-     <script src="house-mermaid.js"></script>   (end of <body>, after house.css)
+/* Lavish house Mermaid renderer. Lavish serves it at /design/house-mermaid.js; load it as a
+   classic script, not a module:
+     <script src="/design/house-mermaid.js"></script>   (end of <body>, after house.css)
    Lavish serves artifacts under a sandbox CSP (opaque origin), so a local
    `import "./x.mjs"` is refused by CORS; a classic <script src> is not.
 

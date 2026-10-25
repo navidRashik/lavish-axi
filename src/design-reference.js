@@ -146,17 +146,71 @@ export const REVISION_REGISTRY_SNIPPET = `<script type="application/json" data-l
 </script>
 <section data-lavish-revision="r1">...the block you changed...</section>`;
 
+// The default page: the house theme Lavish serves from /design/, a top bar linking the other
+// pages and this page's sections, a diagram, a one-click question and a closing takeaway.
+export const HOUSE_PAGE_SNIPPET = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Build status</title>
+<link rel="stylesheet" href="/design/house.css">
+</head>
+<body>
+<main>
+<nav class="house-nav" aria-label="Pages">
+  <b>Pages</b>
+  <a href="#summary" aria-current="page" data-lavish-action>This page</a>
+  <a href="OTHER_PAGE_SESSION_URL" target="_blank" rel="noopener" data-lavish-action>↗ Other page</a>
+  <a href="#summary" data-lavish-action>Summary</a>
+  <a href="#decide" data-lavish-action>Decide</a>
+</nav>
+<h1>Build status</h1>
+<p class="sub">One line saying what this page is for.</p>
+<section id="summary" class="card">
+  <div class="mermaid">flowchart LR
+  api[api ✓] --> release([release])
+  worker[worker ✗ 1 test]:::problem --> release</div>
+</section>
+<section id="decide" class="card">
+  <h2>Your call: retry or roll back?</h2>
+  <form data-lavish-question="decide">
+    <label><input type="radio" name="answer" value="retry" checked> Retry (recommended)</label>
+    <label><input type="radio" name="answer" value="roll back"> Roll back</label>
+    <button type="submit">Send answer</button>
+    <span class="sent" hidden>Sent ✓</span>
+  </form>
+</section>
+<p class="take"><b>One-line takeaway:</b> the single sentence the reader must remember.</p>
+</main>
+<script>
+  document.querySelectorAll("form[data-lavish-question]").forEach((form) =>
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const question = form.dataset.lavishQuestion;
+      const answer = new FormData(form).get("answer");
+      if (!answer || !window.lavish) return;
+      window.lavish.queuePrompt(question + ": " + answer, { tag: "choice", text: question + ": " + answer, element: form, data: { question, answer } });
+      window.lavish.sendQueuedPrompts();
+      form.querySelector(".sent").hidden = false;
+    }),
+  );
+</script>
+<script src="/design/house-mermaid.js"></script>
+</body>
+</html>`;
+
 // Single source for how agents choose an artifact's design direction. It flows into the
 // no-args home output, top-level --help (via DESIGN_SYSTEM_HINT), the `lavish-axi design`
 // summary, and the design command help. The installable skill does not embed this rule;
 // it points at `lavish-axi design`. Edit the rule here only.
 export const DESIGN_PRIORITY_RULE =
-  "Decide the design direction in this strict priority order, and only move to the next step when the current one truly yields nothing: (1) if the user asked for a specific look or named design system, use that; (2) otherwise you must first inspect the project the artifact is about - the subject or product whose content or UI it represents, which may differ from your current working directory - and match that project's design system: Tailwind or theme config, shared CSS variables or design tokens, component library, brand assets, or existing styled pages. If the artifact previews, proposes, or mocks a specific app's UI, render it in that app's own design system so it faithfully shows the product, even when you are running in a different repo; (3) only when both steps come up empty, use the Lavish-recommended Tailwind CSS browser runtime v4 + DaisyUI v5, available via CDN, and prefer that CDN snippet over hand-writing styles unless explicitly instructed otherwise by the user.";
+  "Decide the design direction in this strict priority order, and only move to the next step when the current one truly yields nothing: (1) if the user asked for a specific look or named design system, use that; (2) otherwise you must first inspect the project the artifact is about - the subject or product whose content or UI it represents, which may differ from your current working directory - and match that project's design system: Tailwind or theme config, shared CSS variables or design tokens, component library, brand assets, or existing styled pages. If the artifact previews, proposes, or mocks a specific app's UI, render it in that app's own design system so it faithfully shows the product, even when you are running in a different repo; (3) only when both steps come up empty, start from the Lavish house page in `lavish-axi design` (`house.page_snippet`): the house theme Lavish serves at /design/, a top bar linking the other pages, Mermaid diagrams and one-click question forms. Tailwind CSS browser runtime v4 + DaisyUI v5 from the CDN stays available when you want their utility classes or components.";
 
 export const DESIGN_SYSTEM_HINT =
-  "Lavish does not auto-inject any design system - artifacts stay portable so they render identically when opened directly without lavish-axi running. Before writing any HTML: " +
+  "Lavish does not auto-inject any design system into an artifact. Before writing any HTML: " +
   DESIGN_PRIORITY_RULE +
-  " Run `lavish-axi design` for a content-to-playbook router, a copy-pasteable CDN snippet, the whiteboard (Mermaid) opt-in snippet, and the DaisyUI component reference. When you deliver the artifact, state which of the three design sources you used and why.";
+  " Run `lavish-axi design` for a content-to-playbook router, the house page snippet, a copy-pasteable CDN snippet, the whiteboard (Mermaid) opt-in snippet, and the DaisyUI component reference. When you deliver the artifact, state which of the three design sources you used and why.";
 
 export const DAISYUI_THEMES = [
   "light",
@@ -202,11 +256,24 @@ export function createDesignOutput() {
       instruction: PLAYBOOK_ROUTER_INSTRUCTION,
       playbooks: listPlaybooks(),
     },
+    house: {
+      summary:
+        "The default Lavish look when the user gave no design direction and the subject project has no design system to match: " +
+        "start from page_snippet. It links the house theme Lavish serves at /design/ (calm palette as CSS custom properties, light and dark, system fonts only), so the page needs no CDN for its styles. " +
+        DESIGN_PRIORITY_RULE,
+      page_snippet: HOUSE_PAGE_SNIPPET,
+      notes: [
+        'Keep the `<nav class="house-nav">` top bar on every page: the page itself (`aria-current`), one `↗` link per other open page (its session URL from the `lavish-axi <html-file>` output, `target="_blank"`), and one link per section of this page. Every link carries `data-lavish-action` so one click navigates while Annotate is on.',
+        "Diagrams: write Mermaid in a `.mermaid` block; `/design/house-mermaid.js` (end of `<body>`) renders it as a plain SVG themed from the palette, adds a Full screen viewer, and recolours the classDefs `problem`, `ok`, `ctx` and `neutral`. Add class `whiteboard` only when the user asks for an editable whiteboard.",
+        "Questions: one `<form data-lavish-question>` per decision with the recommended option marked; its submit sends the answer at once (`queuePrompt` then `sendQueuedPrompts`), and Lavish shows it as a YOUR CALL card.",
+        'Tabbed pages: panels are `id="tab-<key>"`, the tab script switches on `hashchange` to `#<key>`, and `<script src="/design/house-keep.js"></script>` after the content keeps the open tab and scroll position across live reloads.',
+        "Use `.card` for blocks, `.sub` for the line under the title, `.pill` for short statuses, `.ok` / `.warn` / `.problem` for status words, and `.take` for the closing takeaway. Colours come only from the house.css custom properties (`--bg`, `--card`, `--fg`, `--mut`, `--line`, `--acc`, `--ok`, `--warn`, `--problem`).",
+        "The /design/ paths resolve while Lavish serves the page; `lavish-axi export` inlines them. A page that links `house.css`, `house-mermaid.js` or `house-keep.js` relatively without a copy beside it gets the served files too.",
+      ],
+    },
     design: {
       summary:
-        "Use this Lavish CDN fallback only if (1) the user gave no design direction and (2) you already inspected the project the artifact is about and found no design system or style conventions to match. If you have not checked the subject project yet, check first. Lavish does not auto-inject any design system; artifacts stay portable HTML. Paint an explicit page background and readable text. " +
-        DESIGN_PRIORITY_RULE +
-        " Paste the CDN snippet below into your `<head>`.",
+        "Tailwind CSS + DaisyUI from the CDN: use it when the user asks for it or the page needs DaisyUI components beyond the house theme. With /design/house.css also linked and no `data-theme` on `<html>`, DaisyUI takes the house palette. Lavish does not auto-inject any design system; artifacts stay portable HTML. Paint an explicit page background and readable text. Paste the CDN snippet below into your `<head>`.",
       cdn_snippet: DESIGN_CDN_SNIPPET,
       cdn_urls: DESIGN_CDN_URLS,
       versions: { tailwind: TAILWIND_BROWSER_VERSION, daisyui: DAISYUI_VERSION },
@@ -221,7 +288,7 @@ export function createDesignOutput() {
     },
     whiteboard_tooling: {
       use_when:
-        "Opt-in only: author a diagram as Mermaid in a `.mermaid` container solely when the user asks for an editable whiteboard - Lavish turns it into an Excalidraw whiteboard whose edits come back as feedback. Every other figure is hand-authored inline SVG per the diagram playbook.",
+        'Opt-in only: author a diagram as Mermaid in a `.mermaid` container solely when the user asks for an editable whiteboard - Lavish turns it into an Excalidraw whiteboard whose edits come back as feedback. On a house page add class `whiteboard` (`class="mermaid whiteboard"`) and /design/house-mermaid.js leaves that block to Lavish; every other `.mermaid` block there stays a plain SVG.',
       mermaid_cdn_snippet: MERMAID_CDN_SNIPPET,
       cdn_urls: { mermaid: MERMAID_CDN_URL },
       versions: { mermaid: MERMAID_VERSION },
@@ -242,7 +309,7 @@ export function createDesignOutput() {
       how: 'Append one entry per round to the `data-lavish-revisions` JSON (oldest first, stable `id`s), and put `data-lavish-revision="<id>"` on each block you actually edited or added. Lavish reads them and never restyles the page, so the saved file looks the same opened directly.',
     },
     theme_usage: [
-      'Default to `<html data-theme="luxury">` - it matches the Lavish look. Pick a different theme from the list below only when the user asked for one or the content clearly calls for it.',
+      'With the house theme linked, leave `data-theme` off `<html>` so DaisyUI takes the house palette. Without it, default to `<html data-theme="luxury">`. Pick a different theme from the list below only when the user asked for one or the content clearly calls for it.',
       'Set a nested section theme with `<section data-theme="night">`.',
       "Prefer semantic colors such as `bg-base-100`, `bg-base-200`, `text-base-content`, `bg-primary`, `text-primary-content`, `alert-warning`, and `btn-primary` so themes remain readable.",
       "Avoid hardcoded Tailwind color names for text and surfaces unless the user asked for exact colors.",
