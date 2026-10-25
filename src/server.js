@@ -1585,6 +1585,7 @@ export async function serve({
         baseDir: root,
         confineDir: root,
         resolveAbsolute: resolveDesignAssetPath,
+        resolveMissing: resolveHouseFallbackPath,
       });
       const { unresolved, notices } = splitExportWarnings(warnings);
       // Although this response downloads in normal chrome usage, an escaped artifact popup can
@@ -1631,6 +1632,7 @@ export async function serve({
         baseDir: root,
         confineDir: root,
         resolveAbsolute: resolveDesignAssetPath,
+        resolveMissing: resolveHouseFallbackPath,
       });
       let site;
       try {
@@ -1860,11 +1862,12 @@ export async function serve({
       }
       if (refuseNonArtifact(session, res)) return;
       const root = artifactTreeRoot(session.file);
-      const file = await resolveArtifactAsset(root, assetPath);
+      let file = await resolveArtifactAsset(root, assetPath);
       if (!file) {
         res.status(403).send("Forbidden");
         return;
       }
+      if (!existsSync(file)) file = resolveHouseFallbackPath(file) || file;
       // A navigation to a Markdown file beside the artifact (a link in any page) opens rendered;
       // a script fetch still gets the raw text.
       if (isMarkdownPath(file) && wantsHtml(req) && existsSync(file)) {
@@ -2950,6 +2953,15 @@ export function resolveDesignAssetPath(refPath) {
   if (existsSync(packaged)) return packaged;
   const source = fileURLToPath(asset.source);
   return existsSync(source) ? source : null;
+}
+
+const HOUSE_ASSETS = new Set(["house.css", "house-mermaid.js", "house-keep.js"]);
+
+// A page that links a house file relatively (`house.css` beside the page) but has no copy there
+// gets the packaged file, so the page looks the same on a machine that never had the copies.
+export function resolveHouseFallbackPath(missingPath) {
+  const name = path.basename(missingPath);
+  return HOUSE_ASSETS.has(name) ? resolveDesignAssetPath(`/design/${name}`) : null;
 }
 
 export function exportContentDisposition(file) {

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -117,6 +118,7 @@ const UNRESOLVED_LOCAL_ASSET_WARNING_KINDS = new Set([
  * @param {string} [options.baseDir] Directory to resolve relative references against.
  * @param {(absPath: string, readOptions?: { allowOutsideRoot?: boolean, maxAssetBytes?: number, maxBundleBytes?: number, maxBundleRemaining?: number }) => Promise<Uint8Array>} [options.readLocalFile] Read a local file (default applies the real-path confinement guard).
  * @param {(refPath: string) => (string|null)} [options.resolveAbsolute] Map a root-absolute ref (e.g. /design/x.css) to a local path.
+ * @param {(missingPath: string) => (string|null)} [options.resolveMissing] Map a relative ref whose file does not exist to a local path.
  * @param {string} [options.confineDir] Reject local refs that resolve (lexically or via symlink) outside this directory.
  * @param {number} [options.maxAssetBytes] Per-asset inline cap; larger local files are left as references with a warning.
  * @param {number} [options.maxBundleBytes] Per-bundle inline cap across all inlined local assets.
@@ -133,6 +135,7 @@ export async function buildSelfContainedHtml(html, options = {}) {
       ((absPath, readOptions = {}) =>
         guardedRead(absPath, readOptions.allowOutsideRoot ? null : confineDir, readOptions)),
     resolveAbsolute: typeof options.resolveAbsolute === "function" ? options.resolveAbsolute : () => null,
+    resolveMissing: typeof options.resolveMissing === "function" ? options.resolveMissing : () => null,
     maxAssetBytes: resolveBytes(
       options.maxAssetBytes,
       process.env.LAVISH_AXI_EXPORT_MAX_ASSET_BYTES,
@@ -2371,7 +2374,8 @@ function resolveRef(ref, baseDir, ctx, options = {}) {
   }
   const resolved = resolveLocalPathPreservingTrailingSlash(base.dir, localPath);
   if (ctx.confineDir && isOutside(ctx.confineDir, resolved)) return { kind: "escape", path: resolved };
-  return { kind: "file", path: resolved };
+  const fallback = existsSync(resolved) ? null : ctx.resolveMissing(resolved);
+  return fallback ? { kind: "file", path: fallback, allowOutsideRoot: true } : { kind: "file", path: resolved };
 }
 
 function resolveLocalPathPreservingTrailingSlash(baseDir, localPath) {
