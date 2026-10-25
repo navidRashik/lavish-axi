@@ -158,6 +158,34 @@ code {
   border: 1px solid var(--line);
 }
 
+/* top bar linking the other pages and this page's sections; aria-current marks where you are */
+.house-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: -28px 0 20px;
+  padding: 10px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.house-nav b { color: var(--mut); font-weight: 600; margin-right: 2px; }
+.house-nav a {
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: var(--card);
+  color: var(--fg);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.house-nav a:hover { border-color: var(--acc); }
+.house-nav a[aria-current] { background: var(--acc); border-color: var(--acc); color: var(--on-acc); }
+
 /* status: always paired with an icon or word in the text, never colour alone */
 .ok { color: var(--ok); }
 .warn { color: var(--warn); }
