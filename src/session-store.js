@@ -349,8 +349,7 @@ export class SessionStore {
       ? []
       : acceptedPrompts.map((prompt) => chatEntryForPrompt(prompt, at)).filter(Boolean);
     const existingPrompts = Array.isArray(session.prompts) ? session.prompts : [];
-    const storedPrompts = restoring ? acceptedPrompts : acceptedPrompts.map(agentFacingPrompt);
-    session.prompts = restoring ? [...storedPrompts, ...existingPrompts] : [...existingPrompts, ...storedPrompts];
+    session.prompts = restoring ? [...acceptedPrompts, ...existingPrompts] : [...existingPrompts, ...acceptedPrompts];
     session.chat = [...(session.chat || []), ...userMessages];
     applyTranscriptBound(session);
     if (userMessages.length > 0) session.chat_revision = normalizeRevision(session.chat_revision) + 1;
@@ -1144,15 +1143,6 @@ function roundMessages(session) {
     messages.push(message);
   }
   return messages;
-}
-
-// Settlement identity is transcript-owned. The agent-facing prompt list must not carry it:
-// poll output stays the reviewer's words, and a restore replay never re-appends chat.
-function agentFacingPrompt(prompt) {
-  if (!prompt || typeof prompt !== "object" || prompt.prompt_id === undefined) return prompt;
-  const rest = { ...prompt };
-  delete rest.prompt_id;
-  return rest;
 }
 
 function layoutWarningPromptIds(prompt) {

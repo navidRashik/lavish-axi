@@ -49,11 +49,14 @@ Stamps live on the chat entry (`session.chat[i]`), which already outlives the de
 what the chrome renders. `serializeChat` spreads the entry, so `initialChat` and `chat-sync` carry
 the stamps with no new wire shape.
 
-- **Delivery stamps by position, not by id.** `agentFacingPrompt` strips `prompt_id` from stored
-  prompts at queue time, so ids are gone by the time `takeFeedback` runs. A take drains every
-  pending prompt, and `queuePrompts` runs under the same store lock, so inside `takeFeedback` the
-  set "user entries with no `delivered_at`" is exactly the batch being delivered. Each take increments
-  `session.delivery_seq` and writes it as `delivered_seq` on the entries it stamps.
+- **Delivery stamps by position, not by id.** A take drains every pending prompt, and `queuePrompts`
+  runs under the same store lock, so inside `takeFeedback` the set "user entries with no
+  `delivered_at`" is exactly the batch being delivered, whether or not its prompts carry a
+  `prompt_id`. Each take increments `session.delivery_seq` and writes it as `delivered_seq` on the
+  entries it stamps.
+- **The agent is handed each note's id.** Stored prompts keep their `prompt_id`, so the poll
+  response (and every `watch --feed-dir` log line rendered from it) lists it per prompt, and the
+  feedback `next_step` names the exact `lavish-axi reply <file> --done <id,...>` that closes them.
 - **A disconnected poll un-stamps its own take only.** `restoreClosedFeedback` passes the take's
   `delivery_seq` back; `queuePrompts` in `restore` mode deletes the stamps on entries carrying that
   sequence (delete, not null - the restore tests assert `chat` deep-equals its pre-take shape). Notes
@@ -129,9 +132,9 @@ agent said that exact note is done, so it gets `done_at` and renders the Done st
 - **Stamping on the poll's HTTP 200.** The take is destructive and the response can fail to write;
   stamping before the write and reverting on restore keeps one source of truth (`state.json`) and
   avoids a second bookkeeping path.
-- **Matching delivered prompts to chat entries by `prompt_id`.** Would mean keeping ids on stored
-  prompts and stripping at two boundaries plus the restore path; the positional rule under the lock is
-  shorter and provably equivalent.
+- **Matching delivered prompts to chat entries by `prompt_id`.** Delivered prompts carry their id,
+  but stamping Seen by position under the lock is shorter, provably equivalent, and also covers a
+  prompt with no id.
 - **Marking Done when the agent ends the session.** `lavish-axi end` says the agent is finished with
   the review, not that it handled each note. Those stay Seen.
 - **Session-level only.** That is today's presence stream; it cannot answer "did it see _this_".
