@@ -104,19 +104,25 @@ async function captureCli(args) {
   return output;
 }
 
-// Each address has its own port table, so a port the kernel picks as free on one address can be
-// held on another. Servers under test always bind loopback (IPv4, and IPv6 where the host has it)
-// beside `host`, so the port returned is free on every one of those addresses at once.
+// Each address has its own port table, so a port free on one address can be held on another:
+// servers under test always bind loopback (IPv4, and IPv6 where the host has it) beside `host`,
+// so the port returned is free on every one of those addresses at once. The probes are released
+// before the test binds the port, sometimes seconds later, so the port also comes from below the
+// kernel's ephemeral range (Linux 32768-60999, macOS 49152-65535): a concurrent test file binding
+// port 0, or any outgoing connection, can never be handed it in that gap.
+const TEST_PORT_FIRST = 20_000;
+const TEST_PORT_END = 32_768;
+
 async function freePort(host = "127.0.0.1") {
   const hosts = [...new Set(["127.0.0.1", ...((await ipv6LoopbackAvailable()) ? ["::1"] : []), host])];
   for (let attempt = 1; ; attempt += 1) {
-    const probes = [await listenRaw(hosts[0], 0)];
-    const { port } = /** @type {{ port: number }} */ (probes[0].address());
+    const port = TEST_PORT_FIRST + Math.floor(Math.random() * (TEST_PORT_END - TEST_PORT_FIRST));
+    const probes = [];
     try {
-      for (const other of hosts.slice(1)) probes.push(await listenRaw(other, port));
+      for (const each of hosts) probes.push(await listenRaw(each, port));
       return port;
     } catch (error) {
-      if (attempt >= 20 || /** @type {NodeJS.ErrnoException} */ (error).code !== "EADDRINUSE") throw error;
+      if (attempt >= 50 || /** @type {NodeJS.ErrnoException} */ (error).code !== "EADDRINUSE") throw error;
     } finally {
       await Promise.all(probes.map(closeRaw));
     }
