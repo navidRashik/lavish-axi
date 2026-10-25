@@ -63,23 +63,26 @@ echo "session $session"
 
 # Each check runs on its own copy beside the page, so relative links and house files still
 # resolve. A question's answer is shared by every page holding it and disables its controls,
-# so the no-prompt control runs before the page answers it; the bad-link control runs last and
-# is judged on its navbar alone.
+# so the no-prompt control runs before the page answers it; the controls that run after the
+# page are judged on their navbar alone.
 stem="${page%.html}"
-node - "$page" "$stem.control-no-prompt.html" "$stem.control-bad-link.html" <<'NODE' || finish 2
+node - "$page" "$stem.control-no-prompt.html" "$stem.control-bad-link.html" "$stem.control-no-action.html" <<'NODE' || finish 2
 const fs = require("node:fs");
-const [page, noPrompt, badLink] = process.argv.slice(2);
+const [page, noPrompt, badLink, noAction] = process.argv.slice(2);
 const html = fs.readFileSync(page, "utf8");
 const stub =
   "<script>(() => { const noop = () => {}; const sdk = { queuePrompt: noop, sendQueuedPrompts: noop, answerQuestion: noop," +
   " endSession: noop, getQueuedPrompts: () => [], setStatus: noop, snapshot: noop, getItem: () => null };" +
   ' Object.defineProperty(window, "lavish", { get: () => sdk, set: noop }); })();</script>';
 fs.writeFileSync(noPrompt, html.replace(/<head[^>]*>/i, (head) => head + stub));
+const navbar = /<nav[^>]*house-nav[\s\S]*?<\/nav>/i;
 let replaced = false;
-const broken = html.replace(/<nav[^>]*house-nav[\s\S]*?<\/nav>/i, (nav) =>
+const broken = html.replace(navbar, (nav) =>
   nav.replace(/href="(?!#)[^"]*"/, () => ((replaced = true), 'href="missing-page.html"')),
 );
 if (replaced) fs.writeFileSync(badLink, broken);
+// Without data-lavish-action, Annotate mode treats a click on a navbar link as a note, not a move.
+fs.writeFileSync(noAction, html.replace(navbar, (nav) => nav.replace(/\sdata-lavish-action(="[^"]*")?/g, "")));
 NODE
 
 # run_check <label> <file> <screenshot>: prints the checker's output and its exit code.
@@ -91,7 +94,7 @@ run_check() {
 }
 controls_ok=1
 run_check control-no-prompt "$stem.control-no-prompt.html" "$dir/control-no-prompt.png"
-if [[ "$status" != 1 || "$output" != *"question id="* || "$output" != *"FAIL questionReachesServer"* ]]; then
+if [[ "$status" != 1 || "$output" != *"question clicked:"* || "$output" != *"question id="* || "$output" != *"FAIL questionReachesServer"* ]]; then
   echo "control-no-prompt did not fail on a clicked question that never reached the server"
   controls_ok=0
 fi
@@ -107,6 +110,12 @@ if [[ -f "$stem.control-bad-link.html" ]]; then
   fi
 else
   echo "control-bad-link not built: the page's navbar links to no other page"
+  controls_ok=0
+fi
+
+run_check control-no-action "$stem.control-no-action.html" "$dir/control-no-action.png"
+if [[ "$status" != 1 || "$output" != *"FAIL navClickAnnotateOn"* || "$output" != *"PASS navClickAnnotateOff"* ]]; then
+  echo "control-no-action did not fail on an Annotate-on click while the Annotate-off click still navigates"
   controls_ok=0
 fi
 [[ "$controls_ok" == 1 ]] && finish 0

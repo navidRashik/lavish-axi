@@ -166,19 +166,36 @@ try {
   await wait(10_000);
   const top = { sessionId };
 
+  // The artifact iframe, in either placement: its own auto-attached target (out of process) or
+  // an execution context inside the session tab. Re-resolved after anything reloads the frame.
+  const resolveArtifact = async () => {
+    const { targetInfos } = await send("Target.getTargets");
+    const iframeTarget = targetInfos.find(
+      (info) => iframeSessions.has(info.targetId) && info.url.includes("/artifact/"),
+    );
+    const { frameTree } = await send("Page.getFrameTree", {}, sessionId);
+    const artifactFrame = (frameTree.childFrames || []).find((child) => child.frame.url.includes("/artifact/"));
+    const sameProcessContext = artifactFrame
+      ? contexts.findLast(
+          (context) => context.auxData?.frameId === artifactFrame.frame.id && context.auxData?.isDefault,
+        )
+      : null;
+    const found = iframeTarget
+      ? { sessionId: iframeSessions.get(iframeTarget.targetId) }
+      : sameProcessContext && { sessionId, contextId: sameProcessContext.id };
+    if (!found) throw new Error("the session shows no artifact frame");
+    return { found, frameUrl: iframeTarget ? iframeTarget.url : artifactFrame.frame.url };
+  };
   step("find artifact frame");
-  const { targetInfos } = await send("Target.getTargets");
-  const iframeTarget = targetInfos.find((info) => iframeSessions.has(info.targetId) && info.url.includes("/artifact/"));
-  const { frameTree } = await send("Page.getFrameTree", {}, sessionId);
-  const artifactFrame = (frameTree.childFrames || []).find((child) => child.frame.url.includes("/artifact/"));
-  const sameProcessContext = artifactFrame
-    ? contexts.findLast((context) => context.auxData?.frameId === artifactFrame.frame.id && context.auxData?.isDefault)
-    : null;
-  const artifact = iframeTarget
-    ? { sessionId: iframeSessions.get(iframeTarget.targetId) }
-    : sameProcessContext && { sessionId, contextId: sameProcessContext.id };
-  if (!artifact) throw new Error("the session shows no artifact frame");
-  const artifactUrl = iframeTarget ? iframeTarget.url : artifactFrame.frame.url;
+  let { found: artifact, frameUrl: artifactUrl } = await resolveArtifact();
+  // Top-left of the artifact frame's content box in the session tab, for turning a point inside
+  // the artifact into a mouse position on the tab.
+  const frameOrigin = () =>
+    evaluate(
+      `(() => { const f = document.getElementById("artifact"); const r = f.getBoundingClientRect();
+        return { x: r.left + f.clientLeft, y: r.top + f.clientTop }; })()`,
+      top,
+    );
 
   step("chrome and artifact state");
   Object.assign(
@@ -241,14 +258,11 @@ try {
     artifact,
   );
   if (target) {
-    const frameBox = await evaluate(
-      `(() => { const f = [...document.querySelectorAll("iframe")].find((el) => el.src.includes("/artifact/"));
-        const r = f.getBoundingClientRect(); return { x: r.left + f.clientLeft, y: r.top + f.clientTop }; })()`,
-      top,
-    );
+    const frameBox = await frameOrigin();
     if (target.option) await click(sessionId, frameBox.x + target.option.x, frameBox.y + target.option.y);
     await wait(300);
     await click(sessionId, frameBox.x + target.submit.x, frameBox.y + target.submit.y);
+    console.log(`question clicked: submit control pressed with a real mouse click`);
     step("read the session feedback from the server");
     const origin = new URL(url).origin;
     const response = await fetch(
@@ -266,6 +280,81 @@ try {
     console.log("question: no visible question control to click");
     checks.questionReachesServer = false;
   }
+
+  // A real mouse click on the first navbar link to another page, with the review window's
+  // Annotate switch set as asked. Annotate mode swallows plain link clicks to annotate them, so
+  // only a link marked as a Lavish action navigates while it is on. Passes when a new tab or the
+  // artifact frame lands on a sibling page with HTTP 200 and that page's title.
+  const titleMatches = (title) =>
+    siblingTitles.some((expected) => title === expected || title.startsWith(`${expected} · `));
+  const annotateOn = () =>
+    evaluate(`document.getElementById("annotation")?.getAttribute("aria-pressed") === "true"`, top);
+  const clickNavLink = async (annotate) => {
+    const label = `navclick annotate=${annotate ? "on" : "off"}`;
+    if ((await annotateOn()) !== annotate) {
+      const box = await evaluate(
+        `(() => { const r = document.getElementById("annotation").getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`,
+        top,
+      );
+      await click(sessionId, box.x, box.y);
+      await wait(800);
+    }
+    if ((await annotateOn()) !== annotate) {
+      console.log(`${label}: the Annotate switch did not change`);
+      return false;
+    }
+    const link = await evaluate(
+      `(() => {
+        const a = [...document.querySelectorAll("nav.house-nav a[href]")].find((el) => !el.getAttribute("href").startsWith("#"));
+        if (!a) return null;
+        a.scrollIntoView({ block: "center" });
+        const r = a.getBoundingClientRect();
+        return { href: a.getAttribute("href"), x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      })()`,
+      artifact,
+    );
+    if (!link) {
+      console.log(`${label}: no navbar link to another page`);
+      return false;
+    }
+    const before = new Set((await send("Target.getTargets")).targetInfos.map((info) => info.targetId));
+    const frameId = (await send("Page.getFrameTree", {}, sessionId)).frameTree.childFrames?.find((child) =>
+      child.frame.url.includes("/artifact/"),
+    )?.frame.id;
+    const origin = await frameOrigin();
+    await click(sessionId, origin.x + link.x, origin.y + link.y);
+    await wait(5000);
+    const { targetInfos } = await send("Target.getTargets");
+    const opened = targetInfos.find((info) => info.type === "page" && !before.has(info.targetId));
+    let landed = null;
+    if (opened) {
+      const { sessionId: tab } = await send("Target.attachToTarget", { targetId: opened.targetId, flatten: true });
+      landed = await evaluate(
+        `({ status: performance.getEntriesByType("navigation")[0]?.responseStatus, title: document.title, where: "new tab" })`,
+        { sessionId: tab },
+      );
+      await send("Target.closeTarget", { targetId: opened.targetId });
+    } else {
+      const { frameTree } = await send("Page.getFrameTree", {}, sessionId);
+      const frameUrl = (frameTree.childFrames || []).find((child) => child.frame.id === frameId)?.frame.url || "";
+      if (/^https?:/.test(frameUrl) && frameUrl.split("#")[0] !== artifactUrl.split("#")[0]) {
+        const response = await fetch(frameUrl);
+        landed = { status: response.status, title: titleOf(await response.text()), where: "artifact frame" };
+        await send("Page.reload", {}, sessionId);
+        await wait(8000);
+        ({ found: artifact, frameUrl: artifactUrl } = await resolveArtifact());
+      }
+    }
+    const ok = Boolean(landed && landed.status === 200 && titleMatches(landed.title));
+    console.log(
+      `${label}: clicked ${link.href} -> ${landed ? `${landed.where} ${landed.status} ${JSON.stringify(landed.title)}` : "no navigation"} ${ok ? "ok" : "BAD"}`,
+    );
+    return ok;
+  };
+  step("click a navbar link with Annotate on, then off");
+  checks.navClickAnnotateOn = await clickNavLink(true);
+  checks.navClickAnnotateOff = await clickNavLink(false);
 
   step("follow navbar links to other pages");
   const external = page.links.filter((href) => !href.startsWith("#"));
