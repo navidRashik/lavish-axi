@@ -44,8 +44,12 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const step = (name) => console.error(`step ${name}`);
 
 const profile = mkdtempSync(path.join(tmpdir(), "lavish-check-"));
+// --use-mock-keychain: the check runs under throwaway HOMEs; on macOS, Chrome's network service
+// otherwise waits on a login keychain that HOME does not have, and the first request never
+// completes.
 const browser = spawn(chrome, [
   "--headless=new",
+  "--use-mock-keychain",
   "--remote-debugging-port=0",
   `--user-data-dir=${profile}`,
   "--no-first-run",
@@ -54,7 +58,7 @@ const browser = spawn(chrome, [
 const browserExited = new Promise((resolve) => browser.once("exit", resolve));
 const shutdown = async (code) => {
   socket?.close();
-  browser.kill();
+  browser.kill("SIGKILL");
   await browserExited;
   rmSync(profile, { recursive: true, force: true });
   process.exit(code);
