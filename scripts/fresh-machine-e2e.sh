@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end check of what a brand-new machine gets: build <ref> of this repository, install it
 # globally into a throwaway HOME and npm prefix, install the lavish skill from the installed
-# package the way `npx skills add` does, ask a real agent for a small report page, then check
-# the page in headless Chrome (scripts/fresh-machine-check.js). Exits 0 only when every check
-# passes; 1 when a check fails; 2 on a setup failure.
+# package the way `npx skills add` does, ask a real agent for two linked report pages, then
+# check the one holding the question in headless Chrome (scripts/fresh-machine-check.js).
+# Two negative controls follow on copies of that page - its SDK prompt calls stubbed out, and
+# one navbar link pointed at a missing page - and the checker must fail each one.
+# Exits 0 only when the page passes and both controls fail; 1 otherwise; 2 on a setup failure.
 #
 #   scripts/fresh-machine-e2e.sh <ref> <scratch-dir> [port]
 #
@@ -44,20 +46,52 @@ npm install --global --silent --no-audit --no-fund "$tarball" >/dev/null || die 
 (cd "$HOME" && npx --yes skills add "$dir/prefix/lib/node_modules/lavish-axi" --skill lavish --global --yes >/dev/null 2>&1)
 [[ -f "$HOME/.agents/skills/lavish/SKILL.md" ]] || die "skill install failed"
 
-export LAVISH_E2E_PROMPT="Make me a small report page for this week's build status: 3 services (api, web, worker); api and web are green, worker has 1 failing test (test_retry_backoff). Ask me whether to retry the worker build or roll it back. Open the page with Lavish. Do not wait for my feedback and do not run lavish-axi poll; when the page is open, reply with its file path and URL."
+export LAVISH_E2E_PROMPT="Make me a small two-page report for this week's build status. Page 1, the status page: 3 services (api, web, worker); api and web are green, worker has 1 failing test (test_retry_backoff); ask me whether to retry the worker build or roll it back. Page 2, a details page about the failing test. Link the two pages to each other from each page's top navigation. Open both pages with Lavish. Do not wait for my feedback and do not run lavish-axi poll; when both pages are open, reply with their file paths and URLs."
 agent="${LAVISH_E2E_AGENT:-omp -p --no-session --approval-mode yolo \"\$LAVISH_E2E_PROMPT\"}"
 (cd "$HOME/work" && bash -c "$agent") >"$dir/agent.log" 2>&1
 echo "agent exit $? (log $dir/agent.log)"
 
-page="$(find "$HOME/work" -name '*.html' ! -name '*.export.html' -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -n 1)"
-[[ -n "$page" ]] || { echo "FAIL agent wrote no HTML page"; lavish-axi stop >/dev/null 2>&1; exit 1; }
+finish() { lavish-axi stop >/dev/null 2>&1; echo "exit $1"; exit "$1"; }
+session_of() { lavish-axi "$1" 2>/dev/null | sed -n 's/^ *url: "\(http[^"]*\/session\/[^"]*\)".*/\1/p' | head -n 1; }
+page="$(grep -rl --include='*.html' 'data-lavish-question' "$HOME/work" 2>/dev/null | grep -v '\.export\.html$' | head -n 1)"
+[[ -n "$page" ]] || { echo "FAIL the agent wrote no page with a question"; finish 1; }
 echo "page $page"
-session="$(lavish-axi "$page" 2>/dev/null | sed -n 's/^ *url: "\(http[^"]*\/session\/[^"]*\)".*/\1/p' | head -n 1)"
-[[ -n "$session" ]] || { echo "FAIL no Lavish session for $page"; lavish-axi stop >/dev/null 2>&1; exit 1; }
+for other in "$(dirname "$page")"/*.html; do [[ "$other" == "$page" ]] || session_of "$other" >/dev/null; done
+session="$(session_of "$page")"
+[[ -n "$session" ]] || { echo "FAIL no Lavish session for $page"; finish 1; }
 echo "session $session"
 
-node "$repo/scripts/fresh-machine-check.js" "$session" "$dir/page.png"
+node "$repo/scripts/fresh-machine-check.js" "$session" "$page" "$dir/page.png"
 status=$?
-lavish-axi stop >/dev/null 2>&1
-echo "screenshot $dir/page.png"
-exit "$status"
+echo "check page exit $status (screenshot $dir/page.png)"
+[[ "$status" == 0 ]] || finish 1
+
+# The controls are copies beside the page, so its relative links and house files still resolve.
+stem="${page%.html}"
+node - "$page" "$stem.control-no-prompt.html" "$stem.control-bad-link.html" <<'NODE' || finish 2
+const fs = require("node:fs");
+const [page, noPrompt, badLink] = process.argv.slice(2);
+const html = fs.readFileSync(page, "utf8");
+const stub =
+  "<script>(() => { const noop = () => {}; const sdk = { queuePrompt: noop, sendQueuedPrompts: noop, answerQuestion: noop," +
+  " endSession: noop, getQueuedPrompts: () => [], setStatus: noop, snapshot: noop, getItem: () => null };" +
+  ' Object.defineProperty(window, "lavish", { get: () => sdk, set: noop }); })();</script>';
+fs.writeFileSync(noPrompt, html.replace(/<head[^>]*>/i, (head) => head + stub));
+let replaced = false;
+const broken = html.replace(/<nav[^>]*house-nav[\s\S]*?<\/nav>/i, (nav) =>
+  nav.replace(/href="(?!#)[^"]*"/, () => ((replaced = true), 'href="missing-page.html"')),
+);
+if (!replaced) process.exit(1);
+fs.writeFileSync(badLink, broken);
+NODE
+controls_ok=1
+for control in no-prompt bad-link; do
+  file="$stem.control-$control.html"
+  node "$repo/scripts/fresh-machine-check.js" "$(session_of "$file")" "$file" "$dir/control-$control.png"
+  status=$?
+  echo "check control-$control exit $status (must be 1)"
+  [[ "$status" == 1 ]] || controls_ok=0
+done
+[[ "$controls_ok" == 1 ]] && finish 0
+echo "FAIL a negative control did not fail"
+finish 1
