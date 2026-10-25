@@ -104,12 +104,23 @@ async function captureCli(args) {
   return output;
 }
 
+// Each address has its own port table, so a port the kernel picks as free on one address can be
+// held on another. Servers under test always bind loopback (IPv4, and IPv6 where the host has it)
+// beside `host`, so the port returned is free on every one of those addresses at once.
 async function freePort(host = "127.0.0.1") {
-  const probe = createServer();
-  await new Promise((resolve) => probe.listen({ port: 0, host }, () => resolve(undefined)));
-  const { port } = /** @type {{ port: number }} */ (probe.address());
-  await new Promise((resolve) => probe.close(() => resolve(undefined)));
-  return port;
+  const hosts = [...new Set(["127.0.0.1", ...((await ipv6LoopbackAvailable()) ? ["::1"] : []), host])];
+  for (let attempt = 1; ; attempt += 1) {
+    const probes = [await listenRaw(hosts[0], 0)];
+    const { port } = /** @type {{ port: number }} */ (probes[0].address());
+    try {
+      for (const other of hosts.slice(1)) probes.push(await listenRaw(other, port));
+      return port;
+    } catch (error) {
+      if (attempt >= 20 || /** @type {NodeJS.ErrnoException} */ (error).code !== "EADDRINUSE") throw error;
+    } finally {
+      await Promise.all(probes.map(closeRaw));
+    }
+  }
 }
 
 async function listenRaw(host, port) {
