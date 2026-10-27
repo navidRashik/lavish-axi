@@ -7051,3 +7051,41 @@ test("the draft route takes a closing tab's beacon body and refuses other origin
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("a save in flight when its tab sends lands after the send as sent, and the tab's next save is kept", async () => {
+  const { dir, server, base, key } = await openSyntheticSession("lavish-draft-sent-");
+  const post = (route, body) =>
+    fetch(`${base}/api/${key}/${route}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify(body),
+    });
+  try {
+    assert.equal((await post("draft", { composer: "original", tab: "t", revision: 1, base: 0 })).status, 200);
+    // Revision 2 ("original words") is on the wire when Enter sends those words naming revision 2.
+    const sent = await post("prompts", {
+      draft_tab: "t",
+      draft_revision: 2,
+      prompts: [
+        { uid: "", prompt: "original words", selector: "", tag: "message", text: "Freeform message", prompt_id: "m-1" },
+      ],
+    });
+    assert.equal(sent.status, 200);
+
+    const late = await post("draft", { composer: "original words", tab: "t", revision: 2, base: 1 });
+    assert.equal(late.status, 409);
+    assert.deepEqual(await late.json(), {
+      status: "sent",
+      error: "this tab sent its words after this save was made",
+      draft_seq: 1,
+    });
+
+    const followUp = await post("draft", { composer: "follow-up", tab: "t", revision: 3, base: 1 });
+    assert.equal(followUp.status, 200);
+    const state = JSON.parse(await readFile(path.join(dir, "state.json"), "utf8"));
+    assert.equal(state.sessions[key].draft.composer, "follow-up");
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

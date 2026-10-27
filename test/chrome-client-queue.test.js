@@ -9864,10 +9864,10 @@ test("a follow-up typed while a send waits on its snapshot keeps saving after th
   assert.ok(sent, JSON.stringify(posts.map((post) => post.url)));
 
   // The follow-up save lands after the send. The server refuses a save at or below the revision the
-  // send named; this one was stamped after Enter, so it is kept.
+  // send named as `sent`; this one was stamped after Enter, so it is kept.
   answerFollowUpSave(
     followUp.revision <= sent.body.draft_revision
-      ? { ok: false, status: 409, json: async () => ({ status: "stale", draft_seq: 2 }) }
+      ? { ok: false, status: 409, json: async () => ({ status: "sent", draft_seq: 2 }) }
       : saved(2),
   );
   for (let i = 0; i < 3; i += 1) await flushPromises();
@@ -9910,4 +9910,46 @@ test("a tab with no queue of its own starts from the draft a closed tab left on 
     [["From the closed tab", "draft-1"]],
   );
   assert.equal(chrome.element("chatInput").value, "Unfinished sentence");
+});
+
+test("a save in flight at Enter that the server refuses as sent leaves the tab saving its follow-up", async () => {
+  /** @type {(response: any) => void} */
+  let answerHeldSave = () => {};
+  const heldSave = new Promise((resolve) => {
+    answerHeldSave = resolve;
+  });
+  const saved = (draftSeq) => ({ ok: true, status: 200, json: async () => ({ status: "saved", draft_seq: draftSeq }) });
+  const chrome = await createChromeHarness({ draftResponses: [saved(1), heldSave, saved(2)] });
+  chrome.element("chatInput").value = "original";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  // The save of "original words" is on the wire when Enter sends those words.
+  chrome.element("chatInput").value = "original words";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+  chrome.submit();
+  chrome.sendSnapshot("uid=1 body");
+  chrome.element("chatInput").value = "follow-up";
+  chrome.element("chatInput").dispatch("input");
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  answerHeldSave({
+    ok: false,
+    status: 409,
+    json: async () => ({ status: "sent", error: "this tab sent its words after this save was made", draft_seq: 1 }),
+  });
+  for (let i = 0; i < 6; i += 1) await flushPromises();
+  chrome.runTimers(400);
+  for (let i = 0; i < 3; i += 1) await flushPromises();
+
+  assert.doesNotMatch(chrome.element("sendHint").textContent, /Another tab changed this page's unsent notes/);
+  assert.deepEqual(
+    chrome.draftRequests.map((request) => request.body.composer),
+    ["original", "original words", "follow-up"],
+  );
+  chrome.dispatchWindowEvent("pagehide");
+  assert.equal(chrome.beacons.length, 0, "the follow-up is already saved, so the closing beacon has nothing to add");
 });
