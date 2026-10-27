@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "npx --yes hyperframes@0.5.7 preview",
+    "dev": "node init && npx --yes hyperframes@0.5.7 preview",
     "check": "npx --yes hyperframes@0.5.7 lint && npx --yes hyperframes@0.5.7 validate && npx --yes hyperframes@0.5.7 inspect",
     "render": "npx --yes hyperframes@0.5.7 render",
     "publish": "npx --yes hyperframes@0.5.7 publish"
