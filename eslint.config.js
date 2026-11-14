@@ -4,7 +4,6 @@ import eslintConfigPrettier from "eslint-config-prettier/flat";
 import { defineConfig } from "eslint/config";
 import globals from "globals";
 
-
 export default defineConfig(js.configs.recommended, eslintConfigPrettier, {
   files: ["**/*.js"],
   ignores: ["dist/", "node_modules/", ".lavish-axi/", "lavish-code-review.html"],
@@ -18,3 +17,4 @@ export default defineConfig(js.configs.recommended, eslintConfigPrettier, {
   rules: {
     "no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
   },
+});
