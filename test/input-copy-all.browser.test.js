@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -12,7 +12,6 @@ import { parse } from "parse5";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const playbooksPath = process.env.LAVISH_AXI_PLAYBOOKS_MODULE || path.join(repoRoot, "src/playbooks.js");
 const { PLAYBOOKS } = await import(pathToFileURL(playbooksPath).href);
-let chromeLaunchState;
 
 async function chromePath() {
   const candidates = [
@@ -32,38 +31,6 @@ async function chromePath() {
     }
   }
   return "";
-}
-
-async function headlessChromeState(chrome) {
-  if (chromeLaunchState) return chromeLaunchState;
-  const root = await mkdtemp(path.join(os.tmpdir(), "lavish-copy-all-probe-"));
-  try {
-    const result = spawnSync(
-      chrome,
-      [
-        "--headless=new",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--no-sandbox",
-        `--user-data-dir=${path.join(root, "chrome-profile")}`,
-        "--use-mock-keychain",
-        "--password-store=basic",
-        "--dump-dom",
-        "about:blank",
-      ],
-      { stdio: "ignore", timeout: 15_000 },
-    );
-    chromeLaunchState =
-      result.status === 0
-        ? { available: true }
-        : {
-            available: false,
-            reason: `Chrome or Chromium could not launch headless (${result.signal || `exit ${result.status}`})`,
-          };
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-  return chromeLaunchState;
 }
 
 function copyAllHtmlSnippet() {
@@ -144,7 +111,16 @@ function probeScript(scenario, { clicks = 1 } = {}) {
   </script>`;
 }
 
-function dumpChromeDom(chrome, args, timeoutMs) {
+// A healthy headless Chrome requests the fixture page within about 5 s, even with every core busy.
+// A launch that has not requested it after CHROME_LAUNCH_MS hung before running any page code and
+// never recovers on its own, so that launch is killed and Chrome is started once more with a fresh
+// profile. Once the page has been requested, a stall fails the test: nothing after that is retried.
+// A Chrome binary that is present but cannot serve a page therefore fails these tests; only a
+// missing binary skips them.
+const CHROME_LAUNCH_MS = 10_000;
+const CHROME_PAGE_MS = 30_000;
+
+function dumpChromeDom(chrome, args, pageRequested) {
   return new Promise((resolve, reject) => {
     const child = spawn(chrome, args, { detached: true, stdio: ["ignore", "pipe", "ignore"] });
     let stdout = "";
@@ -164,9 +140,19 @@ function dumpChromeDom(chrome, args, timeoutMs) {
       if (error) reject(error);
       else resolve(stdout);
     };
-    const timer = setTimeout(() => finish(new Error("Chrome did not dump the fixture DOM in time")), timeoutMs);
+    let timer = setTimeout(
+      () => finish(Object.assign(new Error("Chrome never requested the fixture page"), { code: "CHROME_LAUNCH_HUNG" })),
+      CHROME_LAUNCH_MS,
+    );
+    pageRequested.then(() => {
+      if (settled) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => finish(new Error("Chrome did not dump the fixture DOM in time")), CHROME_PAGE_MS);
+    });
     child.on("error", finish);
-    child.on("exit", (code) => {
+    // 'exit' can arrive while Chrome's last stdout chunk is still unread; 'close' comes only after
+    // stdout has been drained, so the dump is judged complete or not on everything Chrome wrote.
+    child.on("close", (code) => {
       if (!settled) finish(new Error(`Chrome exited before dumping the fixture DOM (${code})`));
     });
     child.stdout.setEncoding("utf8");
@@ -208,15 +194,12 @@ async function runBrowserScenario(t, scenario, fixture, options = {}) {
     t.skip("Chrome or Chromium is required for the standalone copy behavior regression");
     return null;
   }
-  const launchState = await headlessChromeState(chrome);
-  if (!launchState.available) {
-    t.skip(launchState.reason);
-    return null;
-  }
   const root = await mkdtemp(path.join(os.tmpdir(), "lavish-copy-all-"));
   const fixtureHtml = typeof fixture === "string" ? fixture : fixture ? fixtureQuestions() : "";
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Standalone answers</title></head><body>${fixtureHtml}${snippet}${probeScript(scenario, options)}</body></html>`;
+  let pageRequestedNow = () => {};
   const server = http.createServer((_request, response) => {
+    pageRequestedNow();
     response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
     response.end(html);
   });
@@ -228,23 +211,32 @@ async function runBrowserScenario(t, scenario, fixture, options = {}) {
     });
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server did not bind to a TCP port");
-    const stdout = await dumpChromeDom(
-      chrome,
-      [
-        "--headless=new",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--no-sandbox",
-        `--user-data-dir=${path.join(root, "chrome-profile")}`,
-        "--use-mock-keychain",
-        "--password-store=basic",
-        "--run-all-compositor-stages-before-draw",
-        "--virtual-time-budget=5000",
-        "--dump-dom",
-        `http://127.0.0.1:${address.port}/`,
-      ],
-      30_000,
-    );
+    const launch = (attempt) => {
+      const pageRequested = new Promise((resolve) => {
+        pageRequestedNow = () => resolve(undefined);
+      });
+      return dumpChromeDom(
+        chrome,
+        [
+          "--headless=new",
+          "--disable-gpu",
+          "--disable-dev-shm-usage",
+          "--no-sandbox",
+          `--user-data-dir=${path.join(root, `chrome-profile-${attempt}`)}`,
+          "--use-mock-keychain",
+          "--password-store=basic",
+          "--run-all-compositor-stages-before-draw",
+          "--virtual-time-budget=5000",
+          "--dump-dom",
+          `http://127.0.0.1:${address.port}/`,
+        ],
+        pageRequested,
+      );
+    };
+    const stdout = await launch(1).catch((error) => {
+      if (error.code !== "CHROME_LAUNCH_HUNG") throw error;
+      return launch(2);
+    });
     const result = resultFromDump(stdout);
     assert.ok(result, "browser fixture did not report a result");
     assert.equal(result.error, undefined, result.error);
@@ -252,7 +244,10 @@ async function runBrowserScenario(t, scenario, fixture, options = {}) {
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
-    await rm(root, { recursive: true, force: true });
+    // Killing Chrome's process group does not stop every writer at once: helpers take a moment to
+    // die and the crashpad handler runs in a session of its own, so files can still appear in the
+    // profile while it is being removed (ENOTEMPTY). The removal retries until they stop.
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 }
 
