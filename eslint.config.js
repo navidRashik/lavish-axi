@@ -3,10 +3,6 @@ import js from "@eslint/js";
 import eslintConfigPrettier from "eslint-config-prettier/flat";
 import { defineConfig } from "eslint/config";
 import globals from "globals";
-import { createRequire } from 'module';
-
-var require = createRequire(import.meta.url);
-var module = { exports: {} };
 
 export default defineConfig(js.configs.recommended, eslintConfigPrettier, {
   files: ["**/*.js"],
